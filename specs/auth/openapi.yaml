@@ -1,0 +1,777 @@
+openapi: 3.0.3
+info:
+  title: CamaraSim Authorization Server
+  description: |
+    OpenID Connect / OAuth2 authorization surface for CamaraSim, per the CAMARA
+    **Security & Interoperability Profile** (see docs/DESIGN.md §6).
+
+    This spec is authored (not vendored from an upstream API) because it describes
+    the simulator's own auth server rather than a CAMARA business API. It grows one
+    endpoint per pass; endpoints advertised in the discovery document but not yet
+    listed here are implemented in later passes.
+
+    ## Protecting CAMARA endpoints (resource-server verification)
+
+    CAMARA business endpoints are protected: the caller presents the access token
+    issued here as an HTTP Bearer credential (RFC 6750), and the simulator verifies
+    it before serving the request. The verification middleware checks:
+
+      - **Signature** — the JWT header `alg` must be exactly `RS256` (an `alg: none`
+        or HMAC token is rejected outright) and the signature must verify under the
+        public key published at `/oauth2/jwks`.
+      - **Expiry** — `exp` is required and must be in the future.
+      - **Audience** — `aud` must contain the resource server's identifier (the
+        issuer base URL), so a token minted for one host is not accepted by another.
+      - **Scope** — each endpoint additionally requires its own CAMARA purpose
+        scope (e.g. `dpv:FraudPreventionAndDetection#check-sim-swap`).
+
+    On failure the response is the CAMARA error body (`CamaraError`) with an
+    RFC 6750 `WWW-Authenticate` challenge: a missing / malformed / bad-signature /
+    expired / wrong-audience token yields **401 `UNAUTHENTICATED`**; a valid token
+    lacking the required scope yields **403 `PERMISSION_DENIED`**. The reusable
+    `securitySchemes.camaraOAuth`, `responses.Unauthenticated`, and
+    `responses.PermissionDenied` below are referenced by the individual API specs.
+  version: 0.0.1
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+servers:
+  - url: /
+paths:
+  /.well-known/openid-configuration:
+    get:
+      operationId: getOpenidConfiguration
+      summary: OIDC discovery document
+      description: |
+        Returns the OpenID Connect discovery metadata (OpenID Connect Discovery 1.0
+        / RFC 8414) for the CamaraSim authorization server.
+
+        Absolute endpoint URLs are derived from the request. The base URL is, in
+        order of precedence:
+          1. the `CAMARASIM_ISSUER` environment variable, if set; otherwise
+          2. `X-Forwarded-Proto` (default `http`) + `Host` (default
+             `localhost:8080`).
+
+        The document advertises the full CAMARA auth surface: the three grant types
+        (`client_credentials`, `authorization_code`, and CIBA), RS256 token signing,
+        S256 PKCE, and CIBA `poll` delivery.
+      responses:
+        "200":
+          description: Discovery metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenIdConfiguration"
+              example:
+                issuer: http://localhost:8080
+                authorization_endpoint: http://localhost:8080/oauth2/authorize
+                token_endpoint: http://localhost:8080/oauth2/token
+                jwks_uri: http://localhost:8080/oauth2/jwks
+                backchannel_authentication_endpoint: http://localhost:8080/bc-authorize
+                response_types_supported: [code]
+                grant_types_supported:
+                  - client_credentials
+                  - authorization_code
+                  - urn:openid:params:grant-type:ciba
+                token_endpoint_auth_methods_supported:
+                  - client_secret_basic
+                  - client_secret_post
+                  - private_key_jwt
+                subject_types_supported: [public]
+                id_token_signing_alg_values_supported: [RS256]
+                code_challenge_methods_supported: [S256]
+                scopes_supported: [openid]
+                backchannel_token_delivery_modes_supported: [poll]
+                backchannel_authentication_request_signing_alg_values_supported: [RS256]
+                backchannel_user_code_parameter_supported: false
+  /oauth2/jwks:
+    get:
+      operationId: getJwks
+      summary: JSON Web Key Set
+      description: |
+        Returns the JWK Set (RFC 7517) containing the public key(s) used to
+        verify the signatures of JWTs issued by the token endpoint. This is the
+        `jwks_uri` advertised by the discovery document.
+
+        The simulator holds a single **fixed, public, simulator-only** RSA key
+        (RS256). Because the key is fixed and bundled in the binary, this
+        document is deterministic across boots and processes — clients and tests
+        may rely on a stable `kid`. The key is not secret and must never be used
+        to protect anything real.
+
+        Each key is published as an RSA JWK with `use: "sig"`, `alg: "RS256"`, a
+        stable `kid`, and base64url-encoded modulus (`n`) and exponent (`e`).
+      responses:
+        "200":
+          description: The JWK Set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JwkSet"
+              example:
+                keys:
+                  - kty: RSA
+                    use: sig
+                    alg: RS256
+                    kid: camarasim-rs256-1
+                    n: sZF66T5sGVzmmAJcP9oQkfEtklHIsVGAtmmXaYTOX_c5Xde6bX4SrXIgsvr3lJ9gm-6y9IL0_Da69kiMR4iK1AAoNWa2spRTXPbzFTAue3nU0PJ-PR3OT-x7RZOMI0JvgWME3AVkDlWM5kbtaf84RibIqyJqO9xhNAjfkMJDCpkj-qhUz7U_Eync2Gk8GmLBo1LOLYyzGCn6IG5dHUmjIgP7Q2PEoXftB0Z1l7S2yx46i3XvIjSpEixsqEjbLpoEBqH7xlc_UKBZzK5Tm3qjBhOH7W_tcj9CdhrPDjdt9rKo85d8lTpz2Za4hTrtx12eO31hGjmPQVVS4F53MYdosQ
+                    e: AQAB
+  /oauth2/authorize:
+    get:
+      operationId: authorize
+      summary: OAuth2 authorization endpoint (authorization_code + PKCE)
+      description: |
+        The front leg of the **`authorization_code` + PKCE** grant (RFC 6749 §3.1,
+        RFC 7636), the CAMARA three-legged flow (docs/DESIGN.md §6). A client
+        redirects the user agent here; the server issues a short-lived
+        authorization `code` and redirects (HTTP 302) back to the client's
+        `redirect_uri`. The client then redeems the code at `POST /oauth2/token`
+        with `grant_type=authorization_code`.
+
+        ### Simulator functional cases (docs/DESIGN.md §7)
+
+        CamaraSim is headless, so this endpoint **auto-consents**: there is no login
+        or consent screen — a well-formed request is granted immediately. The shape
+        of the flow is still enforced faithfully:
+
+        - **PKCE is mandatory and must be S256.** `code_challenge` is required and
+          `code_challenge_method` must equal `S256`; the RFC 7636 `plain` default is
+          rejected. The challenge is bound to the code and checked at redemption.
+        - **`response_type` must be `code`.** Any other value is rejected.
+        - **Scope** is carried through verbatim to the issued token. Any requested
+          CAMARA **purpose scope** (a token of the form
+          `dpv:<Purpose>#<action>`, e.g. `dpv:FraudPreventionAndDetection#check-sim-swap`)
+          must be well-formed; a malformed `dpv:` token (missing purpose or
+          action, or more than one `#`) is rejected with `invalid_scope`.
+          Non-`dpv:` technical scopes (`openid`, …) pass untouched.
+        - **`redirect_uri`** must be an absolute URI; it is bound to the code and
+          must match exactly when the code is redeemed.
+        - **`state`**, if supplied, is echoed back on both success and error
+          redirects (CSRF protection, RFC 6749 §4.1.1).
+
+        ### Error handling (RFC 6749 §4.1.2.1)
+
+        - If `client_id` or `redirect_uri` is missing or invalid, the server cannot
+          safely redirect (that would be an open redirector), so it responds
+          **directly** with an `OAuthError` body (HTTP 400).
+        - Otherwise the error is delivered **by redirect** to `redirect_uri` as
+          `error` / `error_description` (plus `state`): a non-`code`
+          `response_type` yields `unsupported_response_type`; a missing/`plain`
+          PKCE challenge yields `invalid_request`; a malformed purpose scope
+          yields `invalid_scope`.
+      parameters:
+        - name: response_type
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [code]
+          description: Must be `code` (authorization code flow).
+        - name: client_id
+          in: query
+          required: true
+          schema:
+            type: string
+          description: The client identifier. Any non-empty value is accepted.
+        - name: redirect_uri
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uri
+          description: |
+            Absolute URI the code is delivered to. Bound to the code and re-checked
+            (exact match) at the token endpoint.
+        - name: scope
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Space-delimited scopes, carried through to the issued token. A CAMARA
+            purpose scope (`dpv:<Purpose>#<action>`) must be well-formed or the
+            request is rejected with `invalid_scope`.
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Opaque value echoed back on the redirect (CSRF protection).
+        - name: code_challenge
+          in: query
+          required: true
+          schema:
+            type: string
+          description: PKCE S256 code challenge (RFC 7636). Required.
+        - name: code_challenge_method
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [S256]
+          description: Must be `S256`; `plain` is not accepted.
+      responses:
+        "302":
+          description: |
+            Auto-consent granted (success) **or** a redirectable error. The
+            `Location` header carries the client's `redirect_uri` with either
+            `code` (+ `state`) on success, or `error` / `error_description`
+            (+ `state`) on error.
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+              description: |
+                On success: `<redirect_uri>?code=<code>&state=<state>`.
+                On error: `<redirect_uri>?error=<code>&error_description=<text>&state=<state>`.
+            Cache-Control:
+              schema:
+                type: string
+              description: Always `no-store` (the redirect carries a fresh code).
+        "400":
+          description: |
+            The request could not be redirected safely because `client_id` or
+            `redirect_uri` was missing or invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+              example:
+                error: invalid_request
+                error_description: the 'redirect_uri' parameter is required
+  /bc-authorize:
+    post:
+      operationId: backchannelAuthenticate
+      summary: CIBA backchannel authentication endpoint
+      description: |
+        Starts the **CIBA** flow (`urn:openid:params:grant-type:ciba`), the CAMARA
+        backchannel grant (docs/DESIGN.md §6; OpenID Connect CIBA Core 1.0). Unlike
+        `authorization_code`, the client never redirects the user agent: it calls
+        this endpoint out of band with a `login_hint` identifying the end user and
+        gets back an `auth_req_id`, then **polls** `POST /oauth2/token`
+        (`grant_type=urn:openid:params:grant-type:ciba`, `auth_req_id=<id>`) until
+        the end user authorizes. The CAMARA profile uses `poll` delivery.
+
+        The request body is `application/x-www-form-urlencoded`.
+
+        ### Simulator functional cases (docs/DESIGN.md §7)
+
+        CamaraSim is headless — there is no device to prompt — so the **`login_hint`
+        is the control plane** and deterministically selects the authorization
+        outcome the later token poll resolves to:
+
+        - **default** → the request is **approved** immediately; the first poll
+          returns an access token.
+        - `login_hint` containing **`pending`** → stays `authorization_pending`;
+          every poll returns that error (models an end user who has not yet acted).
+        - `login_hint` containing **`denied`** → `access_denied`; the end user
+          rejected the request. (`denied` wins if both markers are present.)
+
+        Client authentication works exactly as at the token endpoint
+        (`client_secret_basic` or `client_secret_post`; any secret accepted). The
+        issued `auth_req_id` is single-use on success (consumed when the token is
+        issued) and expires after `expires_in` seconds.
+
+        Errors use the OAuth2 format (RFC 6749 §5.2) with `Cache-Control: no-store`:
+          - missing `login_hint` or `scope` → `invalid_request` (400)
+          - a malformed requested purpose scope (`dpv:<Purpose>#<action>`) →
+            `invalid_scope` (400)
+          - no client authentication → `invalid_client` (401)
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/BackchannelAuthenticationRequest"
+      responses:
+        "200":
+          description: Backchannel authentication request accepted.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: Always `no-store`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackchannelAuthenticationResponse"
+              example:
+                auth_req_id: 1c266114-a1be-4252-8ad1-04986c5b9ac1
+                expires_in: 120
+                interval: 5
+        "400":
+          description: |
+            Missing `login_hint` or `scope` (`invalid_request`), or a malformed
+            requested purpose scope (`invalid_scope`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+              example:
+                error: invalid_request
+                error_description: the 'login_hint' parameter is required
+        "401":
+          description: Client authentication failed / missing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+              example:
+                error: invalid_client
+                error_description: client authentication required (client_secret_basic or client_secret_post)
+  /oauth2/token:
+    post:
+      operationId: token
+      summary: OAuth2 token endpoint
+      description: |
+        Issues access tokens (RFC 6749 §3.2). The request body is
+        `application/x-www-form-urlencoded`.
+
+        **Implemented grants** (docs/DESIGN.md §6):
+
+        - `client_credentials` (RFC 6749 §4.4) — the CAMARA two-legged flow for
+          APIs that need no end-user context.
+        - `authorization_code` + PKCE (RFC 6749 §4.1.3, RFC 7636) — redeems a code
+          minted by `GET /oauth2/authorize` for an access token.
+        - `urn:openid:params:grant-type:ciba` (OpenID CIBA Core §10.1) — the
+          backchannel **poll**: redeems an `auth_req_id` from `POST /bc-authorize`.
+
+        **Issued token.** A real, signed **RS256** JWT with an `at+jwt` header
+        (RFC 9068) whose `kid` matches the key published at `/oauth2/jwks`, so
+        clients can verify it. Claims: `iss`, `aud` (both the issuer base URL),
+        `sub` and `client_id` (the authenticated client), `scope` (the granted
+        scope string), `iat`, `exp` (`iat` + 3600s), and a unique `jti`.
+
+        ### Simulator functional cases (docs/DESIGN.md §7)
+
+        The simulator authenticates the **shape** of the flow, not real secrets:
+
+        - **Client authentication** is required. The `client_id` is resolved from
+          either `client_secret_basic` (HTTP Basic `Authorization` header) or
+          `client_secret_post` (`client_id` form field). Any secret value is
+          accepted. If no `client_id` can be resolved the request fails with
+          `invalid_client` (HTTP 401).
+        - **Scope selection.** The requested `scope` (space-delimited) is granted
+          verbatim: it becomes the token's `scope` claim and the response `scope`.
+          Omit `scope` for an empty grant (no `scope` in the response). Any
+          requested CAMARA **purpose scope** (`dpv:<Purpose>#<action>`, e.g.
+          `dpv:FraudPreventionAndDetection#check-sim-swap`) must be well-formed; a
+          malformed `dpv:` token — missing purpose or action, or more than one
+          `#` — is rejected with `invalid_scope` (400) before any token is issued.
+          Non-`dpv:` technical scopes pass untouched. (`client_credentials` only;
+          for `authorization_code` and CIBA the scope is fixed and validated at the
+          `/oauth2/authorize` / `/bc-authorize` request.)
+        - **Expiry** is fixed at 3600 seconds (`expires_in`).
+
+        For the **`authorization_code`** grant the request carries `code`,
+        `redirect_uri`, `client_id`, and the PKCE `code_verifier`. The code is
+        **single-use** (consumed on redemption); the token's `aud` is the audience
+        the user authorized against and its `sub` is the simulator's synthetic
+        resource owner (`camarasim-user`, as there is no real end-user login).
+        Redemption fails with `invalid_grant` (400) when the code is unknown /
+        expired / already used, the `redirect_uri` or `client_id` does not match the
+        authorization request, or the `code_verifier` does not satisfy the stored
+        S256 `code_challenge`.
+
+        For the **CIBA** grant the request carries `client_id` and the `auth_req_id`
+        from `POST /bc-authorize`. The authenticated client must match the one the
+        `auth_req_id` was issued to; the token's `aud` is the audience captured at
+        `/bc-authorize` and its `sub` is the simulator's synthetic resource owner
+        (`camarasim-user`). The `auth_req_id` is **single-use** (consumed when the
+        token is issued). While the end user has not authorized, the poll returns
+        the CIBA token-error set (OpenID CIBA Core §11), all HTTP 400:
+          - not yet authorized → `authorization_pending`
+          - end user rejected → `access_denied`
+          - `auth_req_id` expired → `expired_token`
+          - unknown `auth_req_id`, or one issued to a different client →
+            `invalid_grant`
+
+        (The functional case is selected by the `login_hint` at `/bc-authorize`.)
+
+        Errors use the OAuth2 token-endpoint format (RFC 6749 §5.2) with
+        `Cache-Control: no-store`:
+          - missing `grant_type`, or a required parameter absent → `invalid_request` (400)
+          - unknown / unsupported `grant_type` → `unsupported_grant_type` (400)
+          - a malformed requested purpose scope → `invalid_scope` (400)
+          - no client authentication → `invalid_client` (401)
+          - invalid / expired / reused / mismatched authorization code, failed PKCE
+            verification, or an unknown/mismatched `auth_req_id` → `invalid_grant` (400)
+          - CIBA poll not yet complete → `authorization_pending` / `access_denied` /
+            `expired_token` (400)
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/TokenRequest"
+      responses:
+        "200":
+          description: Access token issued.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: Always `no-store` (RFC 6749 §5.1).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+              example:
+                access_token: eyJhbGciOiJSUzI1NiIsInR5cCI6ImF0K2p3dCIsImtpZCI6ImNhbWFyYXNpbS1yczI1Ni0xIn0.eyJpc3MiOiJodHRwOi8vbG9jYWxob3N0OjgwODAifQ.signature
+                token_type: Bearer
+                expires_in: 3600
+                scope: dpv:FraudPreventionAndDetection#check-sim-swap
+        "400":
+          description: |
+            Invalid request, unsupported grant type, a malformed requested purpose
+            scope (`invalid_scope`), or an authorization code that is invalid /
+            expired / reused / mismatched or fails PKCE verification
+            (`invalid_grant`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+              example:
+                error: invalid_grant
+                error_description: the authorization code is invalid or already used
+        "401":
+          description: Client authentication failed / missing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+              example:
+                error: invalid_client
+                error_description: client authentication required (client_secret_basic or client_secret_post)
+components:
+  securitySchemes:
+    camaraOAuth:
+      type: openIdConnect
+      description: |
+        CAMARA OpenID Connect. Clients obtain an access token from `/oauth2/token`
+        (see the token endpoint) and present it as `Authorization: Bearer <jwt>`.
+        The token is an RS256 JWT verifiable against `/oauth2/jwks`; the resource
+        server enforces signature, `exp`, `aud`, and the endpoint's required scope.
+      openIdConnectUrl: /.well-known/openid-configuration
+  responses:
+    Unauthenticated:
+      description: |
+        The access token is missing, malformed, badly signed, expired, or intended
+        for a different audience. Carries an RFC 6750 `WWW-Authenticate: Bearer`
+        challenge (with `error="invalid_token"` when a token was presented).
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+          description: RFC 6750 Bearer challenge.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CamaraError"
+          example:
+            status: 401
+            code: UNAUTHENTICATED
+            message: "Request not authenticated: the access token has expired."
+    PermissionDenied:
+      description: |
+        The access token is valid but was not granted the scope this endpoint
+        requires. Carries `WWW-Authenticate: Bearer error="insufficient_scope"`.
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+          description: RFC 6750 Bearer challenge with `insufficient_scope`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CamaraError"
+          example:
+            status: 403
+            code: PERMISSION_DENIED
+            message: "Access token does not have the required scope 'dpv:FraudPreventionAndDetection#check-sim-swap'."
+  schemas:
+    CamaraError:
+      type: object
+      description: |
+        The CAMARA error body (docs/DESIGN.md §8): the HTTP status echoed as
+        `status`, a machine-readable `code`, and a human-readable `message`.
+      required:
+        - status
+        - code
+        - message
+      properties:
+        status:
+          type: integer
+          description: The HTTP status code, echoed in the body.
+        code:
+          type: string
+          description: Machine-readable CAMARA error code.
+          enum:
+            - UNAUTHENTICATED
+            - PERMISSION_DENIED
+        message:
+          type: string
+          description: Human-readable explanation.
+    TokenRequest:
+      type: object
+      required:
+        - grant_type
+      properties:
+        grant_type:
+          type: string
+          description: |
+            The OAuth2 grant type. All three CAMARA grants are implemented:
+            `client_credentials`, `authorization_code`, and the CIBA poll
+            (`urn:openid:params:grant-type:ciba`).
+          enum:
+            - client_credentials
+            - authorization_code
+            - urn:openid:params:grant-type:ciba
+        scope:
+          type: string
+          description: |
+            Space-delimited requested scopes (e.g. a CAMARA purpose scope such as
+            `dpv:FraudPreventionAndDetection#check-sim-swap`). Granted verbatim by
+            the simulator, but a malformed `dpv:` purpose scope is rejected with
+            `invalid_scope`. (`client_credentials` only; for `authorization_code`
+            the scope is fixed by the authorize request.)
+        client_id:
+          type: string
+          description: |
+            Client identifier for `client_secret_post` authentication. May instead
+            be supplied via HTTP Basic (`client_secret_basic`). Any secret is
+            accepted by the simulator. Required for `authorization_code` and must
+            match the client the code was issued to.
+        client_secret:
+          type: string
+          description: Client secret. Accepted but not validated by the simulator.
+        code:
+          type: string
+          description: |
+            The authorization code from `GET /oauth2/authorize`
+            (`authorization_code` grant). Single-use.
+        redirect_uri:
+          type: string
+          format: uri
+          description: |
+            The redirect URI used in the authorize request (`authorization_code`
+            grant). Must match the value bound to the code exactly.
+        code_verifier:
+          type: string
+          description: |
+            The PKCE code verifier (`authorization_code` grant, RFC 7636). Must
+            satisfy the stored S256 `code_challenge`
+            (`base64url(SHA-256(code_verifier)) == code_challenge`).
+        auth_req_id:
+          type: string
+          description: |
+            The backchannel authentication request id from `POST /bc-authorize`
+            (CIBA grant). Required for `urn:openid:params:grant-type:ciba`; the
+            authenticated `client_id` must match the one it was issued to.
+    BackchannelAuthenticationRequest:
+      type: object
+      description: |
+        A CIBA `POST /bc-authorize` request (OpenID CIBA Core §7.1), sent as
+        `application/x-www-form-urlencoded`.
+      required:
+        - login_hint
+        - scope
+      properties:
+        login_hint:
+          type: string
+          description: |
+            Identifies the end user to authenticate (CAMARA uses a `tel:` URI,
+            e.g. `tel:+34600000000`). In the simulator it **also selects the
+            functional case** (docs/DESIGN.md §7): a hint containing `pending`
+            stays `authorization_pending`, one containing `denied` yields
+            `access_denied`, and any other hint is approved immediately.
+        scope:
+          type: string
+          description: |
+            Space-delimited requested scopes (e.g. a CAMARA purpose scope). Copied
+            verbatim into the issued token. Required. A malformed `dpv:` purpose
+            scope (`dpv:<Purpose>#<action>`) is rejected with `invalid_scope`.
+        client_id:
+          type: string
+          description: |
+            Client identifier for `client_secret_post` authentication. May instead
+            be supplied via HTTP Basic (`client_secret_basic`). Any secret is
+            accepted by the simulator.
+        client_secret:
+          type: string
+          description: Client secret. Accepted but not validated by the simulator.
+    BackchannelAuthenticationResponse:
+      type: object
+      description: |
+        A CIBA `POST /bc-authorize` success response (OpenID CIBA Core §7.3).
+      required:
+        - auth_req_id
+        - expires_in
+        - interval
+      properties:
+        auth_req_id:
+          type: string
+          description: |
+            Opaque, single-use handle for the authorization request. The client
+            polls `POST /oauth2/token` with it until a token is issued.
+        expires_in:
+          type: integer
+          description: Seconds the `auth_req_id` is valid for (120).
+        interval:
+          type: integer
+          description: Minimum seconds to wait between token polls (5).
+    TokenResponse:
+      type: object
+      required:
+        - access_token
+        - token_type
+        - expires_in
+      properties:
+        access_token:
+          type: string
+          description: A signed RS256 JWT (`at+jwt`), verifiable against `/oauth2/jwks`.
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          description: Token lifetime in seconds (fixed at 3600).
+        scope:
+          type: string
+          description: The granted scope. Omitted when no scope was requested.
+    OAuthError:
+      type: object
+      description: |
+        OAuth2 error (RFC 6749 §5.2 / §4.1.2.1). Returned as a JSON body by the
+        token, `/bc-authorize`, and authorize (non-redirectable) endpoints; the
+        authorize endpoint's redirectable errors use the same `error` codes as
+        query parameters on the `Location` redirect. The CIBA poll additionally
+        uses the OpenID CIBA Core §11 token-error codes (`authorization_pending`,
+        `access_denied`, `expired_token`).
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          enum:
+            - invalid_request
+            - invalid_client
+            - invalid_grant
+            - unauthorized_client
+            - unsupported_grant_type
+            - unsupported_response_type
+            - invalid_scope
+            - authorization_pending
+            - access_denied
+            - expired_token
+        error_description:
+          type: string
+    JwkSet:
+      type: object
+      required:
+        - keys
+      properties:
+        keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/Jwk"
+    Jwk:
+      type: object
+      description: A JSON Web Key (RFC 7517). Only RSA public keys are published.
+      required:
+        - kty
+        - kid
+        - n
+        - e
+      properties:
+        kty:
+          type: string
+          enum: [RSA]
+          description: Key type.
+        use:
+          type: string
+          enum: [sig]
+          description: Public key use — `sig` (signature verification).
+        alg:
+          type: string
+          enum: [RS256]
+          description: Algorithm the key is used with.
+        kid:
+          type: string
+          description: Stable key identifier, matched against the JWT header `kid`.
+        n:
+          type: string
+          description: base64url-encoded (no padding) RSA modulus.
+        e:
+          type: string
+          description: base64url-encoded (no padding) RSA public exponent.
+    OpenIdConfiguration:
+      type: object
+      required:
+        - issuer
+        - authorization_endpoint
+        - token_endpoint
+        - jwks_uri
+        - response_types_supported
+        - grant_types_supported
+        - subject_types_supported
+        - id_token_signing_alg_values_supported
+      properties:
+        issuer:
+          type: string
+          format: uri
+          description: Authorization server identifier; the base URL of the server.
+        authorization_endpoint:
+          type: string
+          format: uri
+        token_endpoint:
+          type: string
+          format: uri
+        jwks_uri:
+          type: string
+          format: uri
+          description: URL of the server's JSON Web Key Set.
+        backchannel_authentication_endpoint:
+          type: string
+          format: uri
+          description: CIBA backchannel authentication endpoint.
+        response_types_supported:
+          type: array
+          items:
+            type: string
+        grant_types_supported:
+          type: array
+          items:
+            type: string
+        token_endpoint_auth_methods_supported:
+          type: array
+          items:
+            type: string
+        subject_types_supported:
+          type: array
+          items:
+            type: string
+        id_token_signing_alg_values_supported:
+          type: array
+          items:
+            type: string
+        code_challenge_methods_supported:
+          type: array
+          items:
+            type: string
+          description: PKCE code challenge methods; CAMARA requires S256.
+        scopes_supported:
+          type: array
+          items:
+            type: string
+        backchannel_token_delivery_modes_supported:
+          type: array
+          items:
+            type: string
+        backchannel_authentication_request_signing_alg_values_supported:
+          type: array
+          items:
+            type: string
+        backchannel_user_code_parameter_supported:
+          type: boolean

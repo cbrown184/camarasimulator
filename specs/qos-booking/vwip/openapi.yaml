@@ -1,0 +1,1128 @@
+# CamaraSim — QoS Booking, API version vwip (CAMARA qos-booking, work-in-progress).
+#
+# Vendored from the CAMARA QoS Booking API (qos-booking, `wip` — no released
+# version yet, part of the ConnectivityQualityManagement sub-project alongside
+# QualityOnDemand and QoS Provisioning) and annotated with CamaraSim's
+# parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/qos_booking/vwip.rs`; spec and code must not drift.
+#
+# Mounted at its canonical `vwip` base path `/qos-booking/vwip` (mirroring the
+# other work-in-progress APIs — DESIGN §9). QoS Booking is the *time-boxed booking*
+# sibling of QoD (immediate bounded sessions) and QoS Provisioning (open-ended
+# provisioning): it reserves a QoS profile for a device over a `startTime` /
+# `duration` window in a service area, ahead of time.
+#
+# Serves `POST /device-qos-bookings` (create), `GET
+# /device-qos-bookings/{bookingId}` (read-back), `DELETE
+# /device-qos-bookings/{bookingId}` (delete — synchronous `204`; the async `202`
+# form is deferred), and `POST /retrieve-device-qos-bookings` (retrieve-by-device —
+# an array of `BookingInfo`).
+#
+# CloudEvents notifications on `sink`: deleting a booking that recorded a `sink`
+# delivers a `status-changed` CloudEvent (`bookingStatus: TERMINATED`, `statusInfo:
+# DELETE_REQUESTED`) to it, fire-and-forget (no HTTP-client dependency — an `http://`
+# sink over a raw TCP POST, an `https://` sink over a `rustls` TLS session with the
+# server cert verified against the bundled Mozilla roots), with the `sinkCredential`
+# (ACCESSTOKEN → Bearer, PLAIN → Basic) applied. An `ACTIVATED`, sink-bearing booking whose identifier tail is
+# `…002` is dropped early by the simulated network: a short-grace async timer evicts
+# it and delivers a `status-changed` CloudEvent (`bookingStatus: TERMINATED`,
+# `statusInfo: NETWORK_TERMINATED`), likewise fire-and-forget with the
+# `sinkCredential` applied. Any other `ACTIVATED`, sink-bearing booking instead runs
+# its window to completion: an async timer waits the booking's `duration`, then
+# evicts it and delivers `status-changed` (`bookingStatus: TERMINATED`, `statusInfo:
+# DURATION_EXPIRED`) — mutually exclusive with `NETWORK_TERMINATED`, so exactly one
+# terminal event fires. A `SCHEDULED` (odd-tail), sink-bearing booking transitions to
+# `ACTIVATED` at its window start (`startTime`): an async timer flips it to
+# `ACTIVATED` and delivers a non-terminal `status-changed` CloudEvent
+# (`bookingStatus: ACTIVATED`, no `statusInfo`), then the now-active booking runs its
+# window to `DURATION_EXPIRED` as above. Both `http://` and `https://` sinks are
+# delivered to (the latter over `rustls` TLS); any other scheme is validated/echoed
+# but not delivered to (a documented cut). See the `QosBookingEvent` schema for
+# the CloudEvent shape.
+openapi: 3.0.3
+info:
+  title: QoS Booking
+  description: |
+    Reserves a QoS profile for a device over a **bounded time window**
+    (`startTime` + `duration`) in a given service area, *ahead of time* — the
+    network schedules the requested quality rather than applying it immediately.
+    QoS Booking is the *booking* member of the CAMARA connectivity-quality-management
+    trio: Quality on Demand mints immediate, time-boxed `sessions`; QoS Provisioning
+    mints open-ended `qos-assignments`; QoS Booking mints scheduled
+    `device-qos-bookings`.
+
+    This is the CamaraSim reference double for the CAMARA QoS Booking API. The
+    device can be identified either by the `device` object in the request body
+    (two-legged / CIBA) or by the identity a three-legged access token
+    authenticated (in which case `device` is omitted).
+
+    ## Identifier resolution (two-legged vs three-legged)
+
+    The `device` object is only meaningful in two-legged auth. In a three-legged
+    token the device is already identified by the token subject:
+
+    - `device` carries an identifier **and** the token subject is itself an E.164
+      line (a device-authenticated three-legged token) → `422 UNNECESSARY_IDENTIFIER`.
+    - `device` carries an identifier, subject not a line → that identifier is used
+      (two-legged). Precedence: `phoneNumber` → `networkAccessIdentifier` → the IPv4
+      `publicAddress` → `ipv6Address`.
+    - `device` absent, subject is an E.164 line → the subject is the identifier
+      (three-legged).
+    - `device` absent **and** the subject is not a line → `422 MISSING_IDENTIFIER`.
+    - `device` present but carrying **no** identifier (`minProperties: 1` violated)
+      → `400 INVALID_ARGUMENT`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Once the identifier is resolved, the outcome is deterministic from it:
+
+    - **Reserved error suffix** — if the identifier's trailing three digits name a
+      reserved CAMARA status, the endpoint answers with that canonical CAMARA error
+      instead of a result (shared convention — see the referenced `errors.yaml`):
+      `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`. In
+      particular `…409` → `409 CONFLICT`, modelling the canonical "a booking already
+      exists for the same device" case.
+    - **Booking status** — otherwise the identifier's trailing three digits fix the
+      status: `…000` (or an identifier with no trailing digits) → `REQUESTED` (no
+      `startedAt` yet); an **odd** tail → `SCHEDULED` (a future booking, no
+      `startedAt`); any other (even, non-zero) tail → `ACTIVATED` (`startedAt` = the
+      current instant). CamaraSim validates `startTime` for shape (a malformed value
+      is a `400`) and keys the *initial* status off the identifier so every state is
+      reachable from the input alone; `startTime` does not drive the initial status (a
+      documented cut), though it *does* time the `SCHEDULED`→`ACTIVATED` transition
+      below.
+    - **`NETWORK_TERMINATED` (early network drop)** — a `…002` tail is an ordinary
+      `ACTIVATED` case, but when the booking also records a `sink` the simulated
+      network drops the granted booking *early*: after a short grace an async timer
+      evicts the booking (a subsequent `GET` is then `404`) and delivers a
+      `status-changed` CloudEvent (`bookingStatus: TERMINATED`, `statusInfo:
+      NETWORK_TERMINATED`) to the `sink`.
+    - **`DURATION_EXPIRED` (window ran to completion)** — any other `ACTIVATED`,
+      sink-bearing booking runs its window to completion: an async timer waits the
+      booking's `duration` (from `startedAt` = creation), then evicts the booking (a
+      subsequent `GET` is then `404`) and delivers a `status-changed` CloudEvent
+      (`bookingStatus: TERMINATED`, `statusInfo: DURATION_EXPIRED`) to the `sink`.
+      Mutually exclusive with `NETWORK_TERMINATED` (by tail), so exactly one terminal
+      event fires.
+    - **`SCHEDULED`→`ACTIVATED` (at the window start)** — a `SCHEDULED` (odd-tail),
+      sink-bearing booking transitions to `ACTIVATED` at its window start: an async
+      timer sleeps until `startTime` (an already-past value fires at once), flips the
+      stored booking to `ACTIVATED` (stamping `startedAt` = now), and delivers a
+      **non-terminal** `status-changed` CloudEvent (`bookingStatus: ACTIVATED`, no
+      `statusInfo`) to the `sink`. The now-`ACTIVATED` booking then runs its window to
+      `DURATION_EXPIRED` as above. Unlike the initial status, this transition keys off
+      `startTime`. A concurrent `deleteBooking` makes the activation a no-op (exactly
+      one outcome). A `SCHEDULED` booking with no `sink` stays `SCHEDULED` (nothing to
+      notify).
+    - **`duration`** (seconds, required) — `< 1` → `400 OUT_OF_RANGE`; `> 31622400`
+      (366 days, the `BookingInfo` ceiling) → `400 QOS_BOOKING.DURATION_OUT_OF_RANGE`.
+    - **`serviceArea`** (required; CAMARA `Area`) — CamaraSim manages `CIRCLE` and
+      `AREANAME`: a `CIRCLE` whose `center` latitude/longitude is out of range →
+      `400 OUT_OF_RANGE`, a degenerate `radius` (`< 1`) → `422 QOS_BOOKING.INVALID_AREA`;
+      an `AREANAME` whose `areaName` contains `uncovered` → `422 QOS_BOOKING.AREA_NOT_COVERED`;
+      a `POLYGON` → `422 QOS_BOOKING.NOT_MANAGED_AREA_TYPE` (a documented cut —
+      CamaraSim manages CIRCLE + AREANAME); an unknown/missing `areaType` →
+      `400 INVALID_ARGUMENT`.
+    - **`qosProfile`** — a profile whose name contains `unavailable` →
+      `422 QOS_BOOKING.QOS_PROFILE_NOT_APPLICABLE`; otherwise it is applied.
+    - **`sink`** — optional; when present it must be a well-formed `http://` or
+      `https://` callback URL → else `400 INVALID_SINK`. A recorded sink receives the
+      `status-changed` CloudEvents above (`DELETE_REQUESTED` on delete;
+      `NETWORK_TERMINATED` for a `…002` ACTIVATED booking; `DURATION_EXPIRED` when an
+      ACTIVATED booking's window lapses; and the non-terminal `ACTIVATED` event when a
+      `SCHEDULED` booking reaches its window start), delivered over raw TCP for an
+      `http://` sink and over a `rustls` TLS session (server cert verified) for an
+      `https://` sink. `sinkCredential` (a secret) authenticates the callbacks but is
+      never echoed.
+
+    The response echoes the device back in a single-property `DeviceResponse`
+    (the identifier used), and echoes the submitted `serviceArea`, `startTime`,
+    `duration`, and any supplied `sink` / `applicationServer` / port fields.
+
+    Examples: `+123456789012` → `ACTIVATED` (with a `sink`, then a `DURATION_EXPIRED`
+    terminal event when its `duration` lapses); `+123456789013` → `SCHEDULED`;
+    `+123456789000` → `REQUESTED`; `+123456789002` (with a `sink`) → `ACTIVATED`
+    then an early `NETWORK_TERMINATED` drop; `+123456789409` → `409 CONFLICT`;
+    `+123456789404` → `404 NOT_FOUND`.
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/qos-booking/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /device-qos-bookings:
+    post:
+      operationId: createBooking
+      summary: Book a QoS profile for a device over a time window
+      description: |
+        Books the requested `qosProfile` for the identified device over the
+        `startTime` / `duration` window in `serviceArea`, and returns the created
+        `BookingInfo` with a minted `bookingId`.
+
+        See the API description for the identifier-resolution rules and the
+        parameter-driven functional cases.
+      security:
+        - openId:
+            - qos-booking:device-qos-bookings:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBooking"
+      responses:
+        "201":
+          description: The QoS booking was created.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookingInfo"
+              examples:
+                activated:
+                  summary: An ACTIVATED booking (device echoed)
+                  value:
+                    bookingId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    bookingStatus: ACTIVATED
+                    qosProfile: QOS_E
+                    startTime: "2024-06-01T12:00:00Z"
+                    duration: 3600
+                    startedAt: "2024-06-01T12:00:00Z"
+                    serviceArea:
+                      areaType: CIRCLE
+                      center: { latitude: 51.5, longitude: -0.12 }
+                      radius: 2000
+                    device:
+                      phoneNumber: "+123456789012"
+                scheduled:
+                  summary: A SCHEDULED booking (odd identifier tail, no startedAt)
+                  value:
+                    bookingId: "3fa85f64-5717-4562-b3fc-2c963f66afa7"
+                    bookingStatus: SCHEDULED
+                    qosProfile: QOS_E
+                    startTime: "2024-06-01T12:00:00Z"
+                    duration: 3600
+                    serviceArea:
+                      areaType: AREANAME
+                      areaName: Greater London
+                    device:
+                      phoneNumber: "+123456789013"
+                requested:
+                  summary: A REQUESTED booking (…000 tail, no startedAt)
+                  value:
+                    bookingId: "3fa85f64-5717-4562-b3fc-2c963f66afa8"
+                    bookingStatus: REQUESTED
+                    qosProfile: QOS_E
+                    startTime: "2024-06-01T12:00:00Z"
+                    duration: 3600
+                    serviceArea:
+                      areaType: CIRCLE
+                      center: { latitude: 51.5, longitude: -0.12 }
+                      radius: 2000
+                    device:
+                      phoneNumber: "+123456789000"
+        "400":
+          description: |
+            400 — bad request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed/missing `qosProfile` / `startTime` / `serviceArea`, or a
+            `device` carrying no identifier; `OUT_OF_RANGE` for a `duration < 1` or
+            a CIRCLE `center` out of range; `QOS_BOOKING.DURATION_OUT_OF_RANGE` for a
+            `duration` over the ceiling; and `INVALID_SINK` for a `sink` that is not a
+            valid `http(s)://` URL.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                invalidArgument:
+                  summary: Missing or malformed argument
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`qosProfile` is required."
+                outOfRange:
+                  summary: A numeric field is out of range
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`duration` must be at least 1 second."
+                durationOutOfRange:
+                  summary: The booking window is too long
+                  value:
+                    status: 400
+                    code: QOS_BOOKING.DURATION_OUT_OF_RANGE
+                    message: "`duration` exceeds the maximum bookable window (31622400 seconds)."
+                invalidSink:
+                  summary: Sink is not a valid callback URL
+                  value:
+                    status: 400
+                    code: INVALID_SINK
+                    message: "`sink` must be a valid `http://` or `https://` callback URL."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          description: |
+            409 — conflict. The reserved `…409` suffix models the canonical case
+            where a QoS booking already exists for the same device.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                conflict:
+                  summary: A booking already exists for the device
+                  value:
+                    status: 409
+                    code: CONFLICT
+                    message: There is a conflict with the current state of the resource.
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            device cannot be identified (no `device` and a non-line subject),
+            `UNNECESSARY_IDENTIFIER` when a `device` is submitted on a three-legged
+            device token, `QOS_BOOKING.QOS_PROFILE_NOT_APPLICABLE` for a profile whose
+            name marks it unavailable, `QOS_BOOKING.INVALID_AREA` for a degenerate
+            CIRCLE, `QOS_BOOKING.AREA_NOT_COVERED` for an uncovered AREANAME,
+            `QOS_BOOKING.NOT_MANAGED_AREA_TYPE` for a POLYGON, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                missingIdentifier:
+                  summary: The device cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The device cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The device is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The device is already identified by the access token.
+                qosProfileNotApplicable:
+                  summary: The requested QoS profile is not applicable
+                  value:
+                    status: 422
+                    code: QOS_BOOKING.QOS_PROFILE_NOT_APPLICABLE
+                    message: The requested QoS profile is not applicable for this device.
+                invalidArea:
+                  summary: The CIRCLE service area is degenerate
+                  value:
+                    status: 422
+                    code: QOS_BOOKING.INVALID_AREA
+                    message: The CIRCLE `radius` must be a positive number of metres.
+                areaNotCovered:
+                  summary: The requested area is not covered
+                  value:
+                    status: 422
+                    code: QOS_BOOKING.AREA_NOT_COVERED
+                    message: The requested area is not covered by the network.
+                notManagedAreaType:
+                  summary: The area type is not managed
+                  value:
+                    status: 422
+                    code: QOS_BOOKING.NOT_MANAGED_AREA_TYPE
+                    message: CamaraSim manages CIRCLE and AREANAME service areas; POLYGON is not managed.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The booking status is selected from the identifier (the first present
+          device identifier, else the access token subject) whose trailing three
+          digits drive the case (docs/DESIGN.md §7). Reserved error suffixes come
+          from the shared convention in errors.yaml. The `serviceArea` and
+          `qosProfile` add further planes. CamaraSim manages CIRCLE and AREANAME
+          service areas (POLYGON → NOT_MANAGED_AREA_TYPE). `startTime` is validated
+          for shape and does not drive the *initial* status (a documented cut), but it
+          times the `SCHEDULED`→`ACTIVATED` transition. A recorded `sink` receives
+          the `status-changed` CloudEvents (`DELETE_REQUESTED` on delete;
+          `NETWORK_TERMINATED` for a `…002` ACTIVATED booking; `DURATION_EXPIRED` when
+          any other ACTIVATED booking's window lapses; and the non-terminal
+          `ACTIVATED` event when a `SCHEDULED` booking reaches its window start),
+          delivered over raw TCP for an `http://` sink and over `rustls` TLS (server
+          cert verified) for an `https://` sink.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier ending in …409"
+            result: "409 CONFLICT — a booking already exists for the device"
+          - input: "identifier ending in …000 (or no trailing digits)"
+            result: "201 — bookingStatus REQUESTED, no startedAt"
+          - input: "identifier with an odd trailing tail (e.g. …013)"
+            result: "201 — bookingStatus SCHEDULED, no startedAt"
+          - input: "a SCHEDULED (odd-tail) identifier with a recorded http:// sink"
+            result: >-
+              201 — bookingStatus SCHEDULED; at the window start (startTime) the
+              booking transitions to ACTIVATED (startedAt stamped) and a non-terminal
+              fire-and-forget status-changed CloudEvent (bookingStatus ACTIVATED, no
+              statusInfo) is POSTed to the sink; the now-active booking then runs its
+              window to DURATION_EXPIRED
+          - input: "any other identifier (even, non-zero tail)"
+            result: "201 — bookingStatus ACTIVATED, startedAt = now"
+          - input: "identifier ending in …002 with a recorded http:// sink"
+            result: >-
+              201 — bookingStatus ACTIVATED, then dropped early by the network: a
+              fire-and-forget status-changed CloudEvent (bookingStatus TERMINATED,
+              statusInfo NETWORK_TERMINATED) is POSTed to the sink and the booking is
+              evicted (a later GET is 404)
+          - input: "any other ACTIVATED identifier with a recorded http:// sink"
+            result: >-
+              201 — bookingStatus ACTIVATED; when the booking's duration lapses a
+              fire-and-forget status-changed CloudEvent (bookingStatus TERMINATED,
+              statusInfo DURATION_EXPIRED) is POSTed to the sink and the booking is
+              evicted (a later GET is 404)
+          - input: "a recorded https:// sink"
+            result: >-
+              the same status-changed CloudEvents are delivered, POSTed over a rustls
+              TLS session (server certificate verified against the bundled Mozilla
+              roots) instead of raw TCP; a non-http(s) sink is validated/echoed but
+              not delivered to (a documented cut)
+          - input: phoneNumber-keyed request
+            result: "201 with the device echoed (`device.phoneNumber`)"
+          - input: "`duration` < 1"
+            result: "400 OUT_OF_RANGE"
+          - input: "`duration` > 31622400"
+            result: "400 QOS_BOOKING.DURATION_OUT_OF_RANGE"
+          - input: "a CIRCLE `serviceArea` with a `center` out of range"
+            result: "400 OUT_OF_RANGE"
+          - input: "a CIRCLE `serviceArea` with `radius` < 1"
+            result: "422 QOS_BOOKING.INVALID_AREA"
+          - input: "an AREANAME `serviceArea` whose `areaName` contains `uncovered`"
+            result: "422 QOS_BOOKING.AREA_NOT_COVERED"
+          - input: "a POLYGON `serviceArea`"
+            result: "422 QOS_BOOKING.NOT_MANAGED_AREA_TYPE"
+          - input: "an unknown/missing `serviceArea.areaType`"
+            result: "400 INVALID_ARGUMENT"
+          - input: "`qosProfile` name containing `unavailable`"
+            result: "422 QOS_BOOKING.QOS_PROFILE_NOT_APPLICABLE"
+          - input: "`sink` that is not a valid http(s) URL"
+            result: "400 INVALID_SINK"
+          - input: "`device` present but carrying no identifier"
+            result: "400 INVALID_ARGUMENT"
+          - input: "`device` submitted on a three-legged line token"
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no `device` and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+
+  /device-qos-bookings/{bookingId}:
+    get:
+      operationId: getBooking
+      summary: Read a QoS booking back by its bookingId
+      description: |
+        Returns the `BookingInfo` created by `createBooking`, addressed by its
+        opaque, server-minted `bookingId`.
+
+        The `bookingId` is opaque (server-minted, never caller-chosen), so there is
+        **no** reserved-identifier control plane here — the store state is the sole
+        control plane (docs/DESIGN.md §7): a stored id → `200` with the persisted
+        `BookingInfo` verbatim; any other id (never created, or already deleted once
+        the delete leg lands) → `404 NOT_FOUND`.
+      security:
+        - openId:
+            - qos-booking:device-qos-bookings:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: bookingId
+          in: path
+          required: true
+          description: The id of the booking to read, as minted by `createBooking`.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The QoS booking was found and is returned.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookingInfo"
+              examples:
+                activated:
+                  summary: A stored ACTIVATED booking
+                  value:
+                    bookingId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    bookingStatus: ACTIVATED
+                    qosProfile: QOS_E
+                    startTime: "2024-06-01T12:00:00Z"
+                    duration: 3600
+                    startedAt: "2024-06-01T12:00:00Z"
+                    serviceArea:
+                      areaType: CIRCLE
+                      center: { latitude: 51.5, longitude: -0.12 }
+                      radius: 2000
+                    device:
+                      phoneNumber: "+123456789012"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The read is keyed only on the store state — the `bookingId` is opaque
+          (server-minted), so there is no reserved-identifier control plane
+          (docs/DESIGN.md §7). A stored id returns the persisted `BookingInfo`
+          verbatim; any other id is a 404.
+        cases:
+          - input: a bookingId minted by a prior createBooking
+            result: "200 — the persisted BookingInfo, returned verbatim"
+          - input: an unknown / never-created / already-deleted bookingId
+            result: "404 NOT_FOUND"
+    delete:
+      operationId: deleteBooking
+      summary: Delete a QoS booking by its bookingId
+      description: |
+        Deletes the booking addressed by its opaque, server-minted `bookingId`.
+
+        The `bookingId` is opaque, so there is **no** reserved-identifier control
+        plane here — the store state is the sole control plane (docs/DESIGN.md §7):
+        a stored booking is evicted → `204 No Content` (single-use); any other id
+        (never created, or already deleted) → `404 NOT_FOUND`.
+
+        CAMARA also defines an asynchronous `202 Accepted` form (returning the
+        `BookingInfo` while the network tears the booking down). CamaraSim deletes
+        synchronously and answers `204`; the async `202` form is a documented cut
+        (mirroring QoS Provisioning's `revokeQosAssignment` and Quality on Demand's
+        `deleteSession`).
+
+        **Notification.** When the deleted booking recorded a `sink`, a
+        `status-changed` CloudEvent (`bookingStatus: TERMINATED`, `statusInfo:
+        DELETE_REQUESTED`; see the `QosBookingEvent` schema) is delivered to it
+        fire-and-forget, off the request path, so a slow or unreachable sink never
+        delays the `204`: an `http://` sink over a raw TCP POST, an `https://` sink
+        over a `rustls` TLS session (server cert verified against the bundled Mozilla
+        roots). The booking's `sinkCredential` (ACCESSTOKEN → `Authorization: Bearer`,
+        PLAIN → `Authorization: Basic`) is applied and consumed single-use. A
+        non-http(s) sink is not delivered to (a documented cut).
+      security:
+        - openId:
+            - qos-booking:device-qos-bookings:delete
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: bookingId
+          in: path
+          required: true
+          description: The id of the booking to delete, as minted by `createBooking`.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: The QoS booking was deleted (no content).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed only on the store state — the `bookingId` is opaque
+          (server-minted), so there is no reserved-identifier control plane
+          (docs/DESIGN.md §7). An existing booking is evicted (204, single-use);
+          any other id is a 404.
+        cases:
+          - input: a bookingId of a booking that is currently stored
+            result: "204 — the booking is evicted (single-use)"
+          - input: a stored booking that recorded an `http://` sink
+            result: >-
+              204 — plus a fire-and-forget status-changed CloudEvent
+              (bookingStatus TERMINATED, statusInfo DELETE_REQUESTED) POSTed to the
+              sink over raw TCP, with the sinkCredential applied (ACCESSTOKEN →
+              Bearer, PLAIN → Basic)
+          - input: a stored booking whose sink is `https://…`
+            result: >-
+              204 — the same CloudEvent is POSTed over a rustls TLS session (server
+              cert verified against the bundled Mozilla roots)
+          - input: an unknown / never-created / already-deleted bookingId
+            result: "404 NOT_FOUND"
+
+  /retrieve-device-qos-bookings:
+    post:
+      operationId: retrieveBookingByDevice
+      summary: List the QoS bookings for a device
+      description: |
+        Returns the QoS bookings for the identified device as an array of
+        `BookingInfo`. The device is identified by the `device` in the request body
+        (two-legged), else by a three-legged token subject (omit `device`).
+
+        The result is always an array (`200`) — empty when the device has no
+        bookings; CAMARA never returns `404` for an empty collection. The response is
+        not scoped per client (CamaraSim does not associate bookings with a caller —
+        a documented simplification, mirroring Quality on Demand's
+        `retrieveSessionsByDevice`).
+      security:
+        - openId:
+            - qos-booking:device-qos-bookings:retrieve-by-device
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetrieveBookingsInput"
+      responses:
+        "200":
+          description: The device's QoS bookings (possibly an empty array).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BookingInfo"
+              examples:
+                someBookings:
+                  summary: A device with two bookings
+                  value:
+                    - bookingId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                      bookingStatus: ACTIVATED
+                      qosProfile: QOS_E
+                      startTime: "2024-06-01T12:00:00Z"
+                      duration: 3600
+                      startedAt: "2024-06-01T12:00:00Z"
+                      serviceArea:
+                        areaType: CIRCLE
+                        center: { latitude: 51.5, longitude: -0.12 }
+                        radius: 2000
+                      device:
+                        phoneNumber: "+123456789012"
+                    - bookingId: "3fa85f64-5717-4562-b3fc-2c963f66afb0"
+                      bookingStatus: SCHEDULED
+                      qosProfile: QOS_E
+                      startTime: "2024-06-02T09:00:00Z"
+                      duration: 1800
+                      serviceArea:
+                        areaType: AREANAME
+                        areaName: Greater London
+                      device:
+                        phoneNumber: "+123456789012"
+                none:
+                  summary: A device with no bookings
+                  value: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            device cannot be identified (no `device` and a non-line subject) or
+            `UNNECESSARY_IDENTIFIER` when a `device` is submitted on a three-legged
+            device token.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                missingIdentifier:
+                  summary: The device cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The device cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The device is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The device is already identified by the access token.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Two control planes (docs/DESIGN.md §7). The identifier (the first present
+          device identifier, else the access token subject) selects a canonical
+          CAMARA error via its reserved suffix (from the shared convention in
+          errors.yaml). On the happy path the in-memory store is the plane: the
+          bookings whose echoed `device` equals the resolved identifier are returned
+          — an empty array when there are none (never a 404).
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status (…404 → 404 NOT_FOUND)
+          - input: a device with one or more stored bookings
+            result: "200 — an array of that device's BookingInfo"
+          - input: a device with no stored bookings
+            result: "200 — an empty array"
+          - input: "`device` submitted on a three-legged line token"
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no `device` and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    CreateBooking:
+      type: object
+      description: Request to book a QoS profile for a device over a time window.
+      required:
+        - qosProfile
+        - startTime
+        - duration
+        - serviceArea
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+        qosProfile:
+          $ref: "#/components/schemas/QosProfileName"
+        startTime:
+          type: string
+          format: date-time
+          maxLength: 64
+          description: When the booked quality should begin (RFC 3339, with timezone).
+          example: "2024-06-01T12:00:00Z"
+        duration:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 31622400
+          description: The length of the booking window, in seconds (max 366 days).
+          example: 3600
+        serviceArea:
+          $ref: "#/components/schemas/Area"
+        applicationServer:
+          $ref: "#/components/schemas/ApplicationServer"
+        devicePorts:
+          $ref: "#/components/schemas/PortsSpec"
+        applicationServerPorts:
+          $ref: "#/components/schemas/PortsSpec"
+        sink:
+          type: string
+          format: uri
+          description: >-
+            A callback URL for asynchronous CloudEvents notifications. CAMARA's
+            schema requires `https://`; CamaraSim also accepts `http://` so a
+            loopback receiver can observe callbacks. A recorded sink receives a
+            `status-changed` CloudEvent (`TERMINATED`) on `deleteBooking`
+            (`DELETE_REQUESTED`), for a `…002` `ACTIVATED` booking when the simulated
+            network drops it early (`NETWORK_TERMINATED`), and for any other
+            `ACTIVATED` booking when its `duration` lapses (`DURATION_EXPIRED`); a
+            `SCHEDULED` booking also receives a non-terminal `ACTIVATED` event when it
+            reaches its window start (`startTime`). See `QosBookingEvent`. Delivery is
+            over raw TCP for an `http://` sink and over a `rustls` TLS session (server
+            cert verified against the bundled Mozilla roots) for an `https://` sink; a
+            non-http(s) sink is echoed but not delivered to (a documented cut).
+          pattern: '^https?:\/\/.+$'
+          example: "https://application-server.example.com/notifications"
+        sinkCredential:
+          $ref: "#/components/schemas/SinkCredential"
+
+    RetrieveBookingsInput:
+      type: object
+      description: >-
+        Request to list a device's QoS bookings. `device` is optional: omit it to
+        use the device identified by a three-legged access token.
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+
+    Device:
+      type: object
+      description: >-
+        Identifies the device. At least one identifier must be present. Optional at
+        the request level: omit `device` to use the device identified by a
+        three-legged access token. CamaraSim keys its functional cases off the first
+        present identifier, in the order phoneNumber → networkAccessIdentifier →
+        ipv4Address.publicAddress → ipv6Address.
+      minProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        networkAccessIdentifier:
+          type: string
+          example: "user012@example.com"
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          example: "2001:db8::11"
+
+    DeviceIpv4Addr:
+      type: object
+      description: >-
+        The device's IPv4 address information. CamaraSim reads `publicAddress` as the
+        identifier; `privateAddress`/`publicPort` are accepted for fidelity.
+      properties:
+        publicAddress:
+          type: string
+          example: "203.0.113.12"
+        privateAddress:
+          type: string
+          example: "192.0.2.25"
+        publicPort:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          example: 59765
+
+    DeviceResponse:
+      type: object
+      description: >-
+        The device echoed back on the response — the single identifier used to
+        resolve the request (`maxProperties: 1`).
+      maxProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        networkAccessIdentifier:
+          type: string
+          example: "user012@example.com"
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          example: "2001:db8::11"
+
+    Area:
+      type: object
+      description: >-
+        A geographical service area for the booking. Discriminated by `areaType`.
+        CamaraSim manages `CIRCLE` (a centre + radius) and `AREANAME` (a named area);
+        a `POLYGON` is accepted by the schema but not managed (`422
+        QOS_BOOKING.NOT_MANAGED_AREA_TYPE`).
+      required:
+        - areaType
+      properties:
+        areaType:
+          type: string
+          enum: [CIRCLE, POLYGON, AREANAME]
+          description: The kind of area.
+        center:
+          description: The centre of a CIRCLE area.
+          allOf:
+            - $ref: "#/components/schemas/Point"
+        radius:
+          type: number
+          minimum: 1
+          description: The radius of a CIRCLE area, in metres.
+          example: 2000
+        boundary:
+          type: array
+          minItems: 3
+          maxItems: 15
+          items:
+            $ref: "#/components/schemas/Point"
+          description: The vertices of a POLYGON area (not managed by CamaraSim).
+        areaName:
+          type: string
+          description: The name of an AREANAME area.
+          example: Greater London
+
+    Point:
+      type: object
+      description: A WGS84 latitude/longitude coordinate, in decimal degrees.
+      required:
+        - latitude
+        - longitude
+      properties:
+        latitude:
+          type: number
+          minimum: -90
+          maximum: 90
+          example: 51.5
+        longitude:
+          type: number
+          minimum: -180
+          maximum: 180
+          example: -0.12
+
+    ApplicationServer:
+      type: object
+      description: >-
+        The application server endpoint. Accepted for schema fidelity and echoed
+        back verbatim when present.
+      minProperties: 1
+      properties:
+        ipv4Address:
+          type: string
+          example: "192.0.2.0/24"
+        ipv6Address:
+          type: string
+          example: "2001:db8:85a3:8d3:1319:8a2e:370:7344"
+
+    PortsSpec:
+      type: object
+      description: >-
+        Ports or port ranges. Accepted for schema fidelity and echoed back verbatim
+        when present.
+      properties:
+        ranges:
+          type: array
+          items:
+            type: object
+            properties:
+              from:
+                type: integer
+                minimum: 0
+                maximum: 65535
+              to:
+                type: integer
+                minimum: 0
+                maximum: 65535
+        ports:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+            maximum: 65535
+
+    QosProfileName:
+      type: string
+      description: The name of a QoS profile to book.
+      pattern: '^[a-zA-Z0-9_.-]+$'
+      minLength: 3
+      maxLength: 256
+      example: QOS_E
+
+    SinkCredential:
+      type: object
+      description: >-
+        A credential the callback authenticates with. Kept in memory only and never
+        echoed back (it carries a secret). Applied to the `deleteBooking`
+        `status-changed` callback's `Authorization` header: `ACCESSTOKEN` → `Bearer
+        <accessToken>` (RFC 6750), `PLAIN` → `Basic base64(identifier:secret)` (RFC
+        7617). `REFRESHTOKEN` is accepted but not applied (it needs a token-exchange
+        round trip — a documented cut).
+      required:
+        - credentialType
+      properties:
+        credentialType:
+          type: string
+          enum: [PLAIN, ACCESSTOKEN, REFRESHTOKEN]
+        accessToken:
+          type: string
+        accessTokenExpiresUtc:
+          type: string
+          format: date-time
+        accessTokenType:
+          type: string
+          enum: [bearer]
+        identifier:
+          type: string
+        secret:
+          type: string
+
+    BookingInfo:
+      type: object
+      description: The created QoS booking.
+      required:
+        - bookingId
+        - bookingStatus
+        - qosProfile
+        - startTime
+        - duration
+        - serviceArea
+      properties:
+        bookingId:
+          type: string
+          format: uuid
+          description: The unique id of the QoS booking.
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        bookingStatus:
+          type: string
+          description: >-
+            The booking lifecycle status. `REQUESTED` — accepted, not yet scheduled;
+            `SCHEDULED` — accepted for a future window; `ACTIVATED` — the window is
+            active; `TERMINATED` — the booking has ended.
+          enum: [REQUESTED, SCHEDULED, ACTIVATED, TERMINATED]
+          example: ACTIVATED
+        qosProfile:
+          $ref: "#/components/schemas/QosProfileName"
+        startTime:
+          type: string
+          format: date-time
+          example: "2024-06-01T12:00:00Z"
+        duration:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 31622400
+          example: 3600
+        serviceArea:
+          $ref: "#/components/schemas/Area"
+        device:
+          $ref: "#/components/schemas/DeviceResponse"
+        startedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the booking window became active (RFC 3339, UTC). Present only when
+            `bookingStatus` is `ACTIVATED`.
+          example: "2024-06-01T12:00:00Z"
+        applicationServer:
+          $ref: "#/components/schemas/ApplicationServer"
+        devicePorts:
+          $ref: "#/components/schemas/PortsSpec"
+        applicationServerPorts:
+          $ref: "#/components/schemas/PortsSpec"
+        sink:
+          type: string
+          format: uri
+          description: The callback URL supplied on creation, if any.
+          example: "https://application-server.example.com/notifications"
+
+    QosBookingEvent:
+      type: object
+      description: >-
+        The CloudEvents 1.0 envelope delivered to a booking's `sink` on a
+        `status-changed` transition. CamaraSim delivers three **terminal** transitions,
+        all with `data.bookingStatus: TERMINATED`: on `deleteBooking` for a booking
+        that recorded a `sink` (`data.statusInfo: DELETE_REQUESTED`); for a `…002`
+        `ACTIVATED`, sink-bearing booking when the simulated network drops it early
+        (`data.statusInfo: NETWORK_TERMINATED`; a short-grace async timer, then
+        eviction); and for any other `ACTIVATED`, sink-bearing booking when its
+        `duration` lapses (`data.statusInfo: DURATION_EXPIRED`; an async timer waits
+        the window, then eviction). The last two are mutually exclusive by identifier
+        tail, so exactly one terminal event fires. It also delivers one **non-terminal**
+        transition: a `SCHEDULED`, sink-bearing booking reaching its window start
+        (`startTime`) fires `data.bookingStatus: ACTIVATED` with **no** `statusInfo`
+        (the booking then runs its window to `DURATION_EXPIRED`). Per the CAMARA schema
+        `statusInfo` applies only when a deletion is requested or `bookingStatus` is
+        `TERMINATED`. (The other `statusInfo` reasons — `BOOKING_DECLINED`,
+        `BOOKING_REVOKED` — are defined by CAMARA but not yet emitted by CamaraSim.)
+      required:
+        - id
+        - source
+        - type
+        - specversion
+        - time
+        - data
+      properties:
+        id:
+          type: string
+          description: Unique CloudEvent id within `source` (UUID-shaped).
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        source:
+          type: string
+          example: "//camarasimulator/qos-booking"
+        type:
+          type: string
+          enum: ["org.camaraproject.qos-booking.v0.status-changed"]
+        specversion:
+          type: string
+          enum: ["1.0"]
+        datacontenttype:
+          type: string
+          enum: ["application/json"]
+        time:
+          type: string
+          format: date-time
+          example: "2024-06-01T13:27:08Z"
+        data:
+          type: object
+          required:
+            - bookingId
+            - bookingStatus
+          properties:
+            bookingId:
+              type: string
+              format: uuid
+              example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+            bookingStatus:
+              type: string
+              description: The new booking status reported by the event.
+              enum: [SCHEDULED, ACTIVATED, TERMINATED]
+              example: TERMINATED
+            statusInfo:
+              type: string
+              description: >-
+                Reason for the new `bookingStatus`; applicable when a deletion is
+                requested or `bookingStatus` is `TERMINATED`.
+              enum:
+                - DURATION_EXPIRED
+                - NETWORK_TERMINATED
+                - DELETE_REQUESTED
+                - BOOKING_DECLINED
+                - BOOKING_REVOKED
+              example: DELETE_REQUESTED

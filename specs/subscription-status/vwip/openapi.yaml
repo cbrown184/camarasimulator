@@ -1,0 +1,319 @@
+# CamaraSim — Subscription Status, API version vwip (CAMARA SubscriptionStatus, wip).
+#
+# Vendored from the CAMARA SubscriptionStatus API (work-in-progress — no released
+# version yet, so mounted at its canonical `vwip` base path `/subscription-status/
+# vwip`, like the other pre-1.0 wip APIs) and annotated with CamaraSim's
+# parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/subscription_status/vwip.rs`; spec and code must not drift.
+#
+# Serves `POST /retrieve-subscription-status`.
+openapi: 3.0.3
+info:
+  title: Subscription Status
+  description: |
+    Service that reports the **current service status** of a mobile line — whether
+    inbound and outbound Voice/SMS are usable, and whether mobile data is usable
+    (and, for data, whether it is throttled). It is an operational / anti-fraud
+    signal: before trusting a number for a call, an OTP, or a data session, a
+    service can ask the operator whether those services are actually active on the
+    line right now.
+
+    This is the CamaraSim reference double for CAMARA SubscriptionStatus (wip). The
+    `/retrieve-subscription-status` endpoint requires the
+    `subscription-status:retrieve-subscription-status` scope.
+
+    ## Identifier resolution — two-legged vs three-legged
+
+    Faithful to CAMARA, the `phoneNumber` in the request body is valid *only* in
+    two-legged auth. In a three-legged token the line is already identified by the
+    token **subject** (`sub`), so the number must not be resubmitted:
+
+    - `phoneNumber` present **and** the token subject is itself an E.164 number
+      (a line-authenticated three-legged token) → `422 UNNECESSARY_IDENTIFIER`.
+    - `phoneNumber` present, subject not a line → the submitted number is the
+      identifier (two-legged).
+    - `phoneNumber` absent, subject is an E.164 number → the subject is the
+      identifier (three-legged).
+    - `phoneNumber` absent **and** the subject is not a line → the line cannot be
+      identified → `422 MISSING_IDENTIFIER`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Two independent control planes drive the answer:
+
+    - **Reserved error suffix (identifier).** If the resolved identifier's trailing
+      three digits name a reserved CAMARA status, the endpoint answers with that
+      canonical CAMARA error (shared convention — see the referenced `errors.yaml`):
+      `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`. In
+      particular `…404` gives the canonical `NOT_FOUND` (the API's own 404 code is
+      `IDENTIFIER_NOT_FOUND`) and `…422` gives `SERVICE_NOT_APPLICABLE` (the API's
+      own service-level 422 code).
+    - **Service status (identifier digits).** Otherwise the identifier's trailing
+      three digits `d` (`000`–`999`; every reserved suffix is `≥ 400`, so all small
+      `d` are free) are read as a **status bitfield**, giving the caller independent
+      control of all three fields:
+        - bit 0 (`d & 1`) → `voiceSmsIn` is `suspended` (else `active`),
+        - bit 1 (`d & 2`) → `voiceSmsOut` is `suspended` (else `active`),
+        - `(d >> 2) % 3` → `dataService`: `0` = `active`, `1` = `suspended`,
+          `2` = `throttled`.
+
+      So `…000` (or an identifier with no digits) is the all-`active` healthy
+      default, `…001` suspends inbound Voice/SMS only, and `…008` throttles data
+      only.
+
+    Example: `+123456789000` → all `active`; `+123456789001` → `voiceSmsIn:
+    suspended`; `+123456789008` → `dataService: throttled`; `+123456789404` →
+    `404 NOT_FOUND`; `+123456789422` → `422 SERVICE_NOT_APPLICABLE`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical SubscriptionStatus (wip) declares a subset
+    (400/401/403/404/422).
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/subscription-status/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /retrieve-subscription-status:
+    post:
+      operationId: retrieveSubscriptionStatus
+      summary: Retrieve the current service status of a phone number
+      description: |
+        Answers the live service status of a mobile line
+        (`{ voiceSmsIn, voiceSmsOut, dataService }`).
+
+        The line is identified by the submitted `phoneNumber` (two-legged) or by
+        the access-token subject (three-legged) — see the API description for the
+        identifier-resolution rules and the parameter-driven functional cases (the
+        trailing three digits are a status bitfield over the three fields).
+      security:
+        - openId:
+            - subscription-status:retrieve-subscription-status
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscriptionStatusRequest"
+      responses:
+        "200":
+          description: The current service status of the line.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionStatusResponse"
+              examples:
+                allActive:
+                  summary: All services active (happy-path default, `…000` tail)
+                  value:
+                    voiceSmsIn: active
+                    voiceSmsOut: active
+                    dataService: active
+                inboundSuspended:
+                  summary: Inbound Voice/SMS suspended (`…001` tail)
+                  value:
+                    voiceSmsIn: suspended
+                    voiceSmsOut: active
+                    dataService: active
+                dataThrottled:
+                  summary: Mobile data throttled (`…008` tail)
+                  value:
+                    voiceSmsIn: active
+                    voiceSmsOut: active
+                    dataService: throttled
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body, an unknown field, or a `phoneNumber` that is not in
+            E.164 format.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionStatusError"
+              examples:
+                invalidArgument:
+                  summary: Malformed body or `phoneNumber`
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`phoneNumber` must be in E.164 format (e.g. +123456789)."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            line cannot be identified (no `phoneNumber` and a non-line subject),
+            `UNNECESSARY_IDENTIFIER` when a `phoneNumber` is submitted on a
+            three-legged line token, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionStatusError"
+              examples:
+                missingIdentifier:
+                  summary: The line cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The phone number cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The number is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The phone number is already identified by the access token.
+                serviceNotApplicable:
+                  summary: Reserved `…422` suffix
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved line identifier (docs/DESIGN.md §7).
+          The identifier's trailing three digits are a status bitfield over the
+          three service fields. Reserved error suffixes come from the shared
+          convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404, …422)
+            result: the canonical CAMARA error for that status
+          - input: "identifier trailing digits …000 (or no digits)"
+            result: "200 { voiceSmsIn: active, voiceSmsOut: active, dataService: active }"
+          - input: "identifier trailing digits with bit 0 set (e.g. …001)"
+            result: "200 voiceSmsIn: suspended"
+          - input: "identifier trailing digits with bit 1 set (e.g. …002)"
+            result: "200 voiceSmsOut: suspended"
+          - input: "identifier trailing digits d with (d >> 2) % 3 == 1 (e.g. …004)"
+            result: "200 dataService: suspended"
+          - input: "identifier trailing digits d with (d >> 2) % 3 == 2 (e.g. …008)"
+            result: "200 dataService: throttled"
+          - input: no phoneNumber, an E.164 token subject (three-legged)
+            result: same cases, driven by the subject's trailing three digits
+          - input: phoneNumber submitted on a three-legged line token
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no phoneNumber and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: malformed body, unknown field, or non-E.164 phoneNumber
+            result: "400 INVALID_ARGUMENT"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    SubscriptionStatusRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        Request for the current service status of a line. The `phoneNumber` is
+        valued only in two-legged authentication; supplying it with a three-legged
+        (line) token yields `422 UNNECESSARY_IDENTIFIER`, and omitting it under a
+        non-line token yields `422 MISSING_IDENTIFIER`.
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+
+    SubscriptionStatusResponse:
+      type: object
+      additionalProperties: false
+      description: The current service status of the line.
+      required:
+        - voiceSmsIn
+        - voiceSmsOut
+        - dataService
+      properties:
+        voiceSmsIn:
+          type: string
+          description: Status of inbound Voice/SMS services.
+          enum:
+            - active
+            - suspended
+        voiceSmsOut:
+          type: string
+          description: Status of outbound Voice/SMS services.
+          enum:
+            - active
+            - suspended
+        dataService:
+          type: string
+          description: Status of mobile data service.
+          enum:
+            - active
+            - suspended
+            - throttled
+
+    SubscriptionStatusError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Subscription Status `code` set (the 422 identifier codes plus the
+        API's own `IDENTIFIER_NOT_FOUND`).
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - IDENTIFIER_NOT_FOUND
+                - MISSING_IDENTIFIER
+                - UNNECESSARY_IDENTIFIER
+                - SERVICE_NOT_APPLICABLE
+                - CONFLICT
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

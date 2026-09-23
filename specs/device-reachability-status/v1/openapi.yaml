@@ -1,0 +1,250 @@
+# CamaraSim — Device Reachability Status, API version v1 (CAMARA 1.0.0).
+#
+# Vendored from the CAMARA Device Reachability Status API (device-reachability-
+# status 1.0.0) and annotated with CamaraSim's parameter-driven functional cases
+# (docs/DESIGN.md §7, §9). Backed by `src/apis/device_reachability_status/v1.rs`;
+# spec and code must not drift.
+#
+# In the Spring25 meta-release the combined CAMARA *Device Status* API was split
+# into separate Device Reachability Status and Device Roaming Status APIs, so this
+# is mounted under its real published name/version rather than a loose
+# "device-status v1" (mirroring the KYC Match v0.3 decision — DESIGN §9).
+#
+# Serves `POST /retrieve`.
+openapi: 3.0.3
+info:
+  title: Device Reachability Status
+  description: |
+    Answers whether a device is currently reachable on the network and, if so,
+    over which bearers (data / SMS) — the "reachability" half of the former
+    CAMARA Device Status API.
+
+    This is the CamaraSim reference double for CAMARA Device Reachability Status
+    1.0.0. The device can be identified either by the `device` object in the
+    request body (two-legged / CIBA) or by the identity a three-legged access
+    token authenticated (in which case `device` is omitted). The endpoint
+    requires the `device-reachability-status:read` scope.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    The identifier is the submitted device identifier (`phoneNumber`, else
+    `networkAccessIdentifier`, else the IPv4 `publicAddress`, else `ipv6Address`),
+    or — when no `device` is supplied — the access token's subject (`sub`). The
+    result is chosen deterministically from that identifier's trailing three
+    digits:
+
+    - **Reserved error suffix** — if the identifier's trailing three digits name
+      a reserved CAMARA status, the endpoint answers with that canonical CAMARA
+      error instead of a result (shared convention — see the referenced
+      `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+      `…500`, `…503`.
+    - **`…000`** — the device is **not reachable**: `reachable: false`, empty
+      `connectivity`.
+    - **odd trailing digits** — reachable over SMS only (e.g. limited coverage):
+      `reachable: true`, `connectivity: ["SMS"]`.
+    - **any other input** (the happy-path default, including an identifier with no
+      trailing digits such as the synthetic `camarasim-user` subject) — fully
+      reachable: `reachable: true`, `connectivity: ["DATA","SMS"]`.
+
+    Examples: `+123456789012` → reachable over data+SMS; `+123456789011` →
+    reachable over SMS only; `+123456789000` → not reachable; `+123456789404` →
+    `404 NOT_FOUND`.
+  version: "1.0.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/device-reachability-status/v1"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /retrieve:
+    post:
+      operationId: getReachabilityStatus
+      summary: Retrieve the reachability status of a device
+      description: |
+        Returns whether the device is currently reachable on the network and,
+        when it is, over which bearers (data / SMS). Supply a `device`, or omit
+        it to use the device identified by a three-legged access token.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - device-reachability-status:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RequestReachabilityStatus"
+      responses:
+        "200":
+          description: The device's current reachability status.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReachabilityStatusResponse"
+              examples:
+                reachableDataSms:
+                  summary: Reachable over data and SMS (even tail)
+                  value:
+                    reachable: true
+                    connectivity: ["DATA", "SMS"]
+                reachableSmsOnly:
+                  summary: Reachable over SMS only (odd tail)
+                  value:
+                    reachable: true
+                    connectivity: ["SMS"]
+                notReachable:
+                  summary: Not reachable (…000 tail)
+                  value:
+                    reachable: false
+                    connectivity: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the identifier (the first present device
+          identifier, else the access token subject) whose trailing three digits
+          drive the case (docs/DESIGN.md §7). Reserved error suffixes come from
+          the shared convention in errors.yaml. Note: canonical Device
+          Reachability Status 1.0.0 declares 400/401/403/404/422/429/503;
+          CamaraSim exposes the full shared error set so every reserved case is
+          reachable (409/500 are CamaraSim extensions). A supplied `device` is
+          used as-is; CamaraSim does not model the three-legged
+          IDENTIFIER_MISMATCH / UNNECESSARY_IDENTIFIER 422 sub-cases.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier ending in …000"
+            result: '200 { reachable: false, connectivity: [] }'
+          - input: identifier with odd trailing three digits
+            result: '200 { reachable: true, connectivity: ["SMS"] }'
+          - input: any other identifier (happy-path default)
+            result: '200 { reachable: true, connectivity: ["DATA","SMS"] }'
+          - input: "`device` present but carrying no identifier"
+            result: "400 INVALID_ARGUMENT"
+          - input: no `device` and no token subject
+            result: "422 MISSING_IDENTIFIER"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    RequestReachabilityStatus:
+      type: object
+      description: Request to retrieve a device's reachability status.
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+
+    Device:
+      type: object
+      description: >-
+        Identifies the device. At least one identifier must be present. Optional
+        at the request level: omit `device` to use the device identified by a
+        three-legged access token. CamaraSim keys its functional cases off the
+        first present identifier, in the order phoneNumber → networkAccessIdentifier
+        → ipv4Address.publicAddress → ipv6Address.
+      minProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        networkAccessIdentifier:
+          type: string
+          description: A network access identifier assigned by the operator.
+          example: "user012@example.com"
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          description: The device's IPv6 address.
+          example: "2001:db8::11"
+
+    DeviceIpv4Addr:
+      type: object
+      description: >-
+        The device's IPv4 address information. CamaraSim reads `publicAddress` as
+        the identifier; `privateAddress`/`publicPort` are accepted for fidelity.
+      properties:
+        publicAddress:
+          type: string
+          example: "203.0.113.12"
+        privateAddress:
+          type: string
+          example: "192.0.2.25"
+        publicPort:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          example: 59765
+
+    ReachabilityStatusResponse:
+      type: object
+      description: A device's current reachability status.
+      required:
+        - reachable
+      properties:
+        reachable:
+          type: boolean
+          description: >-
+            `true` if the device is currently reachable on the network, `false`
+            otherwise.
+        connectivity:
+          type: array
+          description: >-
+            The bearers over which the device is reachable. Empty when the device
+            is not reachable.
+          items:
+            type: string
+            enum:
+              - DATA
+              - SMS
+          example: ["DATA", "SMS"]

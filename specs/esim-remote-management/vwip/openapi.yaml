@@ -1,0 +1,1066 @@
+# CamaraSim — eSIM Remote Management, API version vwip (CAMARA wip).
+#
+# Vendored from the CAMARA eSIM Remote Management API (eSimRemoteManagement,
+# work-in-progress — no released version yet, so mounted at its canonical `vwip`
+# base path like the other unreleased CAMARA APIs) and annotated with CamaraSim's
+# parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/esim_remote_management/vwip.rs`; spec and code must not drift.
+#
+# This slice serves two stateless read legs and two command legs:
+#   - `POST /profile/downloaded-list` (operationId `profileList`) — lists the eSIM
+#     profiles installed on a device's eUICC, keyed by the device `eId`.
+#   - `POST /profile/result/query` (operationId `profileResultQuery`) — reports the
+#     result of an asynchronous profile operation (download / enable / disable /
+#     delete), keyed by the `taskId` a prior operation returned. CamaraSim is
+#     stateless, so the result is deterministic from the `taskId` (§7): its
+#     trailing three decimal digits pick `operResult` (executing / success / fail),
+#     with the reported device `eId`/`imei`/`iccid` synthesised from the id.
+#   - `POST /profile/oper` (operationId `profileOperation`) — perform a lifecycle
+#     operation on a profile: enable / disable / delete. CamaraSim models the
+#     synchronous acknowledgement — it validates the request and answers `code: 0`
+#     echoing the configuration, with the device `eId` as the control plane (§7)
+#     and `optType` surfaced in `message`. The actual eUICC state change and the
+#     asynchronous `sink` callback delivery are documented cuts (no live eUICC
+#     engine); the eventual result is separately pollable via `profileResultQuery`.
+#   - `POST /profile/download` (operationId `profileDownload`) — download (and
+#     optionally auto-enable) a new profile onto the device's eUICC. Modelled like
+#     `profileOperation` as a synchronous acknowledgement (`code: 0`), with the
+#     device `eId` as the control plane (§7) and `autoEnableType` surfaced in
+#     `message`. The profile download / eUICC state change and the asynchronous
+#     `sink` callback delivery are documented cuts (no live eUICC engine).
+# This completes the eSIM Remote Management vwip surface (all four upstream legs).
+#
+# Per the CamaraSim house style the vendored upstream inline error responses and
+# `openId` security scheme are replaced with `$ref`s to the shared
+# `../../shared/errors.yaml` and `../../auth/openapi.yaml` fragments so the served
+# copy stays consistent with every other mounted API; the request/response
+# schemas are the upstream CAMARA schemas verbatim.
+openapi: 3.0.3
+info:
+  title: eSIM Remote Management
+  description: |
+    Provides eSIM-based remote management, letting device manufacturers (OEMs)
+    and ecosystem partners remotely manage the eSIM profiles installed on a
+    device's eUICC — downloading, activating, de-activating, deleting, and
+    querying them.
+
+    This is the CamaraSim reference double for the CAMARA eSIM Remote Management
+    API (work-in-progress). This slice models two stateless read legs and two
+    command legs:
+
+    - the **profile inventory query** (`profileList`): given a device `eId`,
+      return the profiles currently stored on that device's eUICC (their `iccid`
+      and enable status), plus the device `imei`. It requires the
+      `esim-remote-management:downloadedlist` scope.
+    - the **profile operation result query** (`profileResultQuery`): given the
+      `taskId` a prior asynchronous operation returned, report that task's
+      current `operResult` (0 executing / 1 success / 2 fail). It requires the
+      `esim-remote-management:query` scope.
+    - the **profile operation** (`profileOperation`): perform a lifecycle
+      operation on a profile — enable (`optType` 1) / disable (2) / delete (3).
+      CamaraSim models the synchronous acknowledgement (`code: 0`), echoing the
+      submitted configuration; the actual eUICC state change and the `sink`
+      callback delivery are documented cuts. It requires the
+      `esim-remote-management:oper` scope.
+    - the **profile download** (`profileDownload`): download (and optionally
+      auto-enable) a new profile onto the device's eUICC. Modelled like
+      `profileOperation` as a synchronous acknowledgement (`code: 0`), echoing
+      the submitted configuration with `autoEnableType` (1 — download and enable)
+      surfaced in `message`; the actual download / eUICC state change and the
+      `sink` callback delivery are documented cuts. It requires the
+      `esim-remote-management:download` scope.
+
+    ## Request / response envelope
+
+    The read legs wrap their payload in a base "CMP request" envelope
+    (`timestamp` / `sequenceNum` / `clientId` / `data`) and answer with a base
+    "CMP response" envelope carrying a `resultCode` (`B100000` = success),
+    `resultDesc`, the echoed `sequenceNum`, and a `data` payload. The command
+    legs use the upstream callback-subscription envelope instead
+    (`protocol` / `sink` / `types` / `config`) and answer with a
+    `code` / `message` / `config` envelope. Both are the upstream API's own
+    conventions, kept verbatim.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    The device `eId` (`data.eId`, 32 hex characters) is the control plane. Its
+    trailing three **decimal** digits (non-digit characters — the hex letters —
+    are skipped, mirroring Traffic Influence's hex `appId`) drive the case:
+
+    - **Reserved error suffix** — if those trailing three digits name a reserved
+      CAMARA status the endpoint answers with that canonical CAMARA error instead
+      of a result (shared convention — see the referenced `errors.yaml`): `…400`,
+      `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`.
+    - **Profile inventory** — otherwise the trailing three digits `d` set the
+      number of installed profiles (`d % 4`, so `…000` / no digits → an empty
+      eUICC, `…001` → 1, `…002` → 2, `…003` → 3). At most one profile is enabled
+      at a time (the eUICC rule): the first profile is enabled (`enableStatus: 1`),
+      the rest disabled (`0`). Each profile's `iccid` and the device `imei` are
+      derived deterministically from the `eId` (a stable FNV hash + a Luhn check
+      digit), so the same `eId` always returns the same inventory.
+
+    A `data.eId` that is absent or not 32 hex characters → `400 INVALID_ARGUMENT`
+    (CamaraSim requires the `eId` for the query — a documented tightening of the
+    upstream optional field).
+
+    Examples: `eId` `A1B2C3D4E5F600000000000000000001` → 1 enabled profile;
+    `…0000000000000000000000000000404` → `404 NOT_FOUND`.
+  version: wip
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/esim-remote-management/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /profile/downloaded-list:
+    post:
+      operationId: profileList
+      summary: Query downloaded profile list
+      description: |
+        Retrieve the list of eSIM profiles currently downloaded on the device's
+        eUICC — each profile's `iccid` and enable status — identified by the
+        device `eId`.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - esim-remote-management:downloadedlist
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BaseCmpReqEidProfileListReq"
+      responses:
+        "200":
+          description: The list of profiles installed on the device's eUICC.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BaseCmpRespEidProfileListResp"
+              examples:
+                oneEnabledProfile:
+                  summary: A device with one enabled profile
+                  value:
+                    resultCode: B100000
+                    resultDesc: Success
+                    sequenceNum: seq-0001
+                    data:
+                      imei: "356938035643809"
+                      eId: "A1B2C3D4E5F600000000000000000001"
+                      profiles:
+                        - iccid: "8931089011234567890"
+                          enableStatus: 1
+                emptyEuicc:
+                  summary: A device with no installed profiles
+                  value:
+                    resultCode: B100000
+                    resultDesc: Success
+                    data:
+                      imei: "356938035643809"
+                      eId: "A1B2C3D4E5F600000000000000000000"
+                      profiles: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The profile inventory is selected from the device `eId` (`data.eId`)
+          whose trailing three decimal digits drive the case (docs/DESIGN.md §7).
+          Reserved error suffixes come from the shared convention in errors.yaml.
+          Note: the canonical eSIM Remote Management spec declares
+          400/401/403/404/500/503 for this operation; CamaraSim exposes the full
+          shared reserved error set so every reserved case is reachable
+          (409/422/429 are CamaraSim extensions, sanctioned by the upstream spec's
+          own "error list is not exhaustive" note). The asynchronous lifecycle
+          operations (download / operation / result query) are not modelled yet.
+        cases:
+          - input: "`data.eId` ending in a reserved error suffix (e.g. …404)"
+            result: the canonical CAMARA error for that status
+          - input: "`data.eId` ending in …000 (or with no trailing decimal digits)"
+            result: "200 — an empty eUICC (profiles: [])"
+          - input: "`data.eId` ending in …001"
+            result: "200 — one enabled profile (enableStatus 1)"
+          - input: "`data.eId` ending in …002 / …003"
+            result: "200 — 2 / 3 profiles; the first enabled, the rest disabled"
+          - input: "`data.eId` absent or not 32 hex characters"
+            result: "400 INVALID_ARGUMENT"
+          - input: "a `sequenceNum` that violates its pattern"
+            result: "400 INVALID_ARGUMENT"
+
+  /profile/result/query:
+    post:
+      operationId: profileResultQuery
+      summary: Query profile operation result
+      description: |
+        Query the result of an asynchronous profile operation (download,
+        enable, disable, or delete) using the `taskId` returned by that
+        operation.
+
+        CamaraSim is stateless, so the result is deterministic from the
+        `taskId` — see the API description for the parameter-driven functional
+        cases.
+      security:
+        - openId:
+            - esim-remote-management:query
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BaseCmpReqProfileResultQueryReq"
+      responses:
+        "200":
+          description: The current result of the queried task.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BaseCmpRespProfileResultQueryResp"
+              examples:
+                success:
+                  summary: A task that completed successfully
+                  value:
+                    resultCode: B100000
+                    resultDesc: Success
+                    sequenceNum: seq-77
+                    data:
+                      taskId: task-001
+                      imei: "356938035643809"
+                      iccid: "8931089011234567890"
+                      operResult: 1
+                      eId: "A1B2C3D4E5F600000000000000000001"
+                      resultMsg: Operation completed successfully
+                executing:
+                  summary: A task still in progress
+                  value:
+                    resultCode: B100000
+                    resultDesc: Success
+                    data:
+                      taskId: task-000
+                      imei: "356938035643809"
+                      iccid: "8931089011234567890"
+                      operResult: 0
+                      eId: "A1B2C3D4E5F600000000000000000000"
+                      resultMsg: Operation in progress
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The task result is selected from the `taskId` (`data.taskId`) whose
+          trailing three decimal digits drive the case (docs/DESIGN.md §7).
+          Reserved error suffixes come from the shared convention in errors.yaml
+          (the query itself fails); otherwise `d % 3` picks the task
+          `operResult`. The device `eId`/`imei`/`iccid` on the response are
+          synthesised deterministically from the `taskId`. As with `profileList`,
+          409/422/429 are CamaraSim extensions beyond the canonical eSIM error
+          set (sanctioned by the upstream "error list is not exhaustive" note).
+        cases:
+          - input: "`data.taskId` ending in a reserved error suffix (e.g. …404)"
+            result: the canonical CAMARA error for that status
+          - input: "`data.taskId` ending in …000 / …003 (or with no trailing decimal digits)"
+            result: "200 — operResult 0 (executing)"
+          - input: "`data.taskId` ending in …001 / …004"
+            result: "200 — operResult 1 (success)"
+          - input: "`data.taskId` ending in …002 / …005"
+            result: "200 — operResult 2 (fail)"
+          - input: "`data.taskId` absent or violating ^[a-zA-Z0-9_-]{1,64}$"
+            result: "400 INVALID_ARGUMENT"
+          - input: "a `sequenceNum` that violates its pattern"
+            result: "400 INVALID_ARGUMENT"
+
+  /profile/oper:
+    post:
+      operationId: profileOperation
+      summary: Perform profile operation
+      description: |
+        Perform a lifecycle operation on an eSIM profile — enable (`optType` 1),
+        disable (2), or delete (3) — for the device named by
+        `config.subscriptionDetail.eId`.
+
+        The upstream operation is asynchronous (its eventual result is delivered
+        to a `sink` and pollable via `profileResultQuery`). CamaraSim models the
+        **synchronous acknowledgement**: it validates the request and answers
+        `code: 0` echoing the configuration. The actual eUICC state change and
+        the `sink` callback delivery are documented cuts (no live eUICC engine).
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - esim-remote-management:oper
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BaseCmpReqProfileOperReq"
+      responses:
+        "200":
+          description: The command was accepted (synchronous acknowledgement).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BaseCmpRespProfileOperResp"
+              examples:
+                enableAccepted:
+                  summary: An enable operation accepted
+                  value:
+                    code: 0
+                    message: Enable operation accepted
+                    config:
+                      subscriptionDetail:
+                        eId: "A1B2C3D4E5F600000000000000000001"
+                        imei: "356938035643809"
+                        iccid: "8931089011234567890"
+                        optType: 1
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The command is keyed on the device `eId`
+          (`config.subscriptionDetail.eId`) whose trailing three decimal digits
+          drive the case (docs/DESIGN.md §7). A reserved error suffix selects a
+          canonical CAMARA error (the command is rejected); otherwise the command
+          is accepted (`code: 0`) and `optType` (1 Enable / 2 Disable / 3 Delete)
+          is surfaced in `message`. The device `imei`/`iccid` echo the submitted
+          values or are synthesised deterministically from the `eId`. As with the
+          read legs, 409/422/429 are CamaraSim extensions beyond the canonical
+          eSIM error set (sanctioned by the upstream "error list is not
+          exhaustive" note). The eUICC state change and `sink` callback delivery
+          are documented cuts (no live eUICC engine).
+        cases:
+          - input: "`config.subscriptionDetail.eId` ending in a reserved error suffix (e.g. …404)"
+            result: the canonical CAMARA error for that status
+          - input: "`optType` 1 with a non-reserved `eId`"
+            result: "200 — code 0, message `Enable operation accepted`"
+          - input: "`optType` 2 / 3"
+            result: "200 — message `Disable` / `Delete operation accepted`"
+          - input: "`config` or `config.subscriptionDetail` absent"
+            result: "400 INVALID_ARGUMENT"
+          - input: "`eId` absent or not 32 hex characters"
+            result: "400 INVALID_ARGUMENT"
+          - input: "`optType` absent"
+            result: "400 INVALID_ARGUMENT"
+          - input: "`optType` outside 1..=3, or `subscriptionMaxEvents` outside 1..=1000"
+            result: "400 OUT_OF_RANGE"
+          - input: "a malformed `imei` / `iccid` / `sink` / `protocol` / `types`"
+            result: "400 INVALID_ARGUMENT"
+
+  /profile/download:
+    post:
+      operationId: profileDownload
+      summary: Download profile
+      description: |
+        Download — and optionally auto-enable — a new eSIM profile onto the
+        eUICC of the device named by `config.subscriptionDetail.eId`.
+
+        The upstream operation is asynchronous (its eventual result is delivered
+        to a `sink` and pollable via `profileResultQuery`). CamaraSim models the
+        **synchronous acknowledgement**: it validates the request and answers
+        `code: 0` echoing the configuration. When `autoEnableType` is `1` the
+        acknowledgement reports a download-and-enable; otherwise a plain
+        download. The actual profile download / eUICC state change and the `sink`
+        callback delivery are documented cuts (no live eUICC engine).
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - esim-remote-management:download
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BaseCmpReqProfileDownloadReq"
+      responses:
+        "200":
+          description: The command was accepted (synchronous acknowledgement).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BaseCmpRespProfileDownloadResp"
+              examples:
+                downloadAndEnableAccepted:
+                  summary: A download-and-enable accepted
+                  value:
+                    code: 0
+                    message: Profile download and enable accepted
+                    config:
+                      subscriptionDetail:
+                        eId: "A1B2C3D4E5F600000000000000000001"
+                        imei: "356938035643809"
+                        iccid: "8931089011234567890"
+                        autoEnableType: 1
+                plainDownloadAccepted:
+                  summary: A plain download accepted (no auto-enable)
+                  value:
+                    code: 0
+                    message: Profile download accepted
+                    config:
+                      subscriptionDetail:
+                        eId: "A1B2C3D4E5F600000000000000000001"
+                        imei: "356938035643809"
+                        iccid: "8931089011234567890"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The command is keyed on the device `eId`
+          (`config.subscriptionDetail.eId`) whose trailing three decimal digits
+          drive the case (docs/DESIGN.md §7). A reserved error suffix selects a
+          canonical CAMARA error (the command is rejected); otherwise the command
+          is accepted (`code: 0`) and `autoEnableType` (`1` — download and
+          enable) is surfaced in `message`. The device `imei`/`iccid` echo the
+          submitted values or are synthesised deterministically from the `eId`.
+          As with the other legs, 409/422/429 are CamaraSim extensions beyond the
+          canonical eSIM error set (sanctioned by the upstream "error list is not
+          exhaustive" note). The profile download, eUICC state change, and `sink`
+          callback delivery are documented cuts (no live eUICC engine).
+        cases:
+          - input: "`config.subscriptionDetail.eId` ending in a reserved error suffix (e.g. …404)"
+            result: the canonical CAMARA error for that status
+          - input: "a non-reserved `eId`, no `autoEnableType`"
+            result: "200 — code 0, message `Profile download accepted`"
+          - input: "a non-reserved `eId` with `autoEnableType` 1"
+            result: "200 — message `Profile download and enable accepted`"
+          - input: "`config` or `config.subscriptionDetail` absent"
+            result: "400 INVALID_ARGUMENT"
+          - input: "`eId` absent or not 32 hex characters"
+            result: "400 INVALID_ARGUMENT"
+          - input: "`autoEnableType` present but ≠ 1, or `subscriptionMaxEvents` outside 1..=1000"
+            result: "400 OUT_OF_RANGE"
+          - input: "a malformed `imei` / `iccid` / `sink` / `protocol` / `types`"
+            result: "400 INVALID_ARGUMENT"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    BaseCmpReqEidProfileListReq:
+      type: object
+      description: Request body for querying the downloaded profile list.
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          maxLength: 64
+          description: >-
+            Request timestamp, RFC 3339 with a time zone. Accepted for fidelity;
+            not interpreted by CamaraSim.
+        sequenceNum:
+          type: string
+          pattern: '^[a-zA-Z0-9_\-]{1,64}$'
+          maxLength: 64
+          description: Sequence number for request tracking, echoed on the response.
+          example: seq-0001
+        clientId:
+          type: string
+          pattern: '^[a-zA-Z0-9_\-]{1,128}$'
+          maxLength: 128
+          description: Client identifier. Accepted for fidelity.
+          example: csim-esim-client-01
+        data:
+          $ref: "#/components/schemas/EidProfileListReq"
+
+    EidProfileListReq:
+      type: object
+      description: Data payload for the profile list request.
+      properties:
+        eId:
+          type: string
+          pattern: '^[A-Fa-f0-9]{32}$'
+          maxLength: 64
+          description: The device EID (eUICC identifier) to query profiles for.
+          example: "A1B2C3D4E5F600000000000000000001"
+
+    BaseCmpRespEidProfileListResp:
+      type: object
+      description: Response body for the profile list query.
+      properties:
+        resultCode:
+          type: string
+          pattern: '^B[0-9]{6}$'
+          maxLength: 32
+          description: "`B100000` — success; any other value — failure."
+          example: B100000
+        resultDesc:
+          type: string
+          pattern: '^[\s\S]{0,256}$'
+          maxLength: 256
+          description: Result description message.
+          example: Success
+        sequenceNum:
+          type: string
+          pattern: '^[a-zA-Z0-9_\-]{1,64}$'
+          maxLength: 64
+          description: The request's `sequenceNum`, echoed if one was supplied.
+          example: seq-0001
+        data:
+          $ref: "#/components/schemas/EidProfileListResp"
+
+    EidProfileListResp:
+      type: object
+      description: Data payload for the profile list response.
+      properties:
+        imei:
+          type: string
+          pattern: '^[0-9]{15}$'
+          maxLength: 32
+          description: The device IMEI, derived deterministically from the eId.
+          example: "356938035643809"
+        profiles:
+          type: array
+          maxItems: 100
+          description: The profiles installed on the device's eUICC.
+          items:
+            $ref: "#/components/schemas/ProfileInfo"
+        eId:
+          type: string
+          pattern: '^[A-Fa-f0-9]{32}$'
+          maxLength: 64
+          description: The device EID, echoed from the request.
+          example: "A1B2C3D4E5F600000000000000000001"
+
+    ProfileInfo:
+      type: object
+      description: Information about a single installed profile.
+      properties:
+        iccid:
+          type: string
+          pattern: '^[0-9]{19,20}$'
+          maxLength: 32
+          description: The profile's ICCID, derived deterministically from the eId.
+          example: "8931089011234567890"
+        enableStatus:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 1
+          description: "Profile enable status: 0 — disabled, 1 — enabled."
+          example: 1
+
+    BaseCmpReqProfileResultQueryReq:
+      type: object
+      description: Request body for querying an asynchronous operation's result.
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          maxLength: 64
+          description: >-
+            Request timestamp, RFC 3339 with a time zone. Accepted for fidelity;
+            not interpreted by CamaraSim.
+        sequenceNum:
+          type: string
+          pattern: '^[a-zA-Z0-9_\-]{1,64}$'
+          maxLength: 64
+          description: Sequence number for request tracking, echoed on the response.
+          example: seq-77
+        clientId:
+          type: string
+          pattern: '^[a-zA-Z0-9_\-]{1,128}$'
+          maxLength: 128
+          description: Client identifier. Accepted for fidelity.
+          example: csim-esim-client-02
+        data:
+          $ref: "#/components/schemas/ProfileResultQueryReq"
+
+    ProfileResultQueryReq:
+      type: object
+      description: Data payload for the result-query request.
+      properties:
+        taskId:
+          type: string
+          pattern: '^[a-zA-Z0-9_\-]{1,64}$'
+          maxLength: 64
+          description: >-
+            The task identifier returned by a prior asynchronous profile
+            operation. Required by CamaraSim (a documented tightening of the
+            upstream optional field) and the control plane for the result.
+          example: task-001
+
+    BaseCmpRespProfileResultQueryResp:
+      type: object
+      description: Response body for the result-query.
+      properties:
+        resultCode:
+          type: string
+          pattern: '^B[0-9]{6}$'
+          maxLength: 32
+          description: >-
+            `B100000` — the query itself succeeded; the queried task's outcome
+            is carried by `data.operResult`.
+          example: B100000
+        resultDesc:
+          type: string
+          pattern: '^[\s\S]{0,256}$'
+          maxLength: 256
+          description: Result description message.
+          example: Success
+        sequenceNum:
+          type: string
+          pattern: '^[a-zA-Z0-9_\-]{1,64}$'
+          maxLength: 64
+          description: The request's `sequenceNum`, echoed if one was supplied.
+          example: seq-77
+        data:
+          $ref: "#/components/schemas/ProfileResultQueryResp"
+
+    ProfileResultQueryResp:
+      type: object
+      description: Data payload for the result-query response.
+      properties:
+        taskId:
+          type: string
+          pattern: '^[a-zA-Z0-9_\-]{1,64}$'
+          maxLength: 64
+          description: The task identifier, echoed from the request.
+          example: task-001
+        imei:
+          type: string
+          pattern: '^[0-9]{15}$'
+          maxLength: 32
+          description: The device IMEI, synthesised deterministically from the taskId.
+          example: "356938035643809"
+        iccid:
+          type: string
+          pattern: '^[0-9]{19,20}$'
+          maxLength: 32
+          description: The affected profile's ICCID, synthesised from the taskId.
+          example: "8931089011234567890"
+        operResult:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 2
+          description: "Task result: 0 — executing, 1 — success, 2 — fail."
+          example: 1
+        eId:
+          type: string
+          pattern: '^[A-Fa-f0-9]{32}$'
+          maxLength: 64
+          description: The device EID, synthesised deterministically from the taskId.
+          example: "A1B2C3D4E5F600000000000000000001"
+        resultMsg:
+          type: string
+          pattern: '^[\s\S]{0,512}$'
+          maxLength: 512
+          description: Human-readable description of the task result.
+          example: Operation completed successfully
+
+    Protocol:
+      type: string
+      enum:
+        - HTTP
+      description: The callback protocol; only `HTTP` is supported.
+      example: HTTP
+
+    BaseCmpReqProfileOperReq:
+      type: object
+      description: >-
+        Request body for a profile operation. Unlike the read legs, the command
+        leg wraps its payload in the callback-subscription envelope
+        (`protocol` / `sink` / `types` / `config`).
+      properties:
+        protocol:
+          $ref: "#/components/schemas/Protocol"
+        sink:
+          type: string
+          pattern: "^https?://[a-zA-Z0-9\\-._~:/?#\\[\\]@!$&'()*+,;=]{1,256}$"
+          maxLength: 256
+          example: "https://endpoint.example.com/sink"
+          description: >-
+            Callback address for asynchronous notification delivery. Accepted and
+            validated (surface form), but delivery is a documented cut.
+        types:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            pattern: '^[a-zA-Z0-9_\-]{1,64}$'
+            maxLength: 64
+            description: Event type identifier.
+          description: List of subscribed event types. Accepted for fidelity.
+        config:
+          $ref: "#/components/schemas/ProfileOperReq"
+
+    ProfileOperReq:
+      type: object
+      description: Configuration for the profile-operation request.
+      properties:
+        subscriptionDetail:
+          type: object
+          description: The device and the operation to perform on it.
+          properties:
+            eId:
+              type: string
+              pattern: '^[A-Fa-f0-9]{32}$'
+              maxLength: 64
+              description: >-
+                The device EID (eUICC identifier). Required by CamaraSim (a
+                documented tightening) and the control plane for the operation.
+              example: "A1B2C3D4E5F600000000000000000001"
+            imei:
+              type: string
+              pattern: '^[0-9]{15}$'
+              maxLength: 32
+              description: The device IMEI. Echoed on the response when supplied.
+            iccid:
+              type: string
+              pattern: '^[0-9]{19,20}$'
+              maxLength: 32
+              description: The target profile's ICCID. Echoed when supplied.
+            optType:
+              type: integer
+              format: int32
+              minimum: 1
+              maximum: 3
+              description: "Operation type: 1 Enable, 2 Disable, 3 Delete."
+              example: 1
+        initialEvent:
+          type: boolean
+          description: Whether to send an initial event. Accepted for fidelity.
+        subscriptionMaxEvents:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 1000
+          description: Maximum number of subscription events. Accepted for fidelity.
+        subscriptionExpireTime:
+          type: string
+          format: date-time
+          maxLength: 32
+          description: >-
+            Subscription expiry, RFC 3339 with a time zone. Accepted for fidelity.
+
+    BaseCmpRespProfileOperResp:
+      type: object
+      description: Response body for a profile operation (synchronous acknowledgement).
+      properties:
+        code:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 999999
+          description: "Response code: `0` — the command was accepted."
+          example: 0
+        message:
+          type: string
+          pattern: '^[\s\S]{0,256}$'
+          maxLength: 256
+          description: >-
+            Human-readable acknowledgement naming the accepted operation
+            (`Enable` / `Disable` / `Delete operation accepted`).
+          example: Enable operation accepted
+        config:
+          $ref: "#/components/schemas/ProfileOperResp"
+
+    ProfileOperResp:
+      type: object
+      description: The echoed configuration of the accepted profile operation.
+      properties:
+        subscriptionDetail:
+          type: object
+          description: The device and operation the command targeted.
+          properties:
+            eId:
+              type: string
+              pattern: '^[A-Fa-f0-9]{32}$'
+              maxLength: 64
+              description: The device EID, echoed from the request.
+              example: "A1B2C3D4E5F600000000000000000001"
+            imei:
+              type: string
+              pattern: '^[0-9]{15}$'
+              maxLength: 32
+              description: >-
+                The device IMEI — echoed if supplied, else synthesised
+                deterministically from the eId.
+              example: "356938035643809"
+            iccid:
+              type: string
+              pattern: '^[0-9]{19,20}$'
+              maxLength: 32
+              description: >-
+                The target profile's ICCID — echoed if supplied, else synthesised
+                from the eId.
+              example: "8931089011234567890"
+            optType:
+              type: integer
+              format: int32
+              minimum: 1
+              maximum: 3
+              description: "The operation performed: 1 Enable, 2 Disable, 3 Delete."
+              example: 1
+        initialEvent:
+          type: boolean
+          description: Echoed from the request when supplied.
+        subscriptionMaxEvents:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 1000
+          description: Echoed from the request when supplied.
+        subscriptionExpireTime:
+          type: string
+          format: date-time
+          maxLength: 32
+          description: Echoed from the request when supplied.
+
+    BaseCmpReqProfileDownloadReq:
+      type: object
+      description: >-
+        Request body for a profile download. Like the `profileOperation` leg, the
+        command wraps its payload in the callback-subscription envelope
+        (`protocol` / `sink` / `types` / `config`).
+      properties:
+        protocol:
+          $ref: "#/components/schemas/Protocol"
+        sink:
+          type: string
+          pattern: "^https?://[a-zA-Z0-9\\-._~:/?#\\[\\]@!$&'()*+,;=]{1,256}$"
+          maxLength: 256
+          example: "https://endpoint.example.com/sink"
+          description: >-
+            Callback address for asynchronous notification delivery. Accepted and
+            validated (surface form), but delivery is a documented cut.
+        types:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            pattern: '^[a-zA-Z0-9_\-]{1,64}$'
+            maxLength: 64
+            description: Event type identifier.
+          description: List of subscribed event types. Accepted for fidelity.
+        config:
+          $ref: "#/components/schemas/ProfileDownloadReq"
+
+    ProfileDownloadReq:
+      type: object
+      description: Configuration for the profile-download request.
+      properties:
+        subscriptionDetail:
+          type: object
+          description: The device and download options.
+          properties:
+            eId:
+              type: string
+              pattern: '^[A-Fa-f0-9]{32}$'
+              maxLength: 64
+              description: >-
+                The device EID (eUICC identifier). Required by CamaraSim (a
+                documented tightening) and the control plane for the download.
+              example: "A1B2C3D4E5F600000000000000000001"
+            imei:
+              type: string
+              pattern: '^[0-9]{15}$'
+              maxLength: 32
+              description: The device IMEI. Echoed on the response when supplied.
+            iccid:
+              type: string
+              pattern: '^[0-9]{19,20}$'
+              maxLength: 32
+              description: The target profile's ICCID. Echoed when supplied.
+            autoEnableType:
+              type: integer
+              format: int32
+              minimum: 1
+              maximum: 1
+              description: "Download and activate option: 1 — download and enable."
+              example: 1
+        initialEvent:
+          type: boolean
+          description: Whether to send an initial event. Accepted for fidelity.
+        subscriptionMaxEvents:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 1000
+          description: Maximum number of subscription events. Accepted for fidelity.
+        subscriptionExpireTime:
+          type: string
+          format: date-time
+          maxLength: 32
+          description: >-
+            Subscription expiry, RFC 3339 with a time zone. Accepted for fidelity.
+
+    BaseCmpRespProfileDownloadResp:
+      type: object
+      description: Response body for a profile download (synchronous acknowledgement).
+      properties:
+        code:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 999999
+          description: "Response code: `0` — the command was accepted."
+          example: 0
+        message:
+          type: string
+          pattern: '^[\s\S]{0,256}$'
+          maxLength: 256
+          description: >-
+            Human-readable acknowledgement (`Profile download accepted` or
+            `Profile download and enable accepted`).
+          example: Profile download and enable accepted
+        config:
+          $ref: "#/components/schemas/ProfileDownloadResp"
+
+    ProfileDownloadResp:
+      type: object
+      description: The echoed configuration of the accepted profile download.
+      properties:
+        subscriptionDetail:
+          type: object
+          description: The device and download options the command targeted.
+          properties:
+            eId:
+              type: string
+              pattern: '^[A-Fa-f0-9]{32}$'
+              maxLength: 64
+              description: The device EID, echoed from the request.
+              example: "A1B2C3D4E5F600000000000000000001"
+            imei:
+              type: string
+              pattern: '^[0-9]{15}$'
+              maxLength: 32
+              description: >-
+                The device IMEI — echoed if supplied, else synthesised
+                deterministically from the eId.
+              example: "356938035643809"
+            iccid:
+              type: string
+              pattern: '^[0-9]{19,20}$'
+              maxLength: 32
+              description: >-
+                The target profile's ICCID — echoed if supplied, else synthesised
+                from the eId.
+              example: "8931089011234567890"
+            autoEnableType:
+              type: integer
+              format: int32
+              minimum: 1
+              maximum: 1
+              description: "The download-and-activate option, echoed when supplied."
+              example: 1
+        initialEvent:
+          type: boolean
+          description: Echoed from the request when supplied.
+        subscriptionMaxEvents:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 1000
+          description: Echoed from the request when supplied.
+        subscriptionExpireTime:
+          type: string
+          format: date-time
+          maxLength: 32
+          description: Echoed from the request when supplied.

@@ -1,0 +1,1041 @@
+# CamaraSim — Dedicated Network - Accesses, API version vwip (CAMARA
+# DedicatedNetworks, work-in-progress).
+#
+# Vendored from the CAMARA DedicatedNetworks API family
+# (dedicated-network-accesses.yaml, version `wip`, whose canonical base path is
+# `dedicated-network-accesses/vwip`, so CamaraSim mounts it there, honouring the
+# version in the URL) and annotated with CamaraSim's parameter-driven functional
+# cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/dedicated_network_accesses/vwip.rs`; spec and code must not drift.
+#
+# This slice serves the create leg `POST /accesses` (`createAccess`), the read
+# leg `GET /accesses/{accessId}` (`readAccess`), the list leg `GET /accesses`
+# (`listAccesses`), the delete leg `DELETE /accesses/{accessId}`
+# (`deleteAccess`) — the full access CRUD — the device-roster read leg
+# `GET /accesses/{accessId}/devices` (`listDevices`), the device-add leg
+# `POST /accesses/{accessId}/devices/add` (`addDevicesToAccess`), and the
+# device-remove leg `POST /accesses/{accessId}/devices/remove`
+# (`removeDevicesFromAccess`).
+openapi: 3.0.3
+info:
+  title: Dedicated Network - Accesses
+  description: |
+    Provision device **access** to a dedicated network: bind a set of devices
+    (each a CAMARA `Device`) to a dedicated network (`networkId`, from the
+    companion **Networks** API), optionally restricting the QoS profiles those
+    devices may use. The `POST /accesses` operation creates an access, mints an
+    opaque UUID `id`, evaluates each submitted device to a per-device
+    `GRANTED`/`DENIED` status, and returns an `AccessInfo` carrying the minted
+    `id`, the associated `networkId`, aggregate `stats` and the recently-processed
+    devices.
+
+    This is the CamaraSim reference double for CAMARA Dedicated Network -
+    Accesses (`wip`), the access sibling of the **Networks** and read-only
+    **Network Profiles** APIs. `createAccess` requires the
+    `dedicated-network-accesses:accesses:create` scope.
+
+    ## Two-legged provisioning call
+
+    An access provisions a network for a fleet of devices, not for the caller's
+    own line, so this is a two-legged (`client_credentials`) provisioning call:
+    there is no three-legged dance. State is held in memory (single node,
+    DESIGN §4).
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Three control planes:
+
+    - **Request validation → 400.** A body that is not a valid
+      `CreateAccessRequest`; a missing/non-UUID `networkId`; a `devices` array
+      outside `1..=100` items; a device carrying **no** identifier (none of
+      `phoneNumber` / `networkAccessIdentifier` / `ipv4Address` / `ipv6Address`);
+      a non-E.164 `phoneNumber`; a `qosProfiles` array outside `1..=32` items or
+      an empty profile name; or a `sink` not matching `^https://.+$` →
+      `400 INVALID_ARGUMENT`.
+    - **`networkId` identifier plane.** The required `networkId` UUID is the
+      top-level identifier. Its trailing three digits drive the result: a
+      reserved suffix (`…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+      `…500`, `…503`; see the referenced `errors.yaml`) → that canonical CAMARA
+      error (e.g. `…404` → `404 NOT_FOUND`, no such network). Otherwise the
+      access is created.
+    - **Per-device grant plane.** Each submitted device's outcome is driven by
+      its own identifier (`phoneNumber`, else `networkAccessIdentifier`, else
+      `ipv6Address`, else the IPv4 `publicAddress`): a reserved-suffix identifier
+      → that device is `DENIED`, any other → `GRANTED`. This drives the aggregate
+      `stats` (`totalDevices` / `totalGranted` / `totalDenied`) and the
+      per-device `recentAccessDevices` list, so `devices` is a genuine second
+      plane.
+
+    `readAccess` reads a created access back by its opaque id, `listAccesses`
+    lists them (optionally filtered by `networkId`), and `deleteAccess` evicts
+    one — the read/list/delete legs are keyed only on the in-memory store state
+    (the minted `accessId` has no reserved-suffix plane), except that
+    `listAccesses` adds the optional `networkId` filter as a second control plane.
+
+    `sinkCredential` is accepted but never echoed (it is a secret). The following
+    remain **documented cuts** (later passes): the CAMARA `207` multi-status form
+    with a `ResultForDevice[]` body — CamaraSim represents partial denials as data
+    inside each `AccessDevice.status` (so `createAccess` and `addDevicesToAccess`
+    both succeed with the denials counted in `stats`, never a `207`) — the
+    `422 NO_VALID_DEVICE` case, the `409` request-level device conflicts, `sink`
+    notification delivery, and the `listAccesses` `x-device` header filter.
+    `GET /accesses/{accessId}/devices` (`listDevices`) reads back the access's
+    recorded device roster (its `recentAccessDevices`) as a paginated
+    `AccessDevicesPage`, narrowed by the optional `deviceStatus` filter.
+    `POST /accesses/{accessId}/devices/add` (`addDevicesToAccess`) appends devices
+    to that roster and returns the added `AccessDevices` (`201`);
+    `POST /accesses/{accessId}/devices/remove` (`removeDevicesFromAccess`) evicts
+    matching devices from it (matched by their primary identifier) and returns
+    `204 No Content` — an absent device is an idempotent per-device no-op folded
+    into the access-level `204` (the `207` partial-success form is a documented
+    cut). CamaraSim exposes the full shared reserved-error set here so every
+    reserved suffix is reachable.
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/dedicated-network-accesses/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /accesses:
+    post:
+      operationId: createAccess
+      summary: Create a dedicated network access for a set of devices
+      description: |
+        Creates a dedicated network access from the submitted
+        `CreateAccessRequest`, mints an opaque UUID `id`, evaluates each device to
+        a per-device `GRANTED`/`DENIED` status, and returns the rendered
+        `AccessInfo` (`201`). In CamaraSim the result is derived from the request
+        — see the API description for the parameter-driven functional cases
+        (request validation → 400; a reserved `networkId` trailing suffix → the
+        matching canonical error; otherwise each device's identifier selects its
+        grant status).
+      security:
+        - openId:
+            - dedicated-network-accesses:accesses:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAccessRequest"
+            examples:
+              twoDevices:
+                summary: Grant two devices access to a network
+                value:
+                  networkId: "00000000-0000-4000-8000-000000000012"
+                  devices:
+                    - phoneNumber: "+123456789012"
+                    - networkAccessIdentifier: "user@operator"
+                  qosProfiles:
+                    - QOS_A
+                    - QOS_B
+                  defaultQosProfile: QOS_A
+      responses:
+        "201":
+          description: The dedicated network access was created.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessInfo"
+              examples:
+                mixed:
+                  summary: One granted, one denied (…404 device)
+                  value:
+                    id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    networkId: "00000000-0000-4000-8000-000000000012"
+                    stats:
+                      totalDevices: 2
+                      totalGranted: 1
+                      totalDenied: 1
+                    recentAccessDevices:
+                      - device:
+                          phoneNumber: "+123456789012"
+                        status: GRANTED
+                      - device:
+                          phoneNumber: "+123456789404"
+                        status: DENIED
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body/field (bad JSON, a missing/non-UUID `networkId`, a
+            `devices` array outside 1..=100, a device with no identifier, a
+            non-E.164 `phoneNumber`, a `qosProfiles` array outside 1..=32 or an
+            empty name, or a non-`https` sink).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessError"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the request body, the `networkId` identifier, and
+          each submitted device's identifier (docs/DESIGN.md §7). Request
+          validation runs first (→ 400); then a reserved `networkId` trailing
+          suffix → the matching canonical CAMARA error; otherwise the access is
+          created and each device's identifier selects its GRANTED/DENIED status.
+          Reserved error suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: a body that is not a valid CreateAccessRequest (bad JSON / unknown field)
+            result: "400 INVALID_ARGUMENT"
+          - input: a missing or non-UUID networkId
+            result: "400 INVALID_ARGUMENT"
+          - input: a devices array with 0 or more than 100 items
+            result: "400 INVALID_ARGUMENT"
+          - input: a device carrying none of the four CAMARA Device identifiers
+            result: "400 INVALID_ARGUMENT"
+          - input: a device phoneNumber that is not E.164
+            result: "400 INVALID_ARGUMENT"
+          - input: a qosProfiles array with 0 or more than 32 items, or an empty name
+            result: "400 INVALID_ARGUMENT"
+          - input: a sink not matching ^https://.+$
+            result: "400 INVALID_ARGUMENT"
+          - input: networkId whose trailing digits are a reserved suffix (e.g. …404)
+            result: the canonical CAMARA error for that status (…404 = no such network)
+          - input: "a valid body; a device whose identifier trailing digits are a reserved suffix"
+            result: "201 AccessInfo — that device is DENIED, counted in stats.totalDenied"
+          - input: "a valid body; a device whose identifier is not a reserved suffix"
+            result: "201 AccessInfo — that device is GRANTED, counted in stats.totalGranted"
+    get:
+      operationId: listAccesses
+      summary: List dedicated network accesses
+      description: |
+        Returns a bare JSON array of every stored `AccessInfo` (`200`, empty when
+        none — CAMARA never 404s on an empty list). The optional `networkId`
+        query parameter filters to the accesses created against that network (a
+        genuine control plane): a present but non-UUID `networkId` →
+        `400 INVALID_ARGUMENT`, an unknown-but-valid one → an empty array.
+        Requires the read scope. In CamaraSim the only state is the in-memory
+        store, so the result reflects the accesses created earlier in this
+        process; the `x-device` header filter is a documented cut.
+      security:
+        - openId:
+            - dedicated-network-accesses:accesses:read
+      parameters:
+        - name: networkId
+          in: query
+          required: false
+          description: Filter to accesses created against this dedicated network.
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The list of dedicated network accesses (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 1000000
+                items:
+                  $ref: "#/components/schemas/AccessInfo"
+              examples:
+                oneAccess:
+                  summary: A single access on the filtered network
+                  value:
+                    - id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                      networkId: "00000000-0000-4000-8000-000000000012"
+                      stats:
+                        totalDevices: 1
+                        totalGranted: 1
+                        totalDenied: 0
+                      recentAccessDevices:
+                        - device:
+                            phoneNumber: "+123456789012"
+                          status: GRANTED
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` when the
+            `networkId` query parameter is present but not UUID-shaped.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessError"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the in-memory store state and the optional
+          `networkId` query filter (docs/DESIGN.md §7): the list of stored
+          accesses, narrowed to those on the given network. A list never 404s on
+          an empty result. A non-UUID `networkId` → 400.
+        cases:
+          - input: no networkId
+            result: "200 — a bare array of every stored AccessInfo (empty when none)"
+          - input: networkId matching one or more stored accesses
+            result: "200 — a bare array of just those accesses"
+          - input: a valid UUID networkId matching no stored access
+            result: "200 — an empty array"
+          - input: a networkId query param that is not UUID-shaped
+            result: "400 INVALID_ARGUMENT"
+
+  /accesses/{accessId}:
+    get:
+      operationId: readAccess
+      summary: Read a dedicated network access by id
+      description: |
+        Returns the `AccessInfo` of the access previously created under
+        `accessId` (`200`), or `404 NOT_FOUND` when no such access exists. In
+        CamaraSim the `accessId` is a server-minted opaque UUID, so the only
+        control plane is the in-memory store state — a valid id from a prior
+        `createAccess` reads back, anything else (unknown or malformed) is `404`
+        (there is no reserved-suffix plane on a minted id, mirroring the sibling
+        Networks API's `readNetwork`).
+      security:
+        - openId:
+            - dedicated-network-accesses:accesses:read
+      parameters:
+        - $ref: "#/components/parameters/AccessId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The dedicated network access was found.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessInfo"
+              examples:
+                readBack:
+                  summary: An access read back by id
+                  value:
+                    id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    networkId: "00000000-0000-4000-8000-000000000012"
+                    stats:
+                      totalDevices: 1
+                      totalGranted: 1
+                      totalDenied: 0
+                    recentAccessDevices:
+                      - device:
+                          phoneNumber: "+123456789012"
+                        status: GRANTED
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected only from the in-memory store state, keyed on the
+          server-minted opaque `accessId` (docs/DESIGN.md §7): a known id returns
+          its stored AccessInfo, an unknown one is 404. There is no
+          reserved-suffix plane on a minted id.
+        cases:
+          - input: an accessId returned by a prior createAccess
+            result: "200 AccessInfo (the stored access, verbatim)"
+          - input: any other (unknown / never-created / malformed) accessId
+            result: "404 NOT_FOUND"
+    delete:
+      operationId: deleteAccess
+      summary: Delete a dedicated network access by id
+      description: |
+        Evicts the access previously created under `accessId`: a known id →
+        `204 No Content` (single-use); an unknown or already-deleted id →
+        `404 NOT_FOUND`. In CamaraSim the `accessId` is a server-minted opaque
+        UUID, so the only control plane is the in-memory store state (there is no
+        reserved-suffix plane on a minted id, mirroring the sibling Networks
+        API's `deleteNetwork`). Deletion is synchronous (no async
+        `202`/`DELETE_REQUESTED`) and delivers no `sink` notification (a
+        documented cut). Requires the
+        `dedicated-network-accesses:accesses:delete` scope.
+      security:
+        - openId:
+            - dedicated-network-accesses:accesses:delete
+      parameters:
+        - $ref: "#/components/parameters/AccessId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "204":
+          description: The dedicated network access was deleted.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected only from the in-memory store state, keyed on the
+          server-minted opaque `accessId` (docs/DESIGN.md §7): a known id is
+          evicted (204, single-use), anything else is 404. There is no
+          reserved-suffix plane on a minted id.
+        cases:
+          - input: an accessId returned by a prior createAccess
+            result: "204 No Content (the access is evicted; single-use)"
+          - input: any other (unknown / already-deleted / malformed) accessId
+            result: "404 NOT_FOUND"
+
+  /accesses/{accessId}/devices:
+    get:
+      operationId: listDevices
+      summary: List the devices bound to a dedicated network access
+      description: |
+        Returns the devices bound to the access `accessId` as a paginated
+        `AccessDevicesPage` (`{ items, pagination }`). In CamaraSim the roster is
+        the access's recorded `recentAccessDevices` (each an `AccessDevice` of
+        `{ device, status }`), so the list reads back exactly what `createAccess`
+        resolved. Three control planes (docs/DESIGN.md §7): the opaque
+        server-minted `accessId` → store state (unknown/malformed → `404`; no
+        reserved-suffix plane on a minted id, mirroring `readAccess`); the
+        optional `deviceStatus` filter (`REQUESTED`/`GRANTED`/`DENIED`) narrows
+        the roster (an unknown value → `400 INVALID_ARGUMENT`); and the
+        `page`/`perPage` pagination window (non-integer → `400 INVALID_ARGUMENT`,
+        `< 1` → `400 OUT_OF_RANGE`). Query validation runs before the store
+        lookup, so a bad query wins over a `404`. Requires the
+        `dedicated-network-accesses:devices:read` scope.
+      security:
+        - openId:
+            - dedicated-network-accesses:devices:read
+      parameters:
+        - $ref: "#/components/parameters/AccessId"
+        - name: page
+          in: query
+          required: false
+          description: 1-based page index (default 1).
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: perPage
+          in: query
+          required: false
+          description: Number of items per page (default 10).
+          schema:
+            type: integer
+            minimum: 1
+            default: 10
+        - name: deviceStatus
+          in: query
+          required: false
+          description: Filter the roster to devices in this status.
+          schema:
+            $ref: "#/components/schemas/DeviceStatus"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: A page of the access's devices (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessDevicesPage"
+              examples:
+                onePage:
+                  summary: One granted, one denied device
+                  value:
+                    items:
+                      - device:
+                          phoneNumber: "+123456789012"
+                        status: GRANTED
+                      - device:
+                          phoneNumber: "+123456789404"
+                        status: DENIED
+                    pagination:
+                      page: 1
+                      perPage: 10
+                      totalCount: 2
+                      totalPages: 1
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            non-integer `page`/`perPage` or an unknown `deviceStatus`, and
+            `OUT_OF_RANGE` for a `page`/`perPage` below the minimum of 1.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessError"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the query parameters and the in-memory store state
+          (docs/DESIGN.md §7). Query validation runs first (→ 400); then a known
+          `accessId` returns its recorded device roster as a paginated
+          `AccessDevicesPage`, narrowed by the optional `deviceStatus` filter; an
+          unknown id is 404. The `accessId` is a server-minted opaque UUID, so it
+          has no reserved-suffix plane.
+        cases:
+          - input: a page or perPage query value that is not an integer
+            result: "400 INVALID_ARGUMENT"
+          - input: a page or perPage query value below the minimum of 1
+            result: "400 OUT_OF_RANGE"
+          - input: a deviceStatus that is not REQUESTED/GRANTED/DENIED
+            result: "400 INVALID_ARGUMENT"
+          - input: an accessId returned by a prior createAccess
+            result: "200 AccessDevicesPage — the access's recorded devices, paginated"
+          - input: "a known accessId with deviceStatus set"
+            result: "200 AccessDevicesPage — only the devices in that status (empty when none)"
+          - input: "a known accessId with page/perPage set"
+            result: "200 AccessDevicesPage — the page-th window of perPage devices"
+          - input: any other (unknown / never-created / malformed) accessId
+            result: "404 NOT_FOUND"
+
+  /accesses/{accessId}/devices/add:
+    post:
+      operationId: addDevicesToAccess
+      summary: Add devices to a dedicated network access
+      description: |
+        Adds devices to the access `accessId`. The request body is a bare
+        `AddDevicesRequest` — a JSON array of `1..=100` CAMARA `Device`s (the
+        array **is** the body; there is no wrapping object). Each device is
+        evaluated to the same per-device `GRANTED`/`DENIED` grant as
+        `createAccess` (a reserved-suffix identifier → `DENIED`, any other →
+        `GRANTED`), appended to the access's recorded `recentAccessDevices`
+        roster, and the aggregate `stats` recomputed. On success the added
+        devices are returned as an `AddDevicesSuccess` (an `AccessDevices` array)
+        with `201`.
+
+        Two control planes (docs/DESIGN.md §7), in order: request validation runs
+        first (a body that is not a JSON array, an array outside `1..=100` items,
+        a device with no identifier, or a non-E.164 `phoneNumber` →
+        `400 INVALID_ARGUMENT`, winning over a `404`); then the opaque
+        server-minted `accessId` resolves against the in-memory store (a known id
+        → `201`; an unknown/malformed one → `404 NOT_FOUND`; there is no
+        reserved-suffix plane on a minted id). The CAMARA `207` partial-success
+        (`ResultForDevice[]`) form and the `422 NO_VALID_DEVICE` case are
+        documented cuts — denials ride inside each `AccessDevice.status`, as in
+        `createAccess`. Requires the `dedicated-network-accesses:devices:add`
+        scope.
+      security:
+        - openId:
+            - dedicated-network-accesses:devices:add
+      parameters:
+        - $ref: "#/components/parameters/AccessId"
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddDevicesRequest"
+            examples:
+              twoDevices:
+                summary: Add one granted and one denied (…404) device
+                value:
+                  - networkAccessIdentifier: "user@operator"
+                  - phoneNumber: "+123456789404"
+      responses:
+        "201":
+          description: |
+            The devices were added. The body is the `AccessDevices` for the added
+            devices, each with its resolved status (denials are counted here and
+            in the access's `stats`).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddDevicesSuccess"
+              examples:
+                added:
+                  summary: One granted, one denied (…404 device)
+                  value:
+                    - device:
+                        networkAccessIdentifier: "user@operator"
+                      status: GRANTED
+                    - device:
+                        phoneNumber: "+123456789404"
+                      status: DENIED
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a body
+            that is not a JSON array, an array outside 1..=100 items, a device
+            with no identifier, or a non-E.164 `phoneNumber`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessError"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the request body and the in-memory store state
+          (docs/DESIGN.md §7). Request validation runs first (→ 400); then a known
+          `accessId` has the submitted devices appended to its roster (each
+          resolved to GRANTED/DENIED by its own identifier) and returns them as an
+          AddDevicesSuccess (201); an unknown id is 404. The `accessId` is a
+          server-minted opaque UUID, so it has no reserved-suffix plane.
+        cases:
+          - input: a body that is not a JSON array of Device objects
+            result: "400 INVALID_ARGUMENT"
+          - input: an array with 0 or more than 100 devices
+            result: "400 INVALID_ARGUMENT"
+          - input: a device carrying none of the four CAMARA Device identifiers
+            result: "400 INVALID_ARGUMENT"
+          - input: a device phoneNumber that is not E.164
+            result: "400 INVALID_ARGUMENT"
+          - input: "a valid body; an accessId returned by a prior createAccess"
+            result: "201 AddDevicesSuccess — the added AccessDevices; roster + stats updated"
+          - input: "a valid body; a device whose identifier trailing digits are a reserved suffix"
+            result: "201 — that device is DENIED, counted in stats.totalDenied"
+          - input: any other (unknown / never-created / malformed) accessId
+            result: "404 NOT_FOUND"
+
+  /accesses/{accessId}/devices/remove:
+    post:
+      operationId: removeDevicesFromAccess
+      summary: Remove devices from a dedicated network access
+      description: |
+        Removes devices from the access `accessId`. The request body is a bare
+        `RemoveDevicesRequest` — a JSON array of `1..=100` CAMARA `Device`s (the
+        array **is** the body, mirroring `addDevicesToAccess`). Each matching
+        device is evicted from the access's recorded `recentAccessDevices` roster
+        and the aggregate `stats` recomputed. A roster entry matches a submitted
+        device when their primary identifiers (the first present of `phoneNumber` /
+        `networkAccessIdentifier` / `ipv6Address` / IPv4 `publicAddress`, as used by
+        the grant plane) are equal. On success the response is `204 No Content`.
+
+        Two control planes (docs/DESIGN.md §7), in order: request validation runs
+        first (a body that is not a JSON array, an array outside `1..=100` items, a
+        device with no identifier, or a non-E.164 `phoneNumber` →
+        `400 INVALID_ARGUMENT`, winning over a `404`); then the opaque
+        server-minted `accessId` resolves against the in-memory store (a known id
+        → `204`; an unknown/malformed one → `404 NOT_FOUND`; there is no
+        reserved-suffix plane on a minted id). A submitted device absent from the
+        roster is an idempotent per-device no-op folded into the access-level
+        `204` — the CAMARA `207` partial-success (`ResultForDevice[]`) form is a
+        documented cut, mirroring `addDevicesToAccess`. Requires the
+        `dedicated-network-accesses:devices:remove` scope.
+      security:
+        - openId:
+            - dedicated-network-accesses:devices:remove
+      parameters:
+        - $ref: "#/components/parameters/AccessId"
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RemoveDevicesRequest"
+            examples:
+              twoDevices:
+                summary: Remove two devices by their identifiers
+                value:
+                  - phoneNumber: "+123456789012"
+                  - networkAccessIdentifier: "user@operator"
+      responses:
+        "204":
+          description: |
+            The matching devices were removed from the access's roster (its `stats`
+            recomputed). No body.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a body
+            that is not a JSON array, an array outside 1..=100 items, a device
+            with no identifier, or a non-E.164 `phoneNumber`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessError"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the request body and the in-memory store state
+          (docs/DESIGN.md §7). Request validation runs first (→ 400); then a known
+          `accessId` has the roster entries matching the submitted devices (by
+          primary identifier) evicted and its `stats` recomputed, returning `204`;
+          an unknown id is 404. A submitted device absent from the roster is an
+          idempotent per-device no-op (still `204`). The `accessId` is a
+          server-minted opaque UUID, so it has no reserved-suffix plane.
+        cases:
+          - input: a body that is not a JSON array of Device objects
+            result: "400 INVALID_ARGUMENT"
+          - input: an array with 0 or more than 100 devices
+            result: "400 INVALID_ARGUMENT"
+          - input: a device carrying none of the four CAMARA Device identifiers
+            result: "400 INVALID_ARGUMENT"
+          - input: a device phoneNumber that is not E.164
+            result: "400 INVALID_ARGUMENT"
+          - input: "a valid body; an accessId with devices matching roster entries"
+            result: "204 No Content — those devices evicted; roster + stats updated"
+          - input: "a valid body naming only devices absent from the roster"
+            result: "204 No Content — an idempotent no-op (roster unchanged)"
+          - input: any other (unknown / never-created / malformed) accessId
+            result: "404 NOT_FOUND"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    AccessId:
+      name: accessId
+      in: path
+      required: true
+      description: The identifier of a dedicated network access (a UUID).
+      schema:
+        type: string
+        format: uuid
+        maxLength: 36
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    Device:
+      type: object
+      description: |
+        A device (user equipment), identified by at least one of four CAMARA
+        `Device` identifiers. CamaraSim keys the per-device grant plane off the
+        first present of `phoneNumber`, `networkAccessIdentifier`, `ipv6Address`,
+        then the IPv4 `publicAddress`.
+      minProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          description: A phone number in E.164 format (starting with `+`).
+          example: "+123456789012"
+        networkAccessIdentifier:
+          type: string
+          description: The device's Network Access Identifier.
+          example: "user@operator"
+        ipv4Address:
+          type: object
+          description: The device's IPv4 address information.
+          properties:
+            publicAddress:
+              type: string
+              example: "203.0.113.10"
+            publicPort:
+              type: integer
+              minimum: 0
+              maximum: 65535
+        ipv6Address:
+          type: string
+          description: The device's IPv6 address.
+          example: "2001:db8::1"
+
+    Devices:
+      type: array
+      description: A list of devices.
+      items:
+        $ref: "#/components/schemas/Device"
+
+    DeviceStatus:
+      type: string
+      description: |
+        The outcome of processing a device for an access.
+        - `REQUESTED`: accepted, processing not yet complete.
+        - `GRANTED`: the device was granted access.
+        - `DENIED`: the device was denied access.
+      enum:
+        - REQUESTED
+        - GRANTED
+        - DENIED
+
+    AccessDevice:
+      type: object
+      description: A device and the status it was resolved to for this access.
+      required:
+        - device
+        - status
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+        status:
+          $ref: "#/components/schemas/DeviceStatus"
+
+    AccessDevices:
+      type: array
+      description: A list of access devices.
+      items:
+        $ref: "#/components/schemas/AccessDevice"
+
+    AddDevicesRequest:
+      description: |
+        The body for `addDevicesToAccess` — a bare array of the CAMARA `Device`s
+        to add to the access (the array *is* the body; there is no wrapping
+        object). Must contain 1..=100 items.
+      allOf:
+        - $ref: "#/components/schemas/Devices"
+        - minItems: 1
+          maxItems: 100
+
+    AddDevicesSuccess:
+      description: |
+        The `201` body for `addDevicesToAccess` — the added devices as an
+        `AccessDevices` array, each with its resolved `GRANTED`/`DENIED` status.
+      allOf:
+        - $ref: "#/components/schemas/AccessDevices"
+        - minItems: 1
+          maxItems: 100
+
+    RemoveDevicesRequest:
+      description: |
+        The body for `removeDevicesFromAccess` — a bare array of the CAMARA
+        `Device`s to remove from the access (the array *is* the body; there is no
+        wrapping object). Must contain 1..=100 items. A device is matched to a
+        roster entry by its primary identifier; a device absent from the roster is
+        an idempotent no-op. On success the operation returns `204 No Content`.
+      allOf:
+        - $ref: "#/components/schemas/Devices"
+        - minItems: 1
+          maxItems: 100
+
+    AccessDevicesPage:
+      type: object
+      description: A page of the devices bound to a dedicated network access.
+      required:
+        - items
+        - pagination
+      properties:
+        items:
+          $ref: "#/components/schemas/AccessDevices"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    Pagination:
+      type: object
+      description: |
+        Pagination envelope (the CamaraSim house convention, mirroring the sibling
+        Network Profiles list): the current `page` and `perPage`, the total number
+        of items and pages.
+      required:
+        - page
+        - perPage
+        - totalCount
+        - totalPages
+      properties:
+        page:
+          type: integer
+          minimum: 1
+          description: The 1-based index of the returned page.
+        perPage:
+          type: integer
+          minimum: 1
+          description: The requested page size.
+        totalCount:
+          type: integer
+          minimum: 0
+          description: The total number of items across all pages.
+        totalPages:
+          type: integer
+          minimum: 0
+          description: The total number of pages at the current `perPage`.
+
+    AccessStats:
+      type: object
+      description: Aggregate device counts for an access.
+      required:
+        - totalDevices
+        - totalGranted
+        - totalDenied
+      properties:
+        totalDevices:
+          type: integer
+          minimum: 0
+          description: The number of devices submitted for this access.
+        totalGranted:
+          type: integer
+          minimum: 0
+          description: How many devices were granted access.
+        totalDenied:
+          type: integer
+          minimum: 0
+          description: How many devices were denied access.
+
+    SinkCredential:
+      type: object
+      description: |
+        Credential for authenticating notification callbacks (CAMARA
+        `SinkCredential`). Accepted by CamaraSim but never echoed (a secret) and
+        — this slice being create-only — never applied.
+      required:
+        - credentialType
+      properties:
+        credentialType:
+          type: string
+          enum:
+            - PLAIN
+            - ACCESSTOKEN
+            - REFRESHTOKEN
+          description: The type of the credential.
+
+    BaseAccessInfo:
+      type: object
+      description: Common attributes of a dedicated network access.
+      required:
+        - networkId
+      properties:
+        networkId:
+          type: string
+          format: uuid
+          maxLength: 36
+          description: The identifier of the dedicated network this access binds to.
+        qosProfiles:
+          type: array
+          minItems: 1
+          maxItems: 32
+          description: The QoS profile names the access is restricted to.
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+        defaultQosProfile:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: The default QoS profile name for the access.
+        sink:
+          type: string
+          format: uri
+          maxLength: 2048
+          pattern: "^https://.+$"
+          example: "https://endpoint.example.com/sink"
+          description: The `https://` address notifications are delivered to.
+        sinkCredential:
+          $ref: "#/components/schemas/SinkCredential"
+
+    CreateAccessRequest:
+      description: |
+        The body for `createAccess` — the common access attributes plus the
+        devices to grant access. `devices` must contain 1..=100 items when
+        present.
+      allOf:
+        - $ref: "#/components/schemas/BaseAccessInfo"
+        - type: object
+          properties:
+            devices:
+              allOf:
+                - $ref: "#/components/schemas/Devices"
+                - minItems: 1
+                  maxItems: 100
+
+    AccessInfo:
+      description: |
+        A created dedicated network access: the common attributes plus the minted
+        `id`, aggregate `stats`, and the recently-processed devices.
+        `sinkCredential` is never returned (a secret).
+      allOf:
+        - $ref: "#/components/schemas/BaseAccessInfo"
+        - type: object
+          required:
+            - id
+            - networkId
+            - stats
+          properties:
+            id:
+              type: string
+              format: uuid
+              maxLength: 36
+              description: The access identifier (server-minted).
+            stats:
+              $ref: "#/components/schemas/AccessStats"
+            recentAccessDevices:
+              type: array
+              maxItems: 100
+              description: |
+                The recently-processed devices (up to 100), each with its
+                resolved status.
+              items:
+                $ref: "#/components/schemas/AccessDevice"
+
+    AccessError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        this operation's `code` set.
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - OUT_OF_RANGE
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - INVALID_TOKEN_CONTEXT
+                - NOT_FOUND
+                - IDENTIFIER_NOT_FOUND
+                - CONFLICT
+                - SERVICE_NOT_APPLICABLE
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

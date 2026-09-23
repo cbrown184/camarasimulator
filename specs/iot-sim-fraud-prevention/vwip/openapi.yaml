@@ -1,0 +1,1108 @@
+openapi: 3.0.3
+info:
+  title: IoT SIM Fraud Prevention
+  description: |
+    API for SIM card binding/unbinding and regional restriction management.
+
+    # Introduction
+    This API provides operations to manage security mechanisms for IoT SIM cards:
+    - **Bind**: associate a SIM card with a specific device (IMEI) or restrict its operation to a geographic area.
+    - **Unbind**: remove an existing binding or area restriction.
+    - **Query**: retrieve the current binding status or area restriction for a device.
+
+    When a device attempts to use the network, the operator checks the binding/restriction.
+    If the IMEI reported does not match the bound one, or the device location is outside the allowed area,
+    network services are automatically blocked.
+
+    # Relevant terms and definitions
+    * **SIM card**: IoT network card (subscriber identity module).
+    * **Binding**: mechanism linking a SIM card to a specific terminal device (IMEI) to prevent misuse.
+    * **Device**: any physical entity that can connect to a network.
+    * **IMEI**: International Mobile Equipment Identity, a unique 15-digit identifier for mobile devices.
+
+    # API Functionality
+    The upstream CAMARA API exposes three endpoints: `POST /bind`, `POST /unbind`,
+    and `POST /query`.
+
+    # CamaraSim scope
+    This simulator mounts the full round-trip for **both** CAMARA facets over a
+    shared in-memory store, across `POST /bind` (`bindDeviceImei`), `POST /query`
+    (`query`), and `POST /unbind` (`unBindDeviceImei`).
+
+    The non-spatial **`IMEIBIND`** facet records the device's SIM↔IMEI
+    association, `query` reports it (a stored binding wins over the stateless
+    default), and an unbind removes it.
+
+    The spatial **`AREALIMIT`** facet — the same three operations with
+    `bindType`/`unBindType`/`queryType: AREALIMIT` — marks a device's SIM as
+    restricted to its **network-provisioned** area: a bind sets the restriction,
+    `query` reports the device's area-restriction status (`areaLimit`) — a stored
+    restriction wins (`RESTRICTED`), otherwise the stateless default applies (odd
+    trailing three digits → `RESTRICTED`; otherwise → `UNRESTRICTED`) — and an
+    unbind clears it. When restricted, `query` returns a deterministic `Circle`
+    `limitArea` derived from the identifier. The upstream `AREALIMIT` bind carries
+    **no** geometry in the request body (the allowed area is provisioned by the
+    network), so the `BindType`/`UnBindType`/`QueryType` enums all carry both
+    `IMEIBIND` and `AREALIMIT`; any other value is rejected `400 INVALID_ARGUMENT`.
+    The simulator never drifts from the operations it actually implements.
+
+    # Authorization and authentication
+    The "Camara Security and Interoperability Profile" provides details of how an API consumer requests an access token. Please refer to Identity and Consent Management (https://github.com/camaraproject/IdentityAndConsentManagement/) for the released version of the profile.
+
+    The specific authorization flows to be used will be agreed upon during the onboarding process, happening between the API consumer and the API provider, taking into account the declared purpose for accessing the API, whilst also being subject to the prevailing legal framework dictated by local legislation.
+
+    In cases where personal data is processed by the API and users can exercise their rights through mechanisms such as opt-in and/or opt-out, the use of three-legged access tokens is mandatory. This ensures that the API remains in compliance with privacy regulations, upholding the principles of transparency and user-centric privacy-by-design.
+
+    # Additional CAMARA error responses
+    The list of error codes in this API specification is not exhaustive. Therefore the API specification MAY not document some non-mandatory error statuses as indicated in `CAMARA API Design Guide`.
+    Please refer to the `CAMARA_common.yaml` of the Commonalities Release associated to this API version for a complete list of error responses. The applicable Commonalities Release can be identified in the `API Readiness Checklist` document associated to this API version.
+    As a specific rule, error `501 - NOT_IMPLEMENTED` can be only a possible error response if it is explicitly documented in the API.
+
+  version: wip
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+  x-camara-commonalities: 0.7.0
+externalDocs:
+  description: Project repository and documentation
+  url: https://github.com/camaraproject/IoTSIMFraudPrevention
+servers:
+  - url: "{apiRoot}/iot-sim-fraud-prevention/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root
+tags:
+  - name: Bind card fraud prevention
+    description: Operations for binding and unbinding a SIM card to a device IMEI
+  - name: Query card fraud prevention
+    description: Operations for querying current binding and restriction status
+paths:
+  /query:
+    post:
+      tags:
+        - Query card fraud prevention
+      summary: IoT SIM Fraud Prevention Query
+      description: |
+        Retrieve a device's current fraud-prevention status (operationId
+        `query`) — its IMEI binding (`queryType: IMEIBIND`) **or** its geographic
+        area restriction (`queryType: AREALIMIT`).
+
+        The device is identified either by a `device` object in the request body
+        (two-legged / CIBA) or — when `device` is omitted — by the identity a
+        three-legged access token authenticated. Exactly one identification path
+        must be used:
+        - a `device` **and** a three-legged token → `422 UNNECESSARY_IDENTIFIER`;
+        - no `device` **and** a two-legged token → `422 MISSING_IDENTIFIER`.
+
+        ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+        The identifier is the first present identifier of the submitted `device`
+        (precedence: `phoneNumber`, `networkAccessIdentifier`, the IPv4
+        `publicAddress`, then `ipv6Address`) or, when no `device` is supplied, the
+        access token subject (`sub`) of a three-legged token. Its trailing three
+        digits select the case:
+
+        - **Reserved error suffix** — if those trailing three digits name a
+          reserved CAMARA status (`…400`, `…401`, `…403`, `…404`, `…409`, `…422`,
+          `…429`, `…500`, `…503`), the endpoint answers with that canonical CAMARA
+          error instead of a result (shared convention across identifier-keyed
+          APIs).
+        - **odd trailing digits** — the SIM is **bound** to a device:
+          `imeiBind: { bindStatus: "BOUND", bindImei: "<15-digit IMEI>" }`. The
+          reported `bindImei` is deterministic from the identifier — a fixed TAC
+          (`35209900`), a 6-digit serial equal to the identifier's zero-padded
+          trailing digits, and a GSMA Luhn check digit — so the same device always
+          reports the same bound IMEI.
+        - **any other input** (the happy-path default: an even tail, a `…000`
+          tail, or an identifier with no trailing digits) — the SIM is **not
+          bound**: `imeiBind: { bindStatus: "UNBOUND" }` with no `bindImei`.
+
+        Examples: `+123456789011` → `BOUND` with a bound IMEI; `+123456789012`,
+        `+123456789000` → `UNBOUND`; `+123456789404` → `404 NOT_FOUND`.
+
+        ### `queryType: AREALIMIT` — area restriction
+
+        The same identifier resolution, two-/three-legged rule, and reserved
+        error-suffix plane apply. An explicit `AREALIMIT` binding (set by
+        `POST /bind`, cleared by `POST /unbind`) wins — the device is
+        `RESTRICTED`. Absent one, the area-restriction status is a stateless
+        default keyed off the identifier's trailing-digit parity, mirroring
+        `IMEIBIND`:
+
+        - **odd trailing digits** — the device is **restricted** to an area:
+          `areaLimit: { areaLimitStatus: "RESTRICTED", limitArea: <Circle> }`. The
+          `limitArea` is a `Circle` deterministic from the identifier (so the same
+          device always reports the same allowed area), always within the schema
+          bounds (`latitude` [-90, 90], `longitude` [-180, 180], `radius`
+          [1, 200000]).
+        - **any other input** (even tail, `…000`, or no trailing digits) — **no
+          restriction**: `areaLimit: { areaLimitStatus: "UNRESTRICTED" }` with no
+          `limitArea`.
+
+        Examples: `+123456789011` → `RESTRICTED` with a `Circle`; `+123456789012`,
+        `+123456789000` → `UNRESTRICTED`; `+123456789404` → `404 NOT_FOUND`.
+      operationId: query
+      parameters:
+        - $ref: "#/components/parameters/x-correlator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueryRequest"
+            examples:
+              INPUT_PHONE_NUMBER:
+                summary: query For One Device By Phone Number
+                description: Use a device's number for query operation
+                value:
+                  device:
+                    phoneNumber: "+123456789011"
+                  queryType: "IMEIBIND"
+              INPUT_NETWORK_ACCESS_IDENTIFIER:
+                summary: query For One Device By Network Access Identifier
+                description: Use a device's network access identifier for query operations
+                value:
+                  device:
+                    networkAccessIdentifier: "123456789@domain.com"
+                  queryType: "IMEIBIND"
+              INPUT_IPV4_ADDRESS:
+                summary: query For One Device By IPv4 Address
+                description: Use the IPv4 address of a device for query operations
+                value:
+                  device:
+                    ipv4Address:
+                      publicAddress: "203.0.113.0"
+                      publicPort: 59765
+                  queryType: "IMEIBIND"
+              INPUT_IPV6_ADDRESS:
+                summary: query For One Device By IPv6 Address
+                description: Use the IPv6 address of a device for query operations
+                value:
+                  device:
+                    ipv6Address: "2001:db8:85a3:8d3:1319:8a2e:370:7344"
+                  queryType: "IMEIBIND"
+              INPUT_THREE_LEGGED:
+                summary: query For One Device By 3 Legged Token
+                description: Use a 3 Legged Token for query operations (no device object needed)
+                value:
+                  queryType: "IMEIBIND"
+              INPUT_AREALIMIT:
+                summary: query a device's area restriction
+                description: Use AREALIMIT to retrieve the device's geographic area restriction
+                value:
+                  device:
+                    phoneNumber: "+123456789011"
+                  queryType: "AREALIMIT"
+      responses:
+        "200":
+          description: The result of query the device
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/x-correlator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryFraudPreventionResponse"
+              examples:
+                IMEI_BIND_BOUND:
+                  summary: BINDIMEI RESULT (BOUND)
+                  description: The SIM is bound to a device IMEI
+                  value:
+                    imeiBind:
+                      bindImei: "352099000000117"
+                      bindStatus: "BOUND"
+                IMEI_BIND_UNBOUND:
+                  summary: BINDIMEI RESULT (UNBOUND)
+                  description: No IMEI is bound to the SIM
+                  value:
+                    imeiBind:
+                      bindStatus: "UNBOUND"
+                AREA_LIMIT_RESTRICTED:
+                  summary: AREALIMIT RESULT (RESTRICTED)
+                  description: The device is restricted to a specific area
+                  value:
+                    areaLimit:
+                      areaLimitStatus: "RESTRICTED"
+                      limitArea:
+                        areaType: "CIRCLE"
+                        center:
+                          latitude: -79.0
+                          longitude: -169.0
+                        radius: 11
+                AREA_LIMIT_UNRESTRICTED:
+                  summary: AREALIMIT RESULT (UNRESTRICTED)
+                  description: No area restriction is active for the device
+                  value:
+                    areaLimit:
+                      areaLimitStatus: "UNRESTRICTED"
+        "400":
+          $ref: "#/components/responses/QueryBadRequest400"
+        "401":
+          $ref: "#/components/responses/Generic401"
+        "403":
+          $ref: "#/components/responses/Generic403"
+        "404":
+          $ref: "#/components/responses/Generic404"
+        "422":
+          $ref: "#/components/responses/Query422"
+        "429":
+          $ref: "#/components/responses/Generic429"
+      security:
+        - openId:
+            - "iot-sim-fraud-prevention:query"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved line identifier and `queryType`
+          (docs/DESIGN.md §7). The identifier is the first present identifier of
+          the submitted `device` (phoneNumber → networkAccessIdentifier → the
+          IPv4 publicAddress → ipv6Address) or, when no `device` is supplied, the
+          three-legged token subject. A stored binding (set by `POST /bind`,
+          cleared by `POST /unbind`) wins; absent one the status is a stateless
+          default keyed off the identifier's trailing-three-digit parity.
+          Reserved error suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "queryType IMEIBIND, identifier with a stored IMEI binding"
+            result: '200 { imeiBind: { bindStatus: "BOUND", bindImei: <stored 15-digit IMEI> } }'
+          - input: "queryType IMEIBIND, no stored binding, odd trailing digits"
+            result: '200 { imeiBind: { bindStatus: "BOUND", bindImei: <synthesised 15-digit IMEI> } }'
+          - input: "queryType IMEIBIND, no stored binding, even/…000/no trailing digits"
+            result: '200 { imeiBind: { bindStatus: "UNBOUND" } } (no bindImei)'
+          - input: "queryType AREALIMIT, identifier with a stored area restriction"
+            result: '200 { areaLimit: { areaLimitStatus: "RESTRICTED", limitArea: <Circle> } }'
+          - input: "queryType AREALIMIT, no stored restriction, odd trailing digits"
+            result: '200 { areaLimit: { areaLimitStatus: "RESTRICTED", limitArea: <deterministic Circle> } }'
+          - input: "queryType AREALIMIT, no stored restriction, even/…000/no trailing digits"
+            result: '200 { areaLimit: { areaLimitStatus: "UNRESTRICTED" } } (no limitArea)'
+          - input: no device, an E.164 token subject (three-legged)
+            result: same cases, driven by the subject's trailing three digits
+          - input: device submitted on a three-legged line token
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no device and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: missing or unknown queryType (neither IMEIBIND nor AREALIMIT)
+            result: "400 INVALID_ARGUMENT"
+
+  /bind:
+    post:
+      tags:
+        - Bind card fraud prevention
+      summary: IoT SIM Fraud Prevention Bind
+      description: |
+        Bind a device's SIM card, either to the device IMEI
+        (`bindType: IMEIBIND`) or to its network-provisioned area
+        (`bindType: AREALIMIT`) (operationId `bindDeviceImei`).
+
+        The device is identified either by a `device` object in the request body
+        (two-legged / CIBA) or — when `device` is omitted — by the identity a
+        three-legged access token authenticated, subject to the same exactly-one
+        identification rule as `POST /query` (`422 UNNECESSARY_IDENTIFIER` /
+        `422 MISSING_IDENTIFIER`).
+
+        ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+        After the shared reserved-error-suffix plane (trailing three digits naming
+        a reserved CAMARA status → that canonical error), a bind records the
+        binding in the in-memory store and answers `{ "bound": true }`. Both bind
+        types are idempotent — re-binding the same device answers
+        `{ "bound": true }` again.
+
+        - **`IMEIBIND`** — records the SIM↔IMEI association; a subsequent
+          `POST /query` reports the device `BOUND` with that IMEI. The bound IMEI
+          is deterministic from the identifier (a fixed TAC `35209900`, a 6-digit
+          serial equal to the identifier's zero-padded trailing digits, and a GSMA
+          Luhn check digit).
+        - **`AREALIMIT`** — marks the SIM restricted to its network-provisioned
+          area; a subsequent `POST /query` (`queryType: AREALIMIT`) reports the
+          device `RESTRICTED` with the deterministic `Circle` `limitArea`. The
+          upstream request carries no geometry — the area is provisioned by the
+          network — so the bind body is just `{ device?, bindType }`.
+
+        Examples: `{ +123456789012, IMEIBIND }` → `{ "bound": true }` (and
+        thereafter query BOUND); `{ +123456789012, AREALIMIT }` → `{ "bound":
+        true }` (and thereafter AREALIMIT query RESTRICTED); `+123456789404` →
+        `404 NOT_FOUND`.
+      operationId: bindDeviceImei
+      parameters:
+        - $ref: "#/components/parameters/x-correlator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BindDeviceImeiRequest"
+            examples:
+              INPUT_PHONE_NUMBER:
+                summary: bind One Device By Phone Number
+                value:
+                  device:
+                    phoneNumber: "+123456789012"
+                  bindType: "IMEIBIND"
+              INPUT_AREALIMIT:
+                summary: bind One Device's area restriction
+                value:
+                  device:
+                    phoneNumber: "+123456789012"
+                  bindType: "AREALIMIT"
+              INPUT_THREE_LEGGED:
+                summary: bind One Device By 3 Legged Token
+                value:
+                  bindType: "IMEIBIND"
+      responses:
+        "200":
+          description: The result of binding the device
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/x-correlator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BindDeviceImeiResponse"
+              examples:
+                BOUND:
+                  summary: The SIM has been bound to the device IMEI
+                  value:
+                    bound: true
+        "400":
+          $ref: "#/components/responses/BindBadRequest400"
+        "401":
+          $ref: "#/components/responses/Generic401"
+        "403":
+          $ref: "#/components/responses/Generic403"
+        "404":
+          $ref: "#/components/responses/Generic404"
+        "422":
+          $ref: "#/components/responses/Query422"
+        "429":
+          $ref: "#/components/responses/Generic429"
+      security:
+        - openId:
+            - "iot-sim-fraud-prevention:bind"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved line identifier and `bindType`
+          (docs/DESIGN.md §7). Same identifier resolution and two-/three-legged
+          rule as `POST /query`. After the shared reserved-error-suffix plane a
+          bind records the binding in the in-memory store and answers
+          `{ "bound": true }`; both bind types are idempotent. Reserved error
+          suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "bindType IMEIBIND"
+            result: '200 { bound: true } — records the SIM↔IMEI binding (thereafter query IMEIBIND reports BOUND with that IMEI); idempotent'
+          - input: "bindType AREALIMIT"
+            result: '200 { bound: true } — marks the SIM area-restricted (thereafter query AREALIMIT reports RESTRICTED); idempotent'
+          - input: no device, an E.164 token subject (three-legged)
+            result: same cases, driven by the subject's trailing three digits
+          - input: device submitted on a three-legged line token
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no device and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: missing or unknown bindType (neither IMEIBIND nor AREALIMIT)
+            result: "400 INVALID_ARGUMENT"
+
+  /unbind:
+    post:
+      tags:
+        - Bind card fraud prevention
+      summary: IoT SIM Fraud Prevention Unbind
+      description: |
+        Remove a device's binding — its SIM↔IMEI binding
+        (`unBindType: IMEIBIND`) or its area restriction
+        (`unBindType: AREALIMIT`) (operationId `unBindDeviceImei`).
+
+        The device is identified exactly as for `POST /bind`. After the shared
+        reserved-error-suffix plane, the operation is keyed on the in-memory
+        store, per the `unBindType`:
+        - a device with an existing binding of that type → `200 { "unbound":
+          true }` (the binding is removed; a subsequent `POST /query` returns to
+          its stateless default);
+        - a device with no binding of that type → `422` — `UNNECESSARY_UNBIND_IMEI`
+          for `IMEIBIND`, `UNNECESSARY_UNBIND_AREALIMIT` for `AREALIMIT` (there is
+          nothing to unbind).
+
+        The two bindings are independent: an `IMEIBIND` unbind leaves any
+        `AREALIMIT` restriction in force, and vice versa.
+
+        Examples: unbinding a previously-bound `{ +123456789012, IMEIBIND }` →
+        `{ "unbound": true }`; unbinding a never-bound device →
+        `422 UNNECESSARY_UNBIND_IMEI` (or `UNNECESSARY_UNBIND_AREALIMIT` for an
+        `AREALIMIT` unbind); `+123456789404` → `404 NOT_FOUND`.
+      operationId: unBindDeviceImei
+      parameters:
+        - $ref: "#/components/parameters/x-correlator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UnBindDeviceImeiRequest"
+            examples:
+              INPUT_PHONE_NUMBER:
+                summary: unbind One Device By Phone Number
+                value:
+                  device:
+                    phoneNumber: "+123456789012"
+                  unBindType: "IMEIBIND"
+              INPUT_AREALIMIT:
+                summary: unbind One Device's area restriction
+                value:
+                  device:
+                    phoneNumber: "+123456789012"
+                  unBindType: "AREALIMIT"
+              INPUT_THREE_LEGGED:
+                summary: unbind One Device By 3 Legged Token
+                value:
+                  unBindType: "IMEIBIND"
+      responses:
+        "200":
+          description: The result of unbinding the device
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/x-correlator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnBindDeviceImeiResponse"
+              examples:
+                UNBOUND:
+                  summary: The SIM binding has been removed
+                  value:
+                    unbound: true
+        "400":
+          $ref: "#/components/responses/UnbindBadRequest400"
+        "401":
+          $ref: "#/components/responses/Generic401"
+        "403":
+          $ref: "#/components/responses/Generic403"
+        "404":
+          $ref: "#/components/responses/Generic404"
+        "422":
+          $ref: "#/components/responses/Unbind422"
+        "429":
+          $ref: "#/components/responses/Generic429"
+      security:
+        - openId:
+            - "iot-sim-fraud-prevention:unbind"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved line identifier and `unBindType`
+          (docs/DESIGN.md §7). Same identifier resolution and two-/three-legged
+          rule as `POST /bind`. After the shared reserved-error-suffix plane the
+          operation is keyed on the in-memory store: an existing binding of that
+          type is removed, otherwise there is nothing to unbind. The IMEIBIND and
+          AREALIMIT bindings are independent. Reserved error suffixes come from
+          the shared convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "unBindType IMEIBIND, device with an existing IMEI binding"
+            result: '200 { unbound: true } — the binding is removed (query returns to its stateless default)'
+          - input: "unBindType IMEIBIND, device with no IMEI binding"
+            result: "422 UNNECESSARY_UNBIND_IMEI"
+          - input: "unBindType AREALIMIT, device with an existing area restriction"
+            result: '200 { unbound: true } — the restriction is cleared'
+          - input: "unBindType AREALIMIT, device with no area restriction"
+            result: "422 UNNECESSARY_UNBIND_AREALIMIT"
+          - input: an IMEIBIND unbind on a device that also has an AREALIMIT restriction
+            result: the AREALIMIT restriction stays in force (the two bindings are independent), and vice versa
+          - input: no device, an E.164 token subject (three-legged)
+            result: same cases, driven by the subject's trailing three digits
+          - input: device submitted on a three-legged line token
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no device and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: missing or unknown unBindType (neither IMEIBIND nor AREALIMIT)
+            result: "400 INVALID_ARGUMENT"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+  parameters:
+    x-correlator:
+      name: x-correlator
+      in: header
+      description: Correlation id for the different services
+      schema:
+        $ref: "#/components/schemas/XCorrelator"
+  headers:
+    x-correlator:
+      description: Correlation id for the different services
+      schema:
+        $ref: "#/components/schemas/XCorrelator"
+  schemas:
+    XCorrelator:
+      type: string
+      description: Correlation id for the request
+      example: "123e4567-e89b-12d3-a456-426614174000"
+      pattern: ^[a-zA-Z0-9-_:;.\/<>{}]{0,256}$
+
+    # ---------- Device ----------
+    Device:
+      description: |
+        End-user device able to connect to a mobile network.
+        The developer can choose to provide one or more of the following identifiers:
+        * `ipv4Address`
+        * `ipv6Address`
+        * `phoneNumber`
+        * `networkAccessIdentifier`
+        If multiple identifiers are provided, they MUST belong to the same device.
+      type: object
+      properties:
+        phoneNumber:
+          $ref: "#/components/schemas/PhoneNumber"
+        networkAccessIdentifier:
+          $ref: "#/components/schemas/NetworkAccessIdentifier"
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          $ref: "#/components/schemas/DeviceIpv6Address"
+      minProperties: 1
+
+    PhoneNumber:
+      description: A public identifier addressing a telephone subscription, formatted according to E.164 with a leading '+'.
+      type: string
+      pattern: '^\+[1-9][0-9]{4,14}$'
+      example: "+123456789"
+
+    NetworkAccessIdentifier:
+      description: A public identifier addressing a subscription in a mobile network (e.g., GPSI formatted as External Identifier).
+      type: string
+      example: "123456789@domain.com"
+
+    DeviceIpv4Addr:
+      type: object
+      description: |
+        Identification of a device using its IPv4 address.
+        At least one of `privateAddress` or `publicPort` must be provided together with `publicAddress`.
+      properties:
+        publicAddress:
+          $ref: "#/components/schemas/SingleIpv4Addr"
+        privateAddress:
+          $ref: "#/components/schemas/SingleIpv4Addr"
+        publicPort:
+          $ref: "#/components/schemas/Port"
+      anyOf:
+        - required: [publicAddress, privateAddress]
+        - required: [publicAddress, publicPort]
+      example:
+        publicAddress: "84.125.93.10"
+        publicPort: 59765
+
+    SingleIpv4Addr:
+      description: A single IPv4 address with no subnet mask.
+      type: string
+      format: ipv4
+      example: "84.125.93.10"
+
+    Port:
+      description: TCP or UDP port number.
+      type: integer
+      minimum: 0
+      maximum: 65535
+
+    DeviceIpv6Address:
+      description: |
+        A single IPv6 address identifying the device.
+      type: string
+      format: ipv6
+      example: "2001:db8:85a3:8d3:1319:8a2e:370:7344"
+
+    # ---------- Query ----------
+    QueryType:
+      type: string
+      description: |
+        The type of query: `IMEIBIND` (IMEI binding status) or `AREALIMIT`
+        (geographic area-restriction status). Both are implemented by
+        `POST /query`.
+      enum:
+        - IMEIBIND
+        - AREALIMIT
+
+    QueryRequest:
+      description: Request to query the current status.
+      type: object
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+        queryType:
+          $ref: "#/components/schemas/QueryType"
+      required:
+        - queryType
+
+    QueryFraudPreventionResponse:
+      description: |
+        Response containing the requested status. An `IMEIBIND` query returns
+        `imeiBind`; an `AREALIMIT` query returns `areaLimit`.
+      type: object
+      properties:
+        areaLimit:
+          $ref: "#/components/schemas/AreaLimit"
+        imeiBind:
+          $ref: "#/components/schemas/ImeiBind"
+
+    ImeiBind:
+      description: IMEI binding status and bound IMEI (if any).
+      type: object
+      properties:
+        bindImei:
+          $ref: "#/components/schemas/BindImei"
+        bindStatus:
+          $ref: "#/components/schemas/BindStatus"
+
+    BindImei:
+      description: The IMEI currently bound to the SIM card (15 digits).
+      type: string
+      example: "352099001761481"
+
+    BindStatus:
+      description: |
+        Status of the IMEI binding.
+        - `BOUND`: an IMEI is bound.
+        - `UNBOUND`: no IMEI is bound.
+      type: string
+      enum:
+        - BOUND
+        - UNBOUND
+
+    # ---------- Area restriction (AREALIMIT query) ----------
+    AreaLimit:
+      description: Area-restriction status and, when restricted, the allowed area.
+      type: object
+      properties:
+        areaLimitStatus:
+          $ref: "#/components/schemas/AreaLimitStatus"
+        limitArea:
+          $ref: "#/components/schemas/Area"
+
+    AreaLimitStatus:
+      description: |
+        Status of the device's geographic area restriction.
+        - `RESTRICTED`: the device is restricted to a specific area (`limitArea`).
+        - `UNRESTRICTED`: no area restriction is active.
+      type: string
+      enum:
+        - RESTRICTED
+        - UNRESTRICTED
+
+    Area:
+      description: |
+        Base schema for a geographic area. The `areaType` discriminates the
+        concrete shape; CamaraSim reports a `CIRCLE`.
+      type: object
+      properties:
+        areaType:
+          $ref: "#/components/schemas/AreaType"
+      required:
+        - areaType
+      discriminator:
+        propertyName: areaType
+        mapping:
+          CIRCLE: "#/components/schemas/Circle"
+
+    AreaType:
+      description: Type of the geographic area. Only `CIRCLE` is used.
+      type: string
+      enum:
+        - CIRCLE
+
+    Circle:
+      description: A circular area, centred on `center` with the given `radius`.
+      allOf:
+        - $ref: "#/components/schemas/Area"
+        - type: object
+          properties:
+            center:
+              $ref: "#/components/schemas/Point"
+            radius:
+              description: Radius of the circle in metres.
+              type: integer
+              minimum: 1
+              maximum: 200000
+          required:
+            - center
+            - radius
+
+    Point:
+      description: A geographic point (WGS84 latitude/longitude, decimal degrees).
+      type: object
+      properties:
+        latitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+        longitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+      required:
+        - latitude
+        - longitude
+
+    # ---------- Bind / Unbind ----------
+    BindType:
+      type: string
+      description: |
+        The type of bind operation: `IMEIBIND` (bind the SIM to the device IMEI)
+        or `AREALIMIT` (restrict the SIM to its network-provisioned geographic
+        area). Both are implemented by `POST /bind`.
+      enum:
+        - IMEIBIND
+        - AREALIMIT
+
+    BindDeviceImeiRequest:
+      description: Request to bind a device's SIM card to its IMEI.
+      type: object
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+        bindType:
+          $ref: "#/components/schemas/BindType"
+      required:
+        - bindType
+
+    BindDeviceImeiResponse:
+      description: Response indicating whether the SIM was bound.
+      type: object
+      properties:
+        bound:
+          description: Whether the SIM card was successfully bound to the device IMEI.
+          type: boolean
+          example: true
+
+    UnBindType:
+      type: string
+      description: |
+        The type of unbind operation: `IMEIBIND` (clear the SIM↔IMEI binding) or
+        `AREALIMIT` (clear the SIM's area restriction). Both are implemented by
+        `POST /unbind`.
+      enum:
+        - IMEIBIND
+        - AREALIMIT
+
+    UnBindDeviceImeiRequest:
+      description: Request to remove a device's SIM↔IMEI binding.
+      type: object
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+        unBindType:
+          $ref: "#/components/schemas/UnBindType"
+      required:
+        - unBindType
+
+    UnBindDeviceImeiResponse:
+      description: Response indicating whether the SIM binding was removed.
+      type: object
+      properties:
+        unbound:
+          description: Whether the SIM card's IMEI binding was successfully removed.
+          type: boolean
+          example: true
+
+    # ---------- Error ----------
+    ErrorInfo:
+      description: Common error schema.
+      type: object
+      required:
+        - status
+        - code
+        - message
+      properties:
+        status:
+          type: integer
+          description: HTTP status code.
+        code:
+          type: string
+          description: Error code.
+        message:
+          type: string
+          description: Human-readable explanation.
+
+  # ---------- Responses ----------
+  responses:
+    QueryBadRequest400:
+      description: Bad Request
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/x-correlator"
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ErrorInfo"
+              - type: object
+                properties:
+                  status:
+                    enum:
+                      - 400
+                  code:
+                    enum:
+                      - INVALID_ARGUMENT
+                      - OUT_OF_RANGE
+          examples:
+            Insufficient Device Parameters:
+              description: Sufficient parameters must be provided to allow the target UE to be identified
+              value:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: "At least one of phoneNumber, networkAccessIdentifier, ipv4Address and ipv6Address must be specified"
+            Insufficient QueryType Parameters:
+              value:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: "QueryType must be specified"
+            Invalid Phone Number:
+              value:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: "Invalid format: phoneNumber"
+            Invalid QueryType Value:
+              value:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: "The value of queryType can only be IMEIBIND or AREALIMIT"
+
+    Generic401:
+      description: Unauthorized
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/x-correlator"
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ErrorInfo"
+              - type: object
+                properties:
+                  status:
+                    enum:
+                      - 401
+                  code:
+                    enum:
+                      - UNAUTHENTICATED
+          examples:
+            GENERIC_401_UNAUTHENTICATED:
+              description: Request cannot be authenticated
+              value:
+                status: 401
+                code: UNAUTHENTICATED
+                message: Request not authenticated due to missing, invalid, or expired credentials.
+
+    Generic403:
+      description: Forbidden
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/x-correlator"
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ErrorInfo"
+              - type: object
+                properties:
+                  status:
+                    enum:
+                      - 403
+                  code:
+                    enum:
+                      - PERMISSION_DENIED
+          examples:
+            GENERIC_403_PERMISSION_DENIED:
+              description: Permission denied. OAuth2 token access does not have the required scope or when the user fails operational security
+              value:
+                status: 403
+                code: PERMISSION_DENIED
+                message: Client does not have sufficient permissions to perform this action.
+
+    Generic404:
+      description: Not found
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/x-correlator"
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ErrorInfo"
+              - type: object
+                properties:
+                  status:
+                    enum:
+                      - 404
+                  code:
+                    enum:
+                      - NOT_FOUND
+                      - IDENTIFIER_NOT_FOUND
+          examples:
+            GENERIC_404_NOT_FOUND:
+              description: Resource is not found
+              value:
+                status: 404
+                code: NOT_FOUND
+                message: The specified resource is not found.
+
+    Query422:
+      description: Unprocessable Content
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/x-correlator"
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ErrorInfo"
+              - type: object
+                properties:
+                  status:
+                    enum:
+                      - 422
+                  code:
+                    enum:
+                      - MISSING_IDENTIFIER
+                      - UNSUPPORTED_IDENTIFIER
+                      - UNNECESSARY_IDENTIFIER
+          examples:
+            Unnecessary Identifier:
+              description: An explicit identifier has been provided for the device when this is already identified by the access token
+              value:
+                status: 422
+                code: UNNECESSARY_IDENTIFIER
+                message: An explicit identifier has been provided for the device when this is already identified by the access token
+            Missing Identifier:
+              description: An identifier is not included in the request and the device cannot be identified from the 2-legged access token
+              value:
+                status: 422
+                code: MISSING_IDENTIFIER
+                message: The device cannot be identified.
+
+    BindBadRequest400:
+      description: Bad Request
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/x-correlator"
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ErrorInfo"
+              - type: object
+                properties:
+                  status:
+                    enum:
+                      - 400
+                  code:
+                    enum:
+                      - INVALID_ARGUMENT
+                      - OUT_OF_RANGE
+          examples:
+            Invalid BindType Value:
+              value:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: "The value of bindType can only be IMEIBIND or AREALIMIT"
+            Missing BindType:
+              value:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: "bindType must be specified"
+
+    UnbindBadRequest400:
+      description: Bad Request
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/x-correlator"
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ErrorInfo"
+              - type: object
+                properties:
+                  status:
+                    enum:
+                      - 400
+                  code:
+                    enum:
+                      - INVALID_ARGUMENT
+                      - OUT_OF_RANGE
+          examples:
+            Invalid UnBindType Value:
+              value:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: "The value of unBindType can only be IMEIBIND or AREALIMIT"
+
+    Unbind422:
+      description: Unprocessable Content
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/x-correlator"
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ErrorInfo"
+              - type: object
+                properties:
+                  status:
+                    enum:
+                      - 422
+                  code:
+                    enum:
+                      - MISSING_IDENTIFIER
+                      - UNSUPPORTED_IDENTIFIER
+                      - UNNECESSARY_IDENTIFIER
+                      - UNNECESSARY_UNBIND_IMEI
+                      - UNNECESSARY_UNBIND_AREALIMIT
+          examples:
+            Unnecessary Unbind Imei:
+              description: The device has no IMEI binding to remove
+              value:
+                status: 422
+                code: UNNECESSARY_UNBIND_IMEI
+                message: The device has no IMEI binding to remove.
+            Unnecessary Unbind Arealimit:
+              description: The device has no area restriction to remove
+              value:
+                status: 422
+                code: UNNECESSARY_UNBIND_AREALIMIT
+                message: The device has no area restriction to remove.
+            Missing Identifier:
+              value:
+                status: 422
+                code: MISSING_IDENTIFIER
+                message: The device cannot be identified.
+
+    Generic429:
+      description: Too Many Requests
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/x-correlator"
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ErrorInfo"
+              - type: object
+                properties:
+                  status:
+                    enum:
+                      - 429
+                  code:
+                    enum:
+                      - QUOTA_EXCEEDED
+                      - TOO_MANY_REQUESTS
+          examples:
+            GENERIC_429_TOO_MANY_REQUESTS:
+              description: API Server request limit is overpassed
+              value:
+                status: 429
+                code: TOO_MANY_REQUESTS
+                message: Rejected due to request rate limit overpassed.

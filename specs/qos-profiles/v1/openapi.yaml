@@ -1,0 +1,450 @@
+# CamaraSim — QoS Profiles, API version v1 (CAMARA QoS Profiles 1.1.0, r3.2).
+#
+# Vendored from the CAMARA QoS Profiles API (qos-profiles 1.1.0, meta-release
+# r3.2) and annotated with CamaraSim's parameter-driven functional cases
+# (docs/DESIGN.md §7, §9). Backed by `src/apis/qos_profiles/v1.rs`; spec and
+# code must not drift.
+#
+# QoS Profiles is the read-only companion to the Quality on Demand API: QoD
+# *applies* a `qosProfile`; QoS Profiles *lists* the ones the operator offers.
+# CamaraSim serves a fixed, in-memory catalog (there is no upstream network to
+# query — DESIGN §7).
+#
+# Serves `POST /retrieve-qos-profiles` (list) and `GET /qos-profiles/{name}`
+# (`getQosProfile`, single-profile lookup — the list returns `[]` for an unknown
+# name, but the single lookup 404s).
+openapi: 3.0.3
+info:
+  title: QoS Profiles
+  description: |
+    Lists the Quality-of-Service profiles an operator offers for Quality on
+    Demand — the named service levels (`voice`, `video`, …) a caller then
+    requests when creating a QoD session.
+
+    This is the CamaraSim reference double for CAMARA QoS Profiles 1.1.0. The
+    catalog is a fixed, in-memory set; a caller narrows it with the optional
+    `name` / `status` filters and — for availability scoping — an optional
+    `device`. The endpoint requires the `qos-profiles:read` scope.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Two control planes drive the outcome:
+
+    1. **The `device` (error plane).** `device` is *optional* — the catalog
+       exists independently of any subscriber — so when it is omitted there is no
+       identifier case and the (filtered) catalog is returned. When it *is*
+       supplied, its first present identifier (`phoneNumber`, else
+       `networkAccessIdentifier`, else the IPv4 `publicAddress`, else
+       `ipv6Address`) is read and its trailing three digits select a reserved
+       CAMARA error (shared convention — see the referenced `errors.yaml`):
+       `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`.
+       Faithful to CAMARA's two-legged / three-legged rule, supplying a `device`
+       on a three-legged token whose subject already identifies a line (an E.164
+       `sub`) → `422 UNNECESSARY_IDENTIFIER`.
+    2. **The `name` / `status` filters.** Genuine control planes over *which*
+       profiles come back. Both combine (AND). An unknown `name` yields an empty
+       array (a list never 404s — unlike the single-profile lookup).
+
+    Examples: an empty body → the full catalog; `{"status":"ACTIVE"}` → the
+    active profiles; `{"name":"voice"}` → `[ voice ]`; `{"name":"nope"}` → `[]`;
+    `{"device":{"phoneNumber":"+123456789404"}}` → `404 NOT_FOUND`;
+    `{"device":{"phoneNumber":"+123456789422"}}` → `422 SERVICE_NOT_APPLICABLE`.
+  version: "1.1.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/qos-profiles/v1"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /retrieve-qos-profiles:
+    post:
+      operationId: retrieveQoSProfiles
+      summary: Retrieve the QoS profiles matching the given criteria
+      description: |
+        Returns the QoS profiles the operator offers, as a JSON array. Narrow the
+        result with the optional `name` / `status` filters and — for availability
+        scoping — the optional `device`.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - qos-profiles:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QosProfileDeviceRequest"
+      responses:
+        "200":
+          description: The QoS profiles matching the criteria (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/QosProfile"
+              examples:
+                voice:
+                  summary: The single `voice` profile (name filter)
+                  value:
+                    - name: voice
+                      description: Low-latency profile for real-time interactive voice.
+                      status: ACTIVE
+                      targetMinDownstreamRate: { value: 64, unit: kbps }
+                      maxDownstreamRate: { value: 128, unit: kbps }
+                      priority: 20
+                      packetDelayBudget: { value: 100, unit: Milliseconds }
+                      serviceClass: real_time_interactive
+                empty:
+                  summary: No profile matches the filter
+                  value: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          description: |
+            The service is not applicable, the identifier is unsupported, or a
+            device was supplied redundantly on a three-legged token.
+            CamaraSim returns:
+            - `SERVICE_NOT_APPLICABLE` — a `device` whose identifier ends in the
+              reserved `…422` suffix (the shared reserved-error mapping).
+            - `UNNECESSARY_IDENTIFIER` — a `device` supplied when the access token
+              already identifies a line (E.164 subject).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                serviceNotApplicable:
+                  summary: Reserved …422 device identifier
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+                unnecessaryIdentifier:
+                  summary: Device supplied on a three-legged line token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The device is already identified by the access token; do not also supply `device`.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The result is the fixed catalog filtered by `name`/`status`; a supplied
+          `device` is an error plane only (docs/DESIGN.md §7). Reserved error
+          suffixes come from the shared convention in errors.yaml. Note: canonical
+          QoS Profiles 1.1.0 declares 400/401/403/404/422/429; CamaraSim exposes
+          the full shared error set so every reserved case is reachable (409/500/503
+          are CamaraSim extensions). The 422 UNSUPPORTED_IDENTIFIER sub-case is not
+          modelled; the …422 suffix maps to SERVICE_NOT_APPLICABLE.
+        cases:
+          - input: empty body (or `{}`)
+            result: '200 — the whole catalog'
+          - input: '`{"name":"<known>"}`'
+            result: '200 — a single-element array with that profile'
+          - input: '`{"name":"<unknown>"}`'
+            result: '200 — an empty array (a list never 404s)'
+          - input: '`{"status":"ACTIVE|INACTIVE|DEPRECATED"}`'
+            result: '200 — profiles in that lifecycle state'
+          - input: '`name` violating ^[a-zA-Z0-9_.-]+$ / length 3–256'
+            result: '400 INVALID_ARGUMENT'
+          - input: '`status` not one of the three enum values'
+            result: '400 INVALID_ARGUMENT'
+          - input: '`device` identifier ending in a reserved error suffix (e.g. …404)'
+            result: 'the canonical CAMARA error for that status'
+          - input: '`device` present but carrying no identifier'
+            result: '400 INVALID_ARGUMENT'
+          - input: '`device` supplied on a three-legged line token (E.164 subject)'
+            result: '422 UNNECESSARY_IDENTIFIER'
+
+  /qos-profiles/{name}:
+    get:
+      operationId: getQosProfile
+      summary: Retrieve a single QoS profile by name
+      description: |
+        Returns the QoS profile with the exact `name`, or `404 NOT_FOUND` if no
+        such profile exists. Reads the same fixed catalog as
+        `retrieveQoSProfiles`; unlike the list — which returns an empty array for
+        an unknown name — this single-profile lookup 404s.
+
+        The `name` path parameter is the sole control plane (docs/DESIGN.md §7):
+        there is no request body and no `device`, so no reserved-identifier error
+        plane applies here.
+      security:
+        - openId:
+            - qos-profiles:read
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: The exact name of the QoS profile to retrieve.
+          schema:
+            $ref: "#/components/schemas/QosProfileName"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The QoS profile with the given name.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QosProfile"
+              examples:
+                voice:
+                  summary: The `voice` profile
+                  value:
+                    name: voice
+                    description: Low-latency profile for real-time interactive voice.
+                    status: ACTIVE
+                    targetMinDownstreamRate: { value: 64, unit: kbps }
+                    maxDownstreamRate: { value: 128, unit: kbps }
+                    priority: 20
+                    packetDelayBudget: { value: 100, unit: Milliseconds }
+                    serviceClass: real_time_interactive
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The `name` path parameter is the only control plane (docs/DESIGN.md §7):
+          a well-formed name that names a catalog entry returns it, a well-formed
+          name that does not 404s, and a name violating the QosProfileName schema
+          is rejected before the lookup. Canonical QoS Profiles 1.1.0 declares
+          400/401/403/404/429 here; 500/503 are CamaraSim extensions from the
+          shared error set.
+        cases:
+          - input: '`name` = a known catalog profile (e.g. `voice`)'
+            result: '200 — that single QosProfile object'
+          - input: '`name` = a well-formed but unknown profile'
+            result: '404 NOT_FOUND'
+          - input: '`name` violating ^[a-zA-Z0-9_.-]+$ / length 3–256'
+            result: '400 INVALID_ARGUMENT'
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    QosProfileDeviceRequest:
+      type: object
+      description: >-
+        Criteria for retrieving QoS profiles. Every field is optional: an empty
+        body returns the whole catalog.
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+        name:
+          $ref: "#/components/schemas/QosProfileName"
+        status:
+          $ref: "#/components/schemas/QosProfileStatus"
+
+    Device:
+      type: object
+      description: >-
+        Identifies the device for availability scoping. At least one identifier
+        must be present. Optional at the request level; omit it to list all
+        profiles, or when a three-legged access token identifies the line (in
+        which case supplying it is UNNECESSARY_IDENTIFIER). CamaraSim keys its
+        error case off the first present identifier, in the order phoneNumber →
+        networkAccessIdentifier → ipv4Address.publicAddress → ipv6Address.
+      minProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        networkAccessIdentifier:
+          type: string
+          description: A network access identifier assigned by the operator.
+          example: "user012@example.com"
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          description: The device's IPv6 address.
+          example: "2001:db8::11"
+
+    DeviceIpv4Addr:
+      type: object
+      description: >-
+        The device's IPv4 address information. CamaraSim reads `publicAddress` as
+        the identifier; `privateAddress`/`publicPort` are accepted for fidelity.
+      properties:
+        publicAddress:
+          type: string
+          example: "203.0.113.12"
+        privateAddress:
+          type: string
+          example: "192.0.2.25"
+        publicPort:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          example: 59765
+
+    QosProfileName:
+      type: string
+      description: >-
+        A unique name identifying a specific QoS profile.
+      minLength: 3
+      maxLength: 256
+      pattern: '^[a-zA-Z0-9_.-]+$'
+      example: voice
+
+    QosProfileStatus:
+      type: string
+      description: The lifecycle state of a QoS profile.
+      enum:
+        - ACTIVE
+        - INACTIVE
+        - DEPRECATED
+
+    Rate:
+      type: object
+      description: A data rate (value + unit).
+      properties:
+        value:
+          type: integer
+          minimum: 0
+          maximum: 1024
+          example: 10
+        unit:
+          type: string
+          enum: [bps, kbps, Mbps, Gbps, Tbps]
+          example: Mbps
+
+    Duration:
+      type: object
+      description: A duration (value + unit).
+      properties:
+        value:
+          type: integer
+          minimum: 1
+          example: 100
+        unit:
+          type: string
+          enum: [Days, Hours, Minutes, Seconds, Milliseconds, Microseconds, Nanoseconds]
+          example: Milliseconds
+
+    QosProfile:
+      type: object
+      description: >-
+        A QoS profile the operator offers. CamaraSim returns a fixed catalog of
+        these; the fields below mirror the CAMARA schema (all optional except
+        `name` and `status`).
+      required:
+        - name
+        - status
+      properties:
+        name:
+          $ref: "#/components/schemas/QosProfileName"
+        description:
+          type: string
+          maxLength: 1024
+          description: A human-readable description of the profile.
+        status:
+          $ref: "#/components/schemas/QosProfileStatus"
+        targetMinUpstreamRate:
+          $ref: "#/components/schemas/Rate"
+        maxUpstreamRate:
+          $ref: "#/components/schemas/Rate"
+        maxUpstreamBurstRate:
+          $ref: "#/components/schemas/Rate"
+        targetMinDownstreamRate:
+          $ref: "#/components/schemas/Rate"
+        maxDownstreamRate:
+          $ref: "#/components/schemas/Rate"
+        maxDownstreamBurstRate:
+          $ref: "#/components/schemas/Rate"
+        minDuration:
+          $ref: "#/components/schemas/Duration"
+        maxDuration:
+          $ref: "#/components/schemas/Duration"
+        priority:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: Relative priority of the profile (lower is higher priority).
+        packetDelayBudget:
+          $ref: "#/components/schemas/Duration"
+        jitter:
+          $ref: "#/components/schemas/Duration"
+        packetErrorLossRate:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: The exponent of the target packet-error-loss rate (10^-n).
+        l4sQueueType:
+          type: string
+          enum: [non-l4s-queue, l4s-queue, mixed-queue]
+        serviceClass:
+          type: string
+          enum:
+            - microsoft_voice
+            - microsoft_audio_video
+            - real_time_interactive
+            - multimedia_streaming
+            - broadcast_video
+            - low_latency_data
+            - high_throughput_data
+            - low_priority_data
+            - standard

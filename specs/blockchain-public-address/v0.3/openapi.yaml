@@ -1,0 +1,453 @@
+# CamaraSim — Blockchain Public Address, API version v0.3 (CAMARA 0.3.0, r2.2).
+#
+# Vendored from the CAMARA Blockchain Public Address API (release r2.2 →
+# blockchain-public-address 0.3.0, the latest published version — so mounted at
+# its real sub-1.0 base path `/v0.3`, like KYC Match / KYC Tenure) and annotated
+# with CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9).
+# Backed by `src/apis/blockchain_public_address/v0_3.rs`; spec and code must not
+# drift.
+#
+# Implemented: the stateless read op `retrieveBlockchainPublicAddress` (POST
+# …/retrieve-blockchains), the stateful bind op `bindBlockchainPublicAddress`
+# (POST …/blockchain-public-addresses) and the stateful unbind op
+# `deleteBlockchainPublicAddress` (DELETE …/{id}), the latter two backed by an
+# in-memory binding store. This completes Blockchain Public Address v0.3.
+openapi: 3.0.3
+info:
+  title: Blockchain Public Address
+  description: |
+    Service that lets a client discover the blockchain public address(es) a
+    mobile subscriber has bound to their line — an operator-vouched link between
+    a `phoneNumber` and one or more on-chain addresses, useful for Web3 / crypto
+    onboarding and anti-fraud.
+
+    This is the CamaraSim reference double for CAMARA Blockchain Public Address
+    0.3.0. The `retrieve-blockchains` endpoint requires the
+    `blockchain-public-address:read` scope.
+
+    ## Identifier resolution
+
+    Faithful to the CAMARA 0.3.0 schema, `phoneNumber` is a **required** request
+    field, so it is always the identifier (there is no three-legged token
+    fallback). A missing or malformed `phoneNumber` → `400 INVALID_ARGUMENT`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Two independent control planes drive the answer, both read off the submitted
+    `phoneNumber`:
+
+    - **Reserved error suffix.** If the number's trailing three digits name a
+      reserved CAMARA status, the endpoint answers with that canonical CAMARA
+      error (shared convention — see the referenced `errors.yaml`): `…400`,
+      `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`.
+    - **Address set (trailing digits).** Otherwise the number's trailing three
+      digits `d` decide the bound addresses:
+        - `d == 0` (a `…000` tail, or a number with no trailing digits) → `[]`
+          (no blockchain address is bound to this line — a list never 404s).
+        - `d > 0` → a deterministic list of `((d - 1) % 3) + 1` addresses (1–3),
+          the `i`-th on network `NETWORKS[(d + i) % 6]` from a fixed 6-entry
+          CAIP-2 table, so the reported chain is a genuine second control plane.
+
+    Each `blockchainPublicAddress` is a deterministic EVM-style `0x…` address and
+    each `id` a deterministic UUID-shaped token, both derived (SHA-256) from the
+    number and the network — the same input always yields the same records with
+    no stored state. Addresses are rendered lowercase (not EIP-55 checksummed) —
+    a documented simplification.
+
+    Example: `+123456789001` → one Ethereum-mainnet address; `+123456789002` →
+    two addresses; `+123456789000` → `[]`; `+123456789404` → `404 NOT_FOUND`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical Blockchain Public Address 0.3.0 declares a
+    subset (400/401/403/404/429) for this operation.
+  version: "0.3.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/blockchain-public-address/v0.3"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /blockchain-public-addresses/retrieve-blockchains:
+    post:
+      operationId: retrieveBlockchainPublicAddress
+      summary: Retrieve the blockchain public addresses bound to a phone number
+      description: |
+        Returns the array of blockchain public address records the subscriber
+        behind `phoneNumber` has bound to their line. A number with no bound
+        address returns `200 []`.
+
+        The functional case is selected from the submitted `phoneNumber` — see
+        the API description for the parameter-driven cases (the trailing three
+        digits decide how many addresses are returned and on which chains, and a
+        reserved suffix selects a canonical CAMARA error).
+      security:
+        - openId:
+            - blockchain-public-address:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PhoneNumber"
+      responses:
+        "200":
+          description: The blockchain public addresses bound to the line (possibly none).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BlockchainPublicAddressResponse"
+              examples:
+                bound:
+                  summary: One bound address (happy path)
+                  value:
+                    - id: "3f2a9c1b-7d4e-4a11-9c02-8e6f5a1b2c3d"
+                      blockchainPublicAddress: "0x9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f00"
+                      blockchainNetworkId: "eip155:1"
+                      currency:
+                        - ETH
+                none:
+                  summary: No blockchain address bound to the line
+                  value: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the submitted `phoneNumber` (docs/DESIGN.md §7).
+          The trailing three digits `d` decide the bound addresses; a reserved
+          error suffix selects a canonical CAMARA error from the shared
+          convention in errors.yaml.
+        cases:
+          - input: phoneNumber ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "phoneNumber with trailing digits d == 0 (…000, or no digits)"
+            result: "200 [] (no address bound)"
+          - input: "phoneNumber with trailing digits d in 1..999"
+            result: "200 with ((d - 1) % 3) + 1 address records (1–3)"
+          - input: two numbers whose trailing digits pick different chains
+            result: different blockchainNetworkId (the chain is a control plane)
+          - input: missing or malformed phoneNumber
+            result: "400 INVALID_ARGUMENT"
+
+  /blockchain-public-addresses:
+    post:
+      operationId: bindBlockchainPublicAddress
+      summary: Bind a blockchain public address to a phone number
+      description: |
+        Binds an on-chain `blockchainPublicAddress` (on `blockchainNetworkId`) to
+        the subscriber behind `phoneNumber`, persisting the relationship in an
+        in-memory store and returning a minted binding `id`. Requires the
+        `blockchain-public-address:create` scope.
+
+        Control planes (docs/DESIGN.md §7):
+          - **`phoneNumber` reserved error suffix** → canonical CAMARA error; a
+            malformed `phoneNumber` → `400 INVALID_ARGUMENT`.
+          - **Request validation** (second plane): a `blockchainNetworkId` that is
+            not `<ecosystem>:<sub_id>` (e.g. `evm:1`) → `400
+            BLOCKCHAIN_PUBLIC_ADDRESS.INVALID_BLOCKCHAIN_NETWORK_IDENTIFIER`; a
+            `blockchainPublicAddress` that is not an EVM `0x…` (40-hex) address →
+            `400 INVALID_ARGUMENT`; exactly one of `nonce`/`signature` → `400
+            BLOCKCHAIN_PUBLIC_ADDRESS.BOTH_NONCE_SIGNATURE_REQUIRED`; **both**
+            `nonce` and `signature` request enhanced on-chain ownership
+            validation, which the simulator cannot perform → `422
+            BLOCKCHAIN_PUBLIC_ADDRESS.UNSUPPORTED_ENHANCED_VALIDATION`.
+          - **Store state** (third plane): re-binding the same
+            `(phoneNumber, blockchainNetworkId, blockchainPublicAddress)` triple →
+            `409 ALREADY_EXISTS` (the binding `id` is derived from the triple, so
+            a duplicate collides).
+      security:
+        - openId:
+            - blockchain-public-address:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BindBlockchainPublicAddressRequest"
+      responses:
+        "201":
+          description: The address was bound; the response carries the binding id.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BindBlockchainPublicAddressResponse"
+              examples:
+                bound:
+                  summary: A newly minted binding
+                  value:
+                    id: "3f2a9c1b-7d4e-4a11-9c02-8e6f5a1b2c3d"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Bind outcome selected from the request body + store state
+          (docs/DESIGN.md §7). The identifier plane is checked first, then request
+          validation, then the store (duplicate) plane.
+        cases:
+          - input: phoneNumber ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: a valid, not-yet-bound (phoneNumber, network, address) triple
+            result: "201 with the minted binding id"
+          - input: the same triple bound a second time
+            result: "409 ALREADY_EXISTS"
+          - input: blockchainNetworkId not of the form <ecosystem>:<sub_id>
+            result: "400 BLOCKCHAIN_PUBLIC_ADDRESS.INVALID_BLOCKCHAIN_NETWORK_IDENTIFIER"
+          - input: blockchainPublicAddress not a 0x + 40-hex EVM address
+            result: "400 INVALID_ARGUMENT"
+          - input: exactly one of nonce / signature supplied
+            result: "400 BLOCKCHAIN_PUBLIC_ADDRESS.BOTH_NONCE_SIGNATURE_REQUIRED"
+          - input: both nonce and signature supplied (enhanced validation)
+            result: "422 BLOCKCHAIN_PUBLIC_ADDRESS.UNSUPPORTED_ENHANCED_VALIDATION"
+          - input: missing or malformed phoneNumber
+            result: "400 INVALID_ARGUMENT"
+
+  /blockchain-public-addresses/{id}:
+    delete:
+      operationId: deleteBlockchainPublicAddress
+      summary: Unbind a blockchain public address from a phone number
+      description: |
+        Removes ("unbinds") the stored binding named by the path `id`, releasing
+        the link between a phone number and its on-chain address. Requires the
+        `blockchain-public-address:delete` scope.
+
+        The `id` is an opaque, UUID-shaped binding token (minted at bind time),
+        so — unlike the `phoneNumber`-keyed read/bind operations — there is no
+        reserved-identifier control plane here; the in-memory store state is the
+        only control plane (docs/DESIGN.md §7):
+          - the binding exists → it is evicted, `204 No Content` (single-use: a
+            second delete of the same `id` → `404`);
+          - no such binding (unknown, or already deleted) → `404 NOT_FOUND`.
+
+        CamaraSim does not scope bindings per subscriber, so it does not enforce
+        the canonical spec's ownership check (that the `id` belongs to the access
+        token's `sub`) — a documented simplification, mirroring the other
+        unscoped in-memory stores.
+      security:
+        - openId:
+            - blockchain-public-address:delete
+      parameters:
+        - $ref: "#/components/parameters/BindingId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "204":
+          description: The binding was removed. No response body.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Delete outcome selected only from the in-memory store state
+          (docs/DESIGN.md §7). The binding `id` is opaque, so there is no
+          reserved-identifier plane here.
+        cases:
+          - input: id of an existing binding
+            result: "204 No Content (the binding is evicted)"
+          - input: the same id deleted a second time
+            result: "404 NOT_FOUND (single-use)"
+          - input: an unknown / never-created id
+            result: "404 NOT_FOUND"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+    BindingId:
+      name: id
+      in: path
+      required: true
+      description: >-
+        Unique identifier of the bind relationship between a `phoneNumber` and a
+        blockchain public address, as minted by `bindBlockchainPublicAddress`.
+      schema:
+        type: string
+      example: "3f2a9c1b-7d4e-4a11-9c02-8e6f5a1b2c3d"
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    PhoneNumber:
+      type: object
+      description: |
+        A request identified by a phone number. `phoneNumber` is required (there
+        is no three-legged token fallback in this operation).
+      required:
+        - phoneNumber
+      properties:
+        phoneNumber:
+          type: string
+          description: >-
+            A public identifier addressing a telephone subscription, in E.164
+            format (starting with `+`). In mobile networks it corresponds to the
+            MSISDN.
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+
+    BlockchainPublicAddressResponse:
+      type: object
+      description: A blockchain public address bound to the subscriber's line.
+      required:
+        - id
+        - blockchainPublicAddress
+        - blockchainNetworkId
+      properties:
+        id:
+          type: string
+          description: >-
+            An opaque identifier for this binding record. In CamaraSim it is a
+            deterministic UUID-shaped token derived (SHA-256) from the phone
+            number and the network.
+          example: "3f2a9c1b-7d4e-4a11-9c02-8e6f5a1b2c3d"
+        blockchainPublicAddress:
+          type: string
+          description: >-
+            The on-chain public address. In CamaraSim this is a deterministic
+            EVM-style `0x…` address (lowercase, not EIP-55 checksummed) derived
+            (SHA-256) from the phone number and the network.
+          example: "0x9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f00"
+        blockchainNetworkId:
+          type: string
+          description: >-
+            The blockchain network the address lives on, as a CAIP-2 chain
+            identifier (e.g. `eip155:1` for Ethereum Mainnet).
+          example: "eip155:1"
+        currency:
+          type: array
+          description: The currencies (symbols) the address transacts in.
+          items:
+            type: string
+          example:
+            - ETH
+
+    BindBlockchainPublicAddressRequest:
+      type: object
+      description: |
+        A request to bind an on-chain public address to a phone number.
+        `phoneNumber`, `blockchainPublicAddress` and `blockchainNetworkId` are
+        required. The optional `nonce`/`signature` pair requests enhanced on-chain
+        ownership validation; CamaraSim does not support it (both supplied → `422
+        UNSUPPORTED_ENHANCED_VALIDATION`), and exactly one is a `400`.
+      required:
+        - phoneNumber
+        - blockchainPublicAddress
+        - blockchainNetworkId
+      properties:
+        phoneNumber:
+          type: string
+          description: >-
+            A public identifier addressing a telephone subscription, in E.164
+            format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        blockchainPublicAddress:
+          type: string
+          description: >-
+            The user's blockchain public address to bind. In CamaraSim this must
+            be an EVM address (`0x` + 40 hex digits).
+          example: "0x9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f00"
+        blockchainNetworkId:
+          type: string
+          description: >-
+            The blockchain network identifier, as `<L1_Ecosystem>:<sub_id>`
+            (e.g. `evm:1`).
+          example: "evm:1"
+        currency:
+          type: array
+          description: The currencies (symbols) supported on the blockchain.
+          items:
+            type: string
+          example:
+            - ETH
+        nonce:
+          type: string
+          description: >-
+            One-time challenge for enhanced ownership validation. Must be supplied
+            together with `signature`. Not supported by CamaraSim.
+        signature:
+          type: string
+          description: >-
+            Cryptographic proof created by signing the `nonce` off-chain. Must be
+            supplied together with `nonce`. Not supported by CamaraSim.
+
+    BindBlockchainPublicAddressResponse:
+      type: object
+      description: The result of a successful bind — the minted binding id.
+      required:
+        - id
+      properties:
+        id:
+          type: string
+          description: >-
+            The opaque identifier of the newly created binding. In CamaraSim it is
+            a deterministic UUID-shaped token derived (SHA-256) from the
+            `(phoneNumber, blockchainNetworkId, blockchainPublicAddress)` triple.
+          example: "3f2a9c1b-7d4e-4a11-9c02-8e6f5a1b2c3d"

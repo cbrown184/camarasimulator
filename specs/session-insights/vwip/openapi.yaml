@@ -1,0 +1,1055 @@
+# CamaraSim — Session Insights, API version vwip (CAMARA SessionInsights, wip).
+#
+# Vendored from the CAMARA SessionInsights API (work-in-progress — no released
+# version yet, so mounted at its canonical `vwip` base path
+# `/session-insights/vwip`, like the other pre-1.0 wip APIs) and annotated with
+# CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/session_insights/vwip.rs`; spec and code must not drift.
+#
+# This slice serves the create/read/delete trio — `POST /sessions`,
+# `GET /sessions/{sessionId}` and `DELETE /sessions/{sessionId}` — plus
+# list-by-device (`POST /retrieve-sessions`, `retrieveSessionsByDevice`) and
+# application-observed metrics submission (`POST /sessions/{sessionId}/metrics`,
+# `sendSessionMetrics`). `sendSessionMetrics` now also delivers the resulting
+# `network-quality-score` CloudEvent to the session's `sink` (fire-and-forget;
+# `http://` sinks over raw TCP, `https://` sinks over a rustls TLS session).
+# `deleteSession` now delivers the
+# terminal `session-ended` CloudEvent (`terminationReason: SESSION_DELETED`) to the
+# session's `sink` too, and `createSession` schedules the network-initiated
+# `session-ended` leg (`terminationReason: NETWORK_TERMINATED`) for a `…001`
+# identifier — the (simulated) network drops the session early. A time-bounded
+# session likewise fires the terminal `session-ended` leg
+# (`terminationReason: SESSION_EXPIRED`) when it reaches its `expiresAt`
+# (`createSession` schedules the expiry timer). A session's `sinkCredential`
+# authenticates every callback — an ACCESSTOKEN credential as `Authorization: Bearer`
+# (RFC 6750) and a PLAIN credential as `Authorization: Basic base64(identifier:secret)`
+# (RFC 7617); only REFRESHTOKEN remains a documented cut.
+openapi: 3.0.3
+info:
+  title: Session Insights
+  description: |
+    Session Insights lets an application register an interest in the network
+    quality of a specific **application session** — a device talking to a named
+    application server — so the operator can later report quality metrics and
+    notify the application when the experience degrades or the session ends.
+
+    This is the CamaraSim reference double for CAMARA SessionInsights (wip). It is
+    a **stateful, resource-oriented** API: `POST /sessions` creates a session
+    resource and mints an opaque `id`, and `GET /sessions/{sessionId}` reads it
+    back. `POST` requires the `session-insights:sessions:create` scope; `GET` the
+    `session-insights:sessions:read` scope.
+
+    ## Identifier
+
+    The session is keyed by the CAMARA `Device` — the submitted `device`
+    identifier (phoneNumber, else networkAccessIdentifier, else the IPv4
+    `publicAddress`, else ipv6Address), or, when no `device` is supplied, the
+    access-token subject (three-legged fallback). Neither present →
+    `422 MISSING_IDENTIFIER`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    - **Reserved error suffix (identifier).** If the resolved identifier's trailing
+      three digits name a reserved CAMARA status, `POST` answers with that canonical
+      CAMARA error (shared convention — see the referenced `errors.yaml`): `…400`,
+      `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`. In particular
+      `…409` drives the `createSession` `409 CONFLICT` (duplicate session) case and
+      `…422` the `422 SERVICE_NOT_APPLICABLE`.
+    - **Open-ended vs time-bounded (identifier digits).** Otherwise the created
+      session is `ACTIVE` with `startsAt = now`; its `expiresAt` is present
+      (`startsAt + 24 h`) unless the identifier's trailing three digits are `…000`
+      (or it has no digits), which marks an **open-ended** session (no `expiresAt`).
+
+    Example: `+123456789012` → `201 ACTIVE` with an `expiresAt`; `+123456789000`
+    → `201 ACTIVE` open-ended (no `expiresAt`); `+123456789409` → `409 CONFLICT`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable.
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/session-insights/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /sessions:
+    post:
+      operationId: createSession
+      summary: Create a session insights resource
+      description: |
+        Register interest in the network quality of an application session and
+        obtain an opaque `id`. `applicationProfileId`, `applicationServer` and
+        `sink` are required; `device` is required only for a two-legged token.
+
+        See the API description for the parameter-driven functional cases (the
+        resolved identifier's trailing three digits select an open-ended vs a
+        time-bounded session, or a reserved CAMARA error).
+
+        **Network-initiated termination (CamaraSim model).** A `…001` identifier
+        creates an ordinary `ACTIVE` session, but the (simulated) network then
+        drops it early: after a short fixed grace the session is evicted and the
+        **terminal** `session-ended` CloudEvent (type
+        `org.camaraproject.session-insights.v0.session-ended`,
+        `data.terminationReason: NETWORK_TERMINATED`) is delivered to its `sink` —
+        fire-and-forget (`http://` sinks over raw TCP, `https://` sinks over a rustls
+        TLS session), so nothing delays the `201`. The
+        session's `sinkCredential` (stashed here — ACCESSTOKEN as `Bearer`, PLAIN as
+        `Basic`) authenticates the callback and is taken single-use (the event is
+        terminal). A concurrent
+        `deleteSession` that removed the session first makes this a no-op (exactly
+        one terminal event fires).
+
+        **Session expiry (CamaraSim model).** A time-bounded session (any
+        non-`…000`, non-`…001` tail, so it has an `expiresAt`) runs to that instant,
+        then an async expiry timer scheduled here evicts it and delivers the
+        **terminal** `session-ended` CloudEvent (`data.terminationReason:
+        SESSION_EXPIRED`) to its `sink` — same fire-and-forget transport and
+        `sinkCredential` auth (ACCESSTOKEN `Bearer` / PLAIN `Basic`) as the other
+        legs. The three terminal
+        transitions (`SESSION_DELETED` / `NETWORK_TERMINATED` / `SESSION_EXPIRED`)
+        are mutually exclusive — exactly one fires per session. An **open-ended**
+        session (`…000`/no-digits, no `expiresAt`) has no expiry timer.
+      security:
+        - openId:
+            - session-insights:sessions:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionRequest"
+      responses:
+        "201":
+          description: Session created.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInfo"
+              examples:
+                timeBounded:
+                  summary: Time-bounded ACTIVE session (non-…000 tail)
+                  value:
+                    id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    applicationSessionId: "game-42"
+                    device:
+                      phoneNumber: "+123456789012"
+                    applicationServer:
+                      ipv4Address: "198.51.100.1"
+                    sink: "https://callback.example/notify"
+                    startsAt: "2026-08-05T10:41:38Z"
+                    expiresAt: "2026-08-06T10:41:38Z"
+                    status: ACTIVE
+                openEnded:
+                  summary: Open-ended ACTIVE session (…000 tail — no expiresAt)
+                  value:
+                    id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    device:
+                      phoneNumber: "+123456789000"
+                    applicationServer:
+                      ipv4Address: "198.51.100.1"
+                    sink: "https://callback.example/notify"
+                    startsAt: "2026-08-05T10:41:38Z"
+                    status: ACTIVE
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body; a missing `applicationProfileId`, `applicationServer`
+            (or one carrying no endpoint field), or `sink` (or a `sink` that is not
+            an http(s) URI); an `applicationSessionId` longer than 256 characters;
+            or a malformed `phoneNumber`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInsightsError"
+              examples:
+                invalidArgument:
+                  summary: Missing required field
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`sink` is required."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when neither
+            a `device` nor a usable token subject is present, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for an identifier ending in the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInsightsError"
+              examples:
+                missingIdentifier:
+                  summary: No device and no token subject
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: "No `device` supplied and the access token identifies no device."
+                serviceNotApplicable:
+                  summary: Reserved `…422` suffix
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved identifier — the submitted `device`
+          id, else the token subject (docs/DESIGN.md §7). Reserved error suffixes
+          come from the shared convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404, …409, …422)
+            result: the canonical CAMARA error for that status
+          - input: "identifier trailing digits …000 (or no digits)"
+            result: "201 ACTIVE, open-ended (no expiresAt)"
+          - input: "identifier with any other trailing digits (e.g. …012)"
+            result: >-
+              201 ACTIVE, time-bounded (expiresAt = startsAt + 24h); an expiry
+              timer is scheduled so at expiresAt the session is evicted and a
+              terminal session-ended CloudEvent (terminationReason SESSION_EXPIRED)
+              is delivered to the http sink (ACCESSTOKEN sinkCredential bearer applied)
+          - input: "identifier trailing digits …001 (network-termination scenario)"
+            result: >-
+              201 ACTIVE, then the simulated network drops it early — after a
+              short grace the session is evicted and a terminal session-ended
+              CloudEvent (terminationReason NETWORK_TERMINATED) is delivered to
+              the http sink (ACCESSTOKEN sinkCredential bearer applied)
+          - input: no device and no token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: missing applicationProfileId / applicationServer / sink, or a malformed sink or phoneNumber
+            result: "400 INVALID_ARGUMENT"
+          - input: >-
+              a PLAIN sinkCredential (identifier + secret) on the created session
+            result: >-
+              201; every later callback (network-quality-score / session-ended)
+              carries Authorization: Basic base64(identifier:secret) (RFC 7617); the
+              secret is stored apart from the SessionInfo and never echoed
+
+  /sessions/{sessionId}:
+    get:
+      operationId: getSession
+      summary: Retrieve a session insights resource by id
+      description: |
+        Return the stored session representation for `sessionId` (verbatim as it
+        was created in this slice), or `404 NOT_FOUND` for an unknown id.
+      security:
+        - openId:
+            - session-insights:sessions:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sessionId
+          in: path
+          required: true
+          description: Operator-assigned session identifier.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The stored session.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInfo"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed only on the in-memory store (docs/DESIGN.md §7).
+        cases:
+          - input: a sessionId returned by a prior createSession
+            result: "200 with the stored SessionInfo"
+          - input: an unknown sessionId
+            result: "404 NOT_FOUND"
+    delete:
+      operationId: deleteSession
+      summary: Delete a session insights resource by id
+      description: |
+        Delete the session resource identified by `sessionId`. Keyed only on the
+        in-memory store: a session that exists is evicted (single-use) → `204 No
+        Content`; an unknown or already-deleted id → `404 NOT_FOUND`.
+
+        **`session-ended` notification (CamaraSim model).** When the deleted session
+        recorded a `sink`, CamaraSim delivers the **terminal** `session-ended`
+        CloudEvent (type
+        `org.camaraproject.session-insights.v0.session-ended`, `data.terminationReason:
+        SESSION_DELETED`) to that `sink` — fire-and-forget (`http://` sinks over raw
+        TCP, `https://` sinks over a rustls TLS session), so a slow or unreachable
+        sink never delays the `204`. The session's
+        `sinkCredential` (stashed at `createSession`) is applied to the callback's
+        `Authorization` header — ACCESSTOKEN as `Bearer <token>` (RFC 6750), PLAIN as
+        `Basic base64(identifier:secret)` (RFC 7617) — and taken single-use (the event
+        is terminal). The network-initiated (`NETWORK_TERMINATED`) leg of
+        `session-ended` is scheduled from `createSession` for a `…001` identifier,
+        and the `SESSION_EXPIRED` (expiry) leg from `createSession` for a
+        time-bounded session; the three terminal legs are mutually exclusive.
+      security:
+        - openId:
+            - session-insights:sessions:delete
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sessionId
+          in: path
+          required: true
+          description: Operator-assigned session identifier.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: The session was deleted. No response body.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed only on the in-memory store (docs/DESIGN.md §7).
+        cases:
+          - input: a sessionId returned by a prior createSession (not yet deleted)
+            result: >-
+              204 No Content; the session is evicted (single-use) and a terminal
+              session-ended CloudEvent (terminationReason SESSION_DELETED) is fired
+              to its sink (http:// over raw TCP or https:// over TLS)
+          - input: >-
+              a deleted session whose sink recorded an ACCESSTOKEN sinkCredential
+            result: >-
+              the session-ended callback carries Authorization Bearer <token> (the
+              secret is never echoed by GET/retrieve; taken single-use)
+          - input: >-
+              a deleted session whose sink recorded a PLAIN sinkCredential
+              (identifier + secret)
+            result: >-
+              the session-ended callback carries Authorization Basic
+              base64(identifier:secret) (RFC 7617; the secret is never echoed by
+              GET/retrieve; taken single-use)
+          - input: an unknown or already-deleted sessionId
+            result: "404 NOT_FOUND (no notification)"
+
+  /retrieve-sessions:
+    post:
+      operationId: retrieveSessionsByDevice
+      summary: List a device's session insights resources
+      description: |
+        List the session-insights resources for a device as an array of
+        `SessionInfo` (`200`; an empty array when the device has none — CAMARA
+        never `404`s on an empty result). The device is the submitted `device`
+        identifier, else the access-token subject (three-legged fallback; neither
+        present → `422 MISSING_IDENTIFIER`). This is a read, so it requires the
+        `session-insights:sessions:read` scope (as `getSession` does).
+
+        On the happy path the stored sessions are matched by their echoed
+        `device`; a resolved identifier with no `device` echo (a non-E.164 token
+        subject and no submitted device) matches nothing → `200 []`.
+      security:
+        - openId:
+            - session-insights:sessions:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetrieveSessionsInput"
+      responses:
+        "200":
+          description: The device's sessions (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SessionInfo"
+              examples:
+                withSessions:
+                  summary: One active session for the device
+                  value:
+                    - id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                      device:
+                        phoneNumber: "+123456789012"
+                      applicationServer:
+                        ipv4Address: "198.51.100.1"
+                      sink: "https://callback.example/notify"
+                      startsAt: "2026-08-05T10:41:38Z"
+                      expiresAt: "2026-08-06T10:41:38Z"
+                      status: ACTIVE
+                empty:
+                  summary: Device has no sessions
+                  value: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when neither
+            a `device` nor a usable token subject is present, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for an identifier ending in the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInsightsError"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved identifier — the submitted `device`
+          id, else the token subject (docs/DESIGN.md §7) — then the in-memory
+          store, matched by each session's echoed `device`. Reserved error
+          suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404, …429)
+            result: the canonical CAMARA error for that status
+          - input: an identifier with one or more stored sessions
+            result: "200 with the array of matching SessionInfo"
+          - input: an identifier with no stored sessions (or a non-E.164 subject echo)
+            result: "200 [] (never 404)"
+          - input: no device and no token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: a non-empty body that is not a valid RetrieveSessionsInput
+            result: "400 INVALID_ARGUMENT"
+
+  /sessions/{sessionId}/metrics:
+    post:
+      operationId: sendSessionMetrics
+      summary: Submit application-observed metrics for a session
+      description: |
+        Report the network quality the application actually observed for the
+        session (a `MetricsPayload`). CAMARA acknowledges receipt with `204 No
+        Content`; the resulting quality score is delivered **after** the response,
+        as a `network-quality-score` CloudEvent POSTed to the session's `sink`
+        (never in this response body). CamaraSim validates the payload, confirms
+        the session exists, answers `204`, and then fires that CloudEvent
+        best-effort onto its `sink`.
+
+        Keyed only on the in-memory store (docs/DESIGN.md §7): a known `sessionId`
+        with a valid payload → `204`; an unknown or already-deleted id → `404
+        NOT_FOUND`; a malformed or out-of-range `MetricsPayload` → `400`
+        (`INVALID_ARGUMENT` for a structural problem or a bad `unit`, `OUT_OF_RANGE`
+        for a numeric field outside its allowed range).
+
+        **`network-quality-score` notification (CamaraSim model).** On the `204`
+        path, CamaraSim POSTs a CloudEvents 1.0 envelope
+        (`application/cloudevents+json`) of `type`
+        `org.camaraproject.session-insights.v0.network-quality-score` to the stored
+        `sink`. Its `data` carries the `sessionId` and a synthetic integer
+        `qualityScore` (0–100) derived **deterministically** from the submitted
+        metrics — so the `MetricsPayload` is a genuine control plane over the
+        notified score (docs/DESIGN.md §7): the score starts at 100 and subtracts a
+        loss penalty of `(10 − packetLossErrorRate) × 8` (a higher exponent means
+        less loss, so a better link) plus `packetDelay.value / 20` and
+        `jitter.value / 20`, clamped to `0..=100` (e.g. `packetLossErrorRate: 3`,
+        `packetDelay 12 ms`, `jitter 3 ms` → `44`). Delivery is fire-and-forget over
+        a raw TCP stream (no HTTP-client dependency), so a slow or unreachable
+        `sink` never delays the `204`.
+
+        **`sinkCredential` (ACCESSTOKEN / PLAIN) auth.** When the session was created
+        with a `sinkCredential`, its credential is applied to the
+        `network-quality-score` callback's `Authorization` header: a `credentialType:
+        ACCESSTOKEN` credential's non-empty `accessToken` → `Bearer <token>` (RFC
+        6750), and a `credentialType: PLAIN` credential's `identifier`/`secret` pair →
+        `Basic base64(identifier:secret)` (RFC 7617). The derived header is stashed in
+        an in-memory side-store keyed by session id at `createSession` and is
+        **never** echoed in a `SessionInfo` (`GET`/`retrieve-sessions` never return
+        it); because metrics may be submitted repeatedly, the credential is read
+        non-destructively on each delivery and dropped when the session is deleted.
+
+        **Documented cuts.** Delivery reaches both `http://` sinks (raw TCP) and
+        `https://` sinks (rustls TLS session, server cert verified against the
+        bundled Mozilla roots), matching QoS Booking / QoS Provisioning / QoD /
+        Geofencing. A `REFRESHTOKEN` `sinkCredential` (or none) sends the callback
+        unauthenticated. The `session-ended` CloudEvent legs (delete /
+        network-termination / expiry) are delivered on their own transitions, not
+        here. The spec's `410 Gone` (metrics for an expired session) is a cut: no
+        retained expired state exists — an expired or deleted session is evicted, so
+        metrics against it answer `404` rather than `410`.
+      security:
+        - openId:
+            - session-insights:sessions:write
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sessionId
+          in: path
+          required: true
+          description: Operator-assigned session identifier.
+          schema:
+            type: string
+            format: uuid
+            maxLength: 36
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MetricsPayload"
+      responses:
+        "204":
+          description: Metrics accepted. No response body.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid `MetricsPayload`. CamaraSim returns `INVALID_ARGUMENT`
+            for a malformed body, a missing required figure
+            (`packetDelay`/`jitter`/`packetLossErrorRate`), or an invalid `unit`;
+            and `OUT_OF_RANGE` for a `value` or `packetLossErrorRate` outside its
+            allowed range.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInsightsError"
+              examples:
+                invalidArgument:
+                  summary: Missing required figure
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`packetLossErrorRate` is required."
+                outOfRange:
+                  summary: Value outside its allowed range
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`packetLossErrorRate` must be between 1 and 10."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed only on the in-memory store (docs/DESIGN.md §7); the payload is
+          validated first. CAMARA acknowledges with `204` and then delivers a
+          `network-quality-score` CloudEvent on the session's `sink` — the score is
+          deterministic from the submitted metrics, never in this response. `410
+          Gone` is a documented cut (no retained expired state).
+        cases:
+          - input: a sessionId from a prior createSession + a valid MetricsPayload
+            result: >-
+              204 No Content, then a network-quality-score CloudEvent fired to the
+              session's http:// sink (qualityScore deterministic from the metrics —
+              e.g. packetLossErrorRate 3 → 44)
+          - input: a valid MetricsPayload on a session whose sink is https://
+            result: >-
+              204 No Content; the network-quality-score callback is POSTed over a
+              rustls TLS session (server cert verified against the bundled Mozilla
+              roots)
+          - input: an unknown or already-deleted sessionId
+            result: "404 NOT_FOUND (no notification)"
+          - input: a missing required figure, malformed body, or invalid unit
+            result: "400 INVALID_ARGUMENT (no notification)"
+          - input: "a value/packetLossErrorRate outside its range (e.g. packetLossErrorRate 11)"
+            result: "400 OUT_OF_RANGE (no notification)"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    Device:
+      type: object
+      minProperties: 1
+      description: >-
+        The device the session concerns. At least one identifier must be present;
+        CamaraSim keys its functional cases off the first present identifier in the
+        order phoneNumber, networkAccessIdentifier, ipv4Address.publicAddress,
+        ipv6Address.
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        networkAccessIdentifier:
+          type: string
+          example: "123456789@domain.com"
+        ipv4Address:
+          type: object
+          properties:
+            publicAddress:
+              type: string
+              format: ipv4
+            privateAddress:
+              type: string
+              format: ipv4
+            publicPort:
+              type: integer
+              minimum: 0
+              maximum: 65535
+        ipv6Address:
+          type: string
+          format: ipv6
+
+    DeviceResponse:
+      type: object
+      description: >-
+        The single identifier CamaraSim resolved for the session, echoed back.
+      minProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+        networkAccessIdentifier:
+          type: string
+        ipv4Address:
+          type: object
+          properties:
+            publicAddress:
+              type: string
+        ipv6Address:
+          type: string
+
+    ApplicationServer:
+      type: object
+      description: >-
+        The application server endpoint the session concerns. At least one of
+        `domainName`, `ipv4Address`, `ipv6Address` must be present. Echoed verbatim
+        in the response.
+      properties:
+        domainName:
+          type: string
+          example: "app.example.com"
+        ipv4Address:
+          type: string
+          example: "198.51.100.1"
+        ipv6Address:
+          type: string
+        port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+
+    SessionRequest:
+      type: object
+      description: Request body for creating a session insights resource.
+      required:
+        - applicationProfileId
+        - applicationServer
+        - sink
+      properties:
+        applicationProfileId:
+          type: string
+          format: uuid
+          description: Identifier of the application profile the session applies to.
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        device:
+          $ref: "#/components/schemas/Device"
+        applicationServer:
+          $ref: "#/components/schemas/ApplicationServer"
+        applicationSessionId:
+          type: string
+          maxLength: 256
+          description: Application-level correlation id, echoed back when provided.
+          example: "game-42"
+        sink:
+          type: string
+          format: uri
+          description: https callback (webhook) for later notifications.
+          example: "https://callback.example/notify"
+        sinkCredential:
+          type: object
+          description: >-
+            Credential the operator presents on the sink callback, discriminated on
+            `credentialType`. A `credentialType: ACCESSTOKEN` credential's non-empty
+            `accessToken` is applied to the `network-quality-score`/`session-ended`
+            callbacks as an `Authorization: Bearer <token>` header (RFC 6750). A
+            `credentialType: PLAIN` credential's `identifier`/`secret` pair is applied
+            as an `Authorization: Basic base64(identifier:secret)` header (RFC 7617
+            HTTP Basic — the standard application of a plain identifier/secret pair; an
+            empty `secret` is permitted, but an empty/missing `identifier` sends the
+            callback unauthenticated). The derived header is stored apart from the
+            `SessionInfo` and never echoed. `REFRESHTOKEN` is a documented cut (it
+            needs a token-exchange round trip → the callback is sent unauthenticated).
+          properties:
+            credentialType:
+              type: string
+              enum: [PLAIN, ACCESSTOKEN, REFRESHTOKEN]
+              description: The type of credential presented on the callback.
+            accessToken:
+              type: string
+              description: >-
+                The bearer token, for `credentialType: ACCESSTOKEN`.
+            accessTokenType:
+              type: string
+              enum: [bearer]
+              description: The access-token type (only `bearer`).
+            identifier:
+              type: string
+              description: >-
+                The Basic-auth identifier (username), for `credentialType: PLAIN`.
+            secret:
+              type: string
+              description: >-
+                The Basic-auth secret (password), for `credentialType: PLAIN`. May be
+                empty (the schema requires the field, not a value).
+
+    RetrieveSessionsInput:
+      type: object
+      description: >-
+        Request body for `retrieveSessionsByDevice`. The `device` is optional —
+        omit it on a three-legged token to select the token subject.
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+
+    MetricsPayload:
+      type: object
+      description: >-
+        Application-observed session metrics submitted via `sendSessionMetrics`.
+        `packetDelay`, `jitter` and `packetLossErrorRate` are required; the two
+        throughput figures are optional. Unknown fields are tolerated.
+      required:
+        - packetDelay
+        - jitter
+        - packetLossErrorRate
+      properties:
+        packetDelay:
+          description: Application-observed one-way packet delay.
+          allOf:
+            - $ref: "#/components/schemas/Duration"
+        jitter:
+          description: Application-observed packet delay variation.
+          allOf:
+            - $ref: "#/components/schemas/Duration"
+        packetLossErrorRate:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 10
+          description: >-
+            Application-observed packet loss rate as an exponent of 10 (a value of
+            3 means up to 10⁻³, i.e. 0.1%, of packets were lost).
+        upstreamRate:
+          description: Application-observed upstream bitrate.
+          allOf:
+            - $ref: "#/components/schemas/Rate"
+        downstreamRate:
+          description: Application-observed downstream bitrate.
+          allOf:
+            - $ref: "#/components/schemas/Rate"
+
+    Duration:
+      type: object
+      description: Specification of a duration. CamaraSim range-validates `value`.
+      properties:
+        value:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 500
+          example: 12
+        unit:
+          $ref: "#/components/schemas/TimeUnitEnum"
+
+    Rate:
+      type: object
+      description: Specification of a rate. CamaraSim range-validates `value`.
+      properties:
+        value:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 1024
+          example: 10
+        unit:
+          $ref: "#/components/schemas/RateUnitEnum"
+
+    TimeUnitEnum:
+      type: string
+      description: Units of time.
+      enum:
+        - Days
+        - Hours
+        - Minutes
+        - Seconds
+        - Milliseconds
+        - Microseconds
+        - Nanoseconds
+
+    RateUnitEnum:
+      type: string
+      description: Units of rate.
+      enum:
+        - Bps
+        - Kbps
+        - Mbps
+        - Gbps
+        - Tbps
+
+    SessionInfo:
+      type: object
+      additionalProperties: false
+      description: A session insights resource.
+      required:
+        - id
+        - applicationServer
+        - sink
+        - startsAt
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Operator-assigned session identifier.
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        applicationSessionId:
+          type: string
+          maxLength: 256
+          description: Application-level correlation id, echoed from the request.
+        device:
+          $ref: "#/components/schemas/DeviceResponse"
+        applicationServer:
+          $ref: "#/components/schemas/ApplicationServer"
+        sink:
+          type: string
+          format: uri
+        startsAt:
+          type: string
+          format: date-time
+          description: When the session started (RFC 3339 with time zone).
+          example: "2026-08-05T10:41:38Z"
+        expiresAt:
+          type: string
+          format: date-time
+          description: >-
+            When the session expires (RFC 3339 with time zone). Absent for an
+            open-ended session (a `…000`/no-digit identifier tail).
+          example: "2026-08-06T10:41:38Z"
+        status:
+          type: string
+          description: Session lifecycle state. A freshly created session is ACTIVE.
+          enum:
+            - ACTIVE
+            - EXPIRED
+            - DELETED
+          example: ACTIVE
+
+    NetworkQualityScoreEvent:
+      type: object
+      description: >-
+        The CloudEvents 1.0 envelope CamaraSim delivers to a session's `sink`
+        after `sendSessionMetrics` (fire-and-forget, `http://` and `https://` sinks).
+        `data`
+        carries the `sessionId` and a synthetic `qualityScore` (0–100) derived
+        deterministically from the submitted metrics (docs/DESIGN.md §7): score =
+        clamp(100 − (10 − packetLossErrorRate)·8 − packetDelay.value/20 −
+        jitter.value/20, 0, 100).
+      required:
+        - id
+        - source
+        - type
+        - specversion
+        - time
+        - data
+      properties:
+        id:
+          type: string
+          description: Unique CloudEvent id within `source` (UUID-shaped).
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        source:
+          type: string
+          example: "//camarasimulator/session-insights"
+        type:
+          type: string
+          enum: ["org.camaraproject.session-insights.v0.network-quality-score"]
+        specversion:
+          type: string
+          enum: ["1.0"]
+        datacontenttype:
+          type: string
+          enum: ["application/json"]
+        time:
+          type: string
+          format: date-time
+          example: "2024-01-01T14:27:08Z"
+        data:
+          type: object
+          required:
+            - sessionId
+            - qualityScore
+          properties:
+            sessionId:
+              type: string
+              format: uuid
+              example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+            qualityScore:
+              type: integer
+              minimum: 0
+              maximum: 100
+              description: >-
+                Synthetic overall network-quality score (0 worst … 100 best),
+                deterministic from the submitted `MetricsPayload`.
+              example: 44
+
+    SessionEndedEvent:
+      type: object
+      description: >-
+        The CloudEvents 1.0 envelope CamaraSim delivers to a session's `sink` when
+        the session ends — the session's **terminal** notification, after which no
+        further events are delivered. CamaraSim emits it from `deleteSession`
+        (`SESSION_DELETED`), from the `…001` network-termination timer
+        (`NETWORK_TERMINATED`), and from the expiry timer of a time-bounded session
+        (`SESSION_EXPIRED`) — fire-and-forget, `http://` and `https://` sinks. `data` (CAMARA
+        `SessionEndedData`) carries the `sessionId` and the `terminationReason`.
+      required:
+        - id
+        - source
+        - type
+        - specversion
+        - time
+        - data
+      properties:
+        id:
+          type: string
+          description: Unique CloudEvent id within `source` (UUID-shaped).
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        source:
+          type: string
+          example: "//camarasimulator/session-insights"
+        type:
+          type: string
+          enum: ["org.camaraproject.session-insights.v0.session-ended"]
+        specversion:
+          type: string
+          enum: ["1.0"]
+        datacontenttype:
+          type: string
+          enum: ["application/json"]
+        time:
+          type: string
+          format: date-time
+          example: "2024-01-01T14:27:08Z"
+        data:
+          type: object
+          required:
+            - sessionId
+            - terminationReason
+          properties:
+            sessionId:
+              type: string
+              format: uuid
+              example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+            terminationReason:
+              type: string
+              description: >-
+                Why the session ended. CamaraSim fires `SESSION_DELETED` from
+                `deleteSession`, `NETWORK_TERMINATED` from the `…001`
+                network-termination timer, and `SESSION_EXPIRED` from a time-bounded
+                session's expiry timer. `ACCESS_TOKEN_EXPIRED` is a documented cut.
+              enum:
+                - NETWORK_TERMINATED
+                - SESSION_EXPIRED
+                - ACCESS_TOKEN_EXPIRED
+                - SESSION_DELETED
+              example: SESSION_DELETED
+
+    SessionInsightsError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Session Insights `code` set (the API's own `MISSING_IDENTIFIER` plus
+        the shared reserved-error codes).
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - OUT_OF_RANGE
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - CONFLICT
+                - MISSING_IDENTIFIER
+                - SERVICE_NOT_APPLICABLE
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

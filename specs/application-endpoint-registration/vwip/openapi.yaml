@@ -1,0 +1,742 @@
+# CamaraSim — Application Endpoint Registration, API version vwip
+# (CAMARA ApplicationEndpointRegistration, wip).
+#
+# Vendored from the CAMARA ApplicationEndpointRegistration API (work-in-progress —
+# no released version yet, so mounted at its canonical `vwip` base path
+# `/application-endpoint-registration/vwip`, like Application Endpoint Discovery /
+# Application Profiles) and annotated with CamaraSim's parameter-driven functional
+# cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/application_endpoint_registration/vwip.rs`; spec and code must not drift.
+#
+# This slice serves the register endpoint `POST /application-endpoint-lists`
+# (`registerApplicationEndpoints`), the read-back leg
+# `GET /application-endpoint-lists/{applicationEndpointListId}`
+# (`getApplicationEndpointsById`), the list leg
+# `GET /application-endpoint-lists` (`getAllRegisteredApplicationEndpoints`), and
+# the deregister leg `DELETE /application-endpoint-lists/{applicationEndpointListId}`
+# (`deregisterApplicationEndpoint`), and the full-replace update leg
+# `PUT /application-endpoint-lists/{applicationEndpointListId}`
+# (`updateApplicationEndpoint`). Both GETs return the canonical
+# `ApplicationEndpointList` shape (`applicationEndpointListId` + a nested
+# `applicationEndpointsInfo`); the update leg replaces the endpoints in place and
+# returns `204`. This completes the Application Endpoint Registration resource
+# lifecycle (register / read / list / update / deregister).
+openapi: 3.0.3
+info:
+  title: Application Endpoints Registration
+  description: |
+    Lets an application provider **register** the set of network-reachable
+    endpoints (FQDN / IPv4 / IPv6 + port, each pinned to an `edgeCloudZone`) that
+    serve a given application, tie them to an `applicationProfileId`, and get back
+    an opaque `applicationEndpointListId`. It is the *registration* counterpart of
+    the sibling **Application Endpoint Discovery** API: Discovery answers *which*
+    endpoints are optimal for a device; Registration is how a provider *publishes*
+    those endpoints in the first place.
+
+    This is the CamaraSim reference double for CAMARA ApplicationEndpointRegistration
+    (wip). `POST /application-endpoint-lists` requires the
+    `application-endpoint-registration:application-endpoints:write` scope.
+
+    `edgeCloudZone` is an EdgeCloud *placement identifier* (zone id / name /
+    provider / region), **not** a geographic coordinate, so — like Application
+    Endpoint Discovery — this API is non-spatial.
+
+    ## No device identifier — the request body is the control plane (docs/DESIGN.md §7)
+
+    A registration is a free-standing catalog resource; it is not tied to a device
+    or a subscriber line, so there is no `device`, no phone number, no token
+    subject, and no two-legged / three-legged rule. The `applicationEndpointListId`
+    is server-minted, so on create there is no reserved-identifier plane on *it*.
+    Two control planes drive the outcome:
+
+    - **Request-body validation** → `400`: `applicationEndpoints` must be a
+      non-empty array of at most 20 endpoints; each endpoint must carry `port`
+      (`1..=65535`, else `OUT_OF_RANGE`) and at least one of `domainName` /
+      `ipv4Address` / `ipv6Address` (the `anyOf`); a malformed IPv4/IPv6 address, a
+      malformed `edgeCloudZone.edgeCloudZoneId` (a UUID), an over-length or
+      multi-line `applicationProviderName` / `applicationDescription`, a non-UUID
+      `applicationProfileId`, an unknown field, or a wrong JSON type → `400
+      INVALID_ARGUMENT`.
+    - **`applicationProfileId` reserved-error suffix** → the canonical CAMARA error.
+      A UUID carries digits, so the shared reserved-suffix convention (see the
+      referenced `errors.yaml`) applies unchanged to `applicationProfileId`: its
+      trailing three digits `…404` → `404 NOT_FOUND`, `…422` → `422
+      SERVICE_NOT_APPLICABLE`, `…429` → `429`, etc. CamaraSim exposes the full
+      shared reserved set; canonical ApplicationEndpointRegistration declares a
+      subset (400/401/403/404/422/429).
+    - **The nil UUID sentinel** → `422 UNIDENTIFIABLE_APPLICATION_PROFILE`. The
+      simulator does not resolve `applicationProfileId` against a real profile
+      store, so the all-zeros UUID `00000000-0000-0000-0000-000000000000` is the
+      reserved value naming an *unidentifiable* application profile (the API's own
+      422 code); every other well-formed UUID is treated as registered.
+
+    Example: a valid body with `applicationProfileId`
+    `…-000000000012` → `200` with a minted list id; `…-000000000404` → `404
+    NOT_FOUND`; `…-000000000422` → `422 SERVICE_NOT_APPLICABLE`; the nil UUID →
+    `422 UNIDENTIFIABLE_APPLICATION_PROFILE`.
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/application-endpoint-registration/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /application-endpoint-lists:
+    post:
+      operationId: registerApplicationEndpoints
+      summary: Register a list of application endpoints
+      description: |
+        Registers a set of application endpoints and returns the opaque
+        `applicationEndpointListId` that identifies the registration.
+
+        There is no device identifier; the outcome is driven by the request body
+        and by the `applicationProfileId` (see the API description for the
+        parameter-driven functional cases). On success the `200` body is the
+        minted `applicationEndpointListId` (a bare UUID string).
+      security:
+        - openId:
+            - application-endpoint-registration:application-endpoints:write
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApplicationEndpointsInfo"
+      responses:
+        "200":
+          description: The endpoints were registered; returns the list id.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationEndpointListId"
+              examples:
+                registered:
+                  summary: Registered — minted list id
+                  value: "98765432-e89b-12d3-a456-426614174999"
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body, an unknown field, an empty/over-long
+            `applicationEndpoints` array, an endpoint with no address form, a
+            malformed IPv4/IPv6 address or `edgeCloudZoneId`, a multi-line or
+            over-length provider/description string, or a non-UUID
+            `applicationProfileId`; and `OUT_OF_RANGE` for a `port` outside
+            `1..=65535`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationEndpointRegistrationError"
+              examples:
+                invalidArgument:
+                  summary: Malformed body / field
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`applicationEndpoints` must contain at least one endpoint."
+                outOfRange:
+                  summary: Port out of range
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`applicationEndpoints[0].port` must be in 1..=65535."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            422 — unprocessable. CamaraSim returns
+            `UNIDENTIFIABLE_APPLICATION_PROFILE` when `applicationProfileId` is the
+            reserved nil UUID, or the shared `SERVICE_NOT_APPLICABLE` for the
+            `…422` reserved suffix on `applicationProfileId`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationEndpointRegistrationError"
+              examples:
+                unidentifiableProfile:
+                  summary: The nil-UUID application profile
+                  value:
+                    status: 422
+                    code: UNIDENTIFIABLE_APPLICATION_PROFILE
+                    message: The provided applicationProfileId does not identify a known application profile.
+                serviceNotApplicable:
+                  summary: Reserved `…422` suffix on applicationProfileId
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Outcome selected from the request body and the applicationProfileId
+          (docs/DESIGN.md §7). The applicationEndpointListId is server-minted, so
+          on create there is no reserved-identifier plane on it; reserved error
+          suffixes on applicationProfileId come from the shared convention in
+          errors.yaml.
+        cases:
+          - input: valid body, applicationProfileId a normal UUID (e.g. …012)
+            result: "200 — the minted applicationEndpointListId (a UUID string)"
+          - input: applicationProfileId ending in a reserved error suffix (e.g. …404, …422)
+            result: the canonical CAMARA error for that status
+          - input: "applicationProfileId is the nil UUID 00000000-0000-0000-0000-000000000000"
+            result: "422 UNIDENTIFIABLE_APPLICATION_PROFILE"
+          - input: empty or >20 applicationEndpoints, or an endpoint with no address form
+            result: "400 INVALID_ARGUMENT"
+          - input: an endpoint port outside 1..=65535
+            result: "400 OUT_OF_RANGE"
+          - input: malformed IPv4/IPv6 address, non-UUID edgeCloudZoneId, or non-UUID applicationProfileId
+            result: "400 INVALID_ARGUMENT"
+          - input: over-length or multi-line applicationProviderName / applicationDescription, unknown field
+            result: "400 INVALID_ARGUMENT"
+    get:
+      operationId: getAllRegisteredApplicationEndpoints
+      summary: Retrieve all registered application-endpoint lists
+      description: |
+        Returns every application-endpoint list previously registered by
+        `registerApplicationEndpoints`, as an array of `ApplicationEndpointList`
+        (each carrying its `applicationEndpointListId` and the nested
+        `applicationEndpointsInfo`).
+
+        There is no request body and no device identifier, so the store state is
+        the only control plane (docs/DESIGN.md §7): the array is empty when
+        nothing is registered — a list never `404`s. CamaraSim does not scope
+        registrations per client (a documented simplification, mirroring the
+        Carrier Billing / Geofencing lists); the results are ordered by
+        `applicationEndpointListId` for a deterministic response.
+      security:
+        - openId:
+            - application-endpoint-registration:application-endpoints:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The registered application-endpoint lists (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 20
+                description: Array of registered application-endpoint lists.
+                items:
+                  $ref: "#/components/schemas/ApplicationEndpointList"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          A read-only list keyed only on the in-memory store state (docs/DESIGN.md
+          §7). No request body, no device identifier, no reserved-identifier plane;
+          registrations are not scoped per client.
+        cases:
+          - input: any read-scoped token (one or more registrations exist)
+            result: "200 — an array of ApplicationEndpointList, ordered by applicationEndpointListId"
+          - input: any read-scoped token with nothing registered
+            result: "200 — an empty array (a list never 404s)"
+
+  /application-endpoint-lists/{applicationEndpointListId}:
+    parameters:
+      - $ref: "#/components/parameters/ApplicationEndpointListIdPath"
+    get:
+      operationId: getApplicationEndpointsById
+      summary: Retrieve a registered application-endpoint list by id
+      description: |
+        Returns the application-endpoint registration previously created by
+        `registerApplicationEndpoints`, addressed by its opaque
+        `applicationEndpointListId`.
+
+        The id is server-minted (`format: uuid`), so it is the only control plane
+        (docs/DESIGN.md §7): it was never caller-chosen, so there is no
+        reserved-identifier suffix on it. A malformed path value is a
+        `400 INVALID_ARGUMENT`; a well-formed but unknown/never-registered id is a
+        `404 NOT_FOUND`.
+      security:
+        - openId:
+            - application-endpoint-registration:application-endpoints:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The registration stored under the given id.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationEndpointList"
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` when the
+            `applicationEndpointListId` path value is not a UUID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationEndpointRegistrationError"
+              examples:
+                invalidArgument:
+                  summary: Malformed list id
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`applicationEndpointListId` must be a UUID."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Read-back keyed only on the opaque, server-minted
+          applicationEndpointListId (docs/DESIGN.md §7). No reserved-identifier
+          plane — the id was never caller-chosen.
+        cases:
+          - input: a stored applicationEndpointListId (from registerApplicationEndpoints)
+            result: "200 — the ApplicationEndpointsInfoResponse for that id"
+          - input: a well-formed but unknown/never-registered applicationEndpointListId
+            result: "404 NOT_FOUND"
+          - input: an applicationEndpointListId that is not a UUID
+            result: "400 INVALID_ARGUMENT"
+    delete:
+      operationId: deregisterApplicationEndpoint
+      summary: Deregister a registered application-endpoint list
+      description: |
+        Removes the application-endpoint registration previously created by
+        `registerApplicationEndpoints`, addressed by its opaque
+        `applicationEndpointListId`.
+
+        The id is server-minted (`format: uuid`), so the store state is the only
+        control plane (docs/DESIGN.md §7): it was never caller-chosen, so there is
+        no reserved-identifier suffix on it. On success the registration is
+        removed and `204 No Content` is returned (single-use — a second delete of
+        the same id is a `404`). A malformed path value is a `400 INVALID_ARGUMENT`;
+        a well-formed but unknown/already-deregistered id is a `404 NOT_FOUND`.
+      security:
+        - openId:
+            - application-endpoint-registration:application-endpoints:delete
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "204":
+          description: The registration was deregistered (no content).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` when the
+            `applicationEndpointListId` path value is not a UUID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationEndpointRegistrationError"
+              examples:
+                invalidArgument:
+                  summary: Malformed list id
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`applicationEndpointListId` must be a UUID."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Deregister keyed only on the opaque, server-minted
+          applicationEndpointListId (docs/DESIGN.md §7). No reserved-identifier
+          plane — the id was never caller-chosen; the in-memory store state is the
+          only control plane.
+        cases:
+          - input: a stored applicationEndpointListId (from registerApplicationEndpoints)
+            result: "204 — the registration is removed (single-use)"
+          - input: a well-formed but unknown/already-deregistered applicationEndpointListId
+            result: "404 NOT_FOUND"
+          - input: an applicationEndpointListId that is not a UUID
+            result: "400 INVALID_ARGUMENT"
+    put:
+      operationId: updateApplicationEndpoint
+      summary: Update (full replace) a registered application-endpoint list
+      description: |
+        Replaces the set of application endpoints registered under the opaque
+        `applicationEndpointListId` with the `ApplicationEndpointsInfo` in the
+        request body (a full replace, not a merge) and returns `204 No Content`.
+
+        Control planes (docs/DESIGN.md §7). The **request body** is shared with
+        `registerApplicationEndpoints` and is validated first: a malformed body,
+        an unknown field, an empty/over-long `applicationEndpoints` array, an
+        endpoint with no address form, a malformed IPv4/IPv6 address or
+        `edgeCloudZoneId`, a multi-line/over-length provider/description, or a
+        non-UUID `applicationProfileId` → `400 INVALID_ARGUMENT`; a `port` outside
+        `1..=65535` → `400 OUT_OF_RANGE`; a reserved error suffix on
+        `applicationProfileId` (e.g. `…404`, `…422`) → the canonical CAMARA error
+        for that status; the nil UUID `00000000-0000-0000-0000-000000000000` →
+        `422 UNIDENTIFIABLE_APPLICATION_PROFILE`. Then the opaque, server-minted
+        **id's store state**: a malformed (non-UUID) path value → `400
+        INVALID_ARGUMENT`, a well-formed but unknown/never-registered id → `404
+        NOT_FOUND`. The body is validated before the store state, so a body `400`
+        wins over a `404`.
+      security:
+        - openId:
+            - application-endpoint-registration:application-endpoints:update
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApplicationEndpointsInfo"
+      responses:
+        "204":
+          description: The registration was replaced (no content).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body/field or a non-UUID `applicationEndpointListId` path
+            value, and `OUT_OF_RANGE` for a `port` outside `1..=65535`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationEndpointRegistrationError"
+              examples:
+                invalidArgument:
+                  summary: Malformed body / list id
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`applicationEndpoints` must contain at least one endpoint."
+                outOfRange:
+                  summary: Port out of range
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`applicationEndpoints[0].port` must be in 1..=65535."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            422 — unprocessable. CamaraSim returns
+            `UNIDENTIFIABLE_APPLICATION_PROFILE` when `applicationProfileId` is the
+            reserved nil UUID, or the shared `SERVICE_NOT_APPLICABLE` for the
+            `…422` reserved suffix on `applicationProfileId`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationEndpointRegistrationError"
+              examples:
+                unidentifiableProfile:
+                  summary: The nil-UUID application profile
+                  value:
+                    status: 422
+                    code: UNIDENTIFIABLE_APPLICATION_PROFILE
+                    message: The provided applicationProfileId does not identify a known application profile.
+                serviceNotApplicable:
+                  summary: Reserved `…422` suffix on applicationProfileId
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Full-replace update. The request body (shared with
+          registerApplicationEndpoints) is validated first, then the opaque,
+          server-minted applicationEndpointListId's store state (docs/DESIGN.md
+          §7). No reserved-identifier plane on the id — it was never caller-chosen;
+          reserved error suffixes on applicationProfileId come from the shared
+          convention in errors.yaml. A body 400 wins over a 404.
+        cases:
+          - input: a stored id + valid body, applicationProfileId a normal UUID (e.g. …012)
+            result: "204 — the endpoints are replaced (a later GET reads them back)"
+          - input: a well-formed but unknown/never-registered id + valid body
+            result: "404 NOT_FOUND"
+          - input: an applicationEndpointListId that is not a UUID
+            result: "400 INVALID_ARGUMENT"
+          - input: empty or >20 applicationEndpoints, or an endpoint with no address form
+            result: "400 INVALID_ARGUMENT"
+          - input: an endpoint port outside 1..=65535
+            result: "400 OUT_OF_RANGE"
+          - input: applicationProfileId ending in a reserved error suffix (e.g. …404, …422)
+            result: the canonical CAMARA error for that status
+          - input: "applicationProfileId is the nil UUID 00000000-0000-0000-0000-000000000000"
+            result: "422 UNIDENTIFIABLE_APPLICATION_PROFILE"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+    ApplicationEndpointListIdPath:
+      name: applicationEndpointListId
+      in: path
+      required: true
+      description: The opaque id of a registered application-endpoint list.
+      schema:
+        $ref: "#/components/schemas/ApplicationEndpointListId"
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    ApplicationEndpointsInfo:
+      type: object
+      additionalProperties: false
+      description: The set of application endpoints to register.
+      required:
+        - applicationEndpoints
+        - applicationProviderName
+        - applicationProfileId
+      properties:
+        applicationEndpoints:
+          type: array
+          minItems: 1
+          maxItems: 20
+          description: The application endpoints to register (1–20).
+          items:
+            $ref: "#/components/schemas/ApplicationEndpoint"
+        applicationProviderName:
+          type: string
+          maxLength: 256
+          pattern: '^[^\r\n]*$'
+          description: Name of the application provider.
+          example: Acme Corp
+        applicationDescription:
+          type: string
+          maxLength: 2048
+          pattern: '^[^\r\n]*$'
+          description: Free-text description of the application.
+        applicationProfileId:
+          type: string
+          format: uuid
+          maxLength: 36
+          description: The application profile these endpoints serve.
+          example: "abcdef01-0000-4000-8000-000000000012"
+
+    ApplicationEndpoint:
+      type: object
+      additionalProperties: false
+      description: |
+        A single reachable endpoint. `port` is required; at least one of
+        `domainName` / `ipv4Address` / `ipv6Address` must be present (the CAMARA
+        `anyOf`).
+      required:
+        - port
+      anyOf:
+        - required: [domainName]
+        - required: [ipv4Address]
+        - required: [ipv6Address]
+      properties:
+        domainName:
+          type: string
+          minLength: 4
+          maxLength: 253
+          description: The endpoint's fully-qualified domain name.
+          example: api.example.com
+        ipv4Address:
+          type: string
+          format: ipv4
+          description: The endpoint's IPv4 address.
+          example: 192.0.2.10
+        ipv6Address:
+          type: string
+          format: ipv6
+          maxLength: 45
+          description: The endpoint's IPv6 address.
+          example: "2001:db8::1"
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: The endpoint's TCP/UDP port.
+          example: 443
+        edgeCloudZone:
+          $ref: "#/components/schemas/EdgeCloudZone"
+        applicationEndpointDescription:
+          type: string
+          maxLength: 2048
+          pattern: '^[^\r\n]*$'
+          description: Free-text description of this endpoint.
+
+    EdgeCloudZone:
+      type: object
+      additionalProperties: false
+      description: >-
+        An EdgeCloud placement identifier (not a geographic coordinate) locating
+        where the endpoint runs.
+      required:
+        - edgeCloudZoneId
+        - edgeCloudZoneName
+        - edgeCloudProvider
+      properties:
+        edgeCloudZoneId:
+          type: string
+          format: uuid
+          maxLength: 36
+          description: The Edge Cloud Zone id.
+        edgeCloudZoneName:
+          type: string
+          maxLength: 64
+          pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$'
+          description: The Edge Cloud Zone name.
+          example: zone-us-east-1
+        edgeCloudProvider:
+          type: string
+          maxLength: 64
+          pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$'
+          description: The Edge Cloud Provider.
+          example: Acme-Edge
+        edgeCloudRegion:
+          type: string
+          maxLength: 64
+          pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$'
+          description: The Edge Cloud Region.
+          example: us-east-1
+        edgeCloudZoneStatus:
+          type: string
+          enum:
+            - active
+            - inactive
+            - unknown
+          default: unknown
+          description: The Edge Cloud Zone status.
+
+    ApplicationEndpointListId:
+      type: string
+      format: uuid
+      maxLength: 36
+      readOnly: true
+      description: The opaque id of a registered application-endpoint list.
+      example: "98765432-e89b-12d3-a456-426614174999"
+
+    ApplicationEndpointList:
+      type: object
+      additionalProperties: false
+      description: >-
+        A registered application-endpoint list: the server-minted
+        `applicationEndpointListId` plus the submitted `ApplicationEndpointsInfo`
+        nested under `applicationEndpointsInfo`. This is the canonical CAMARA shape
+        CamaraSim stores at registration time and returns verbatim from
+        `getApplicationEndpointsById` (one) and
+        `getAllRegisteredApplicationEndpoints` (each array element).
+      required:
+        - applicationEndpointListId
+        - applicationEndpointsInfo
+      properties:
+        applicationEndpointListId:
+          $ref: "#/components/schemas/ApplicationEndpointListId"
+        applicationEndpointsInfo:
+          $ref: "#/components/schemas/ApplicationEndpointsInfo"
+
+    ApplicationEndpointRegistrationError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Application Endpoint Registration `code` set (the standard codes plus
+        the API's own `UNIDENTIFIABLE_APPLICATION_PROFILE` and the `OUT_OF_RANGE`
+        body-validation code).
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - OUT_OF_RANGE
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - SERVICE_NOT_APPLICABLE
+                - UNIDENTIFIABLE_APPLICATION_PROFILE
+                - CONFLICT
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

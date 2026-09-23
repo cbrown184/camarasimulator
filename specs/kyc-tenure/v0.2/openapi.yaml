@@ -1,0 +1,324 @@
+# CamaraSim — KYC Tenure, API version v0.2 (CAMARA 0.2.0, r2.2).
+#
+# Vendored from the CAMARA KYC Tenure API (release r2.2 → kyc-tenure 0.2.0, the
+# latest published version — so mounted at its real sub-1.0 base path `/v0.2`,
+# like KYC Match / KYC Fill-in / Number Recycling) and annotated with CamaraSim's
+# parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/kyc_tenure/v0_2.rs`; spec and code must not drift.
+#
+# Serves `POST /check-tenure`.
+openapi: 3.0.3
+info:
+  title: KYC Tenure
+  description: |
+    Service that establishes a level of trust for a network subscription by
+    confirming, against a caller-supplied date, whether the current end user has
+    held the phone number (their "tenure") since at least that date. It is a
+    low-friction, privacy-preserving anti-fraud / onboarding signal: it answers a
+    yes/no about a reference date and never reveals the actual tenure length.
+
+    This is the CamaraSim reference double for CAMARA KYC Tenure 0.2.0. The
+    `/check-tenure` endpoint requires the `kyc-tenure:check-tenure` scope.
+
+    ## Identifier resolution — two-legged vs three-legged
+
+    Faithful to CAMARA, the `phoneNumber` in the request body is valid *only* in
+    two-legged auth. In a three-legged token the line is already identified by
+    the token **subject** (`sub`), so the number must not be resubmitted:
+
+    - `phoneNumber` present **and** the token subject is itself an E.164 number
+      (a line-authenticated three-legged token) → `422 UNNECESSARY_IDENTIFIER`.
+    - `phoneNumber` present, subject not a line → the submitted number is the
+      identifier (two-legged).
+    - `phoneNumber` absent, subject is an E.164 number → the subject is the
+      identifier (three-legged).
+    - `phoneNumber` absent **and** the subject is not a line → the line cannot be
+      identified → `422 MISSING_IDENTIFIER`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Two independent control planes drive the answer:
+
+    - **Reserved error suffix (identifier).** If the resolved identifier's
+      trailing three digits name a reserved CAMARA status, the endpoint answers
+      with that canonical CAMARA error (shared convention — see the referenced
+      `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+      `…500`, `…503`.
+    - **Tenure verdict (identifier digits × `tenureDate`).** Otherwise the
+      identifier's trailing three digits are read as **days the subscriber has
+      held the line** (`0`–`999`), so the tenure started *today − digits days*.
+      `tenureDateCheck` is `true` iff the tenure started on or before
+      `tenureDate` — equivalently `(today − tenureDate) <= digits`. This makes
+      `tenureDate` a genuine second control plane: the **same** number reads
+      `tenureDateCheck: true` against a recent reference date and `false` against
+      an old one. An identifier with no digits is treated as *acquired today*
+      (`digits = 0`), so it passes only when `tenureDate` is today.
+
+    The response's `contractType` is derived deterministically from the same
+    trailing digits (`digits % 3` → `PAYG` / `PAYM` / `Business`), so it too is
+    reproducible from the input alone.
+
+    `tenureDate` is validated: a malformed or impossible calendar date →
+    `400 INVALID_ARGUMENT`; a date in the future → `400 OUT_OF_RANGE`.
+
+    Example: `+123456789050` (held 50 days) with a `tenureDate` 30 days ago →
+    `tenureDateCheck: true`; the same number with a `tenureDate` 100 days ago →
+    `false`; `+123456789404` → `404 NOT_FOUND`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical KYC Tenure 0.2.0 declares a subset
+    (400/401/403/404/422).
+  version: "0.2.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/kyc-tenure/v0.2"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /check-tenure:
+    post:
+      operationId: checkTenure
+      summary: Check whether the subscriber has held the line since a given date
+      description: |
+        Answers whether the current end user has held the phone number since at
+        least the supplied `tenureDate`
+        (`{ "tenureDateCheck": true|false, "contractType": … }`).
+
+        The line is identified by the submitted `phoneNumber` (two-legged) or by
+        the access-token subject (three-legged) — see the API description for the
+        identifier-resolution rules and the parameter-driven functional cases
+        (the trailing three digits encode days-of-tenure, compared against
+        `tenureDate`).
+      security:
+        - openId:
+            - kyc-tenure:check-tenure
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Tenure"
+      responses:
+        "200":
+          description: The tenure verdict for the line.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenureInfo"
+              examples:
+                held:
+                  summary: Held since at least the reference date (happy path)
+                  value:
+                    tenureDateCheck: true
+                    contractType: Business
+                notHeld:
+                  summary: Tenure started after the reference date
+                  value:
+                    tenureDateCheck: false
+                    contractType: PAYM
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body or an unparseable/impossible `tenureDate`, and
+            `OUT_OF_RANGE` when `tenureDate` is in the future.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KycTenureError"
+              examples:
+                invalidArgument:
+                  summary: Malformed body or `tenureDate`
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`tenureDate` must be a valid RFC 3339 full-date (YYYY-MM-DD)."
+                outOfRange:
+                  summary: `tenureDate` in the future
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`tenureDate` must not be in the future."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            line cannot be identified (no `phoneNumber` and a non-line subject),
+            `UNNECESSARY_IDENTIFIER` when a `phoneNumber` is submitted on a
+            three-legged line token, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KycTenureError"
+              examples:
+                missingIdentifier:
+                  summary: The line cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The phone number cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The number is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The phone number is already identified by the access token.
+                serviceNotApplicable:
+                  summary: Reserved `…422` suffix
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved line identifier and `tenureDate`
+          (docs/DESIGN.md §7). The identifier's trailing three digits are
+          days-of-tenure; the check passes iff the tenure started on or before
+          `tenureDate`. `contractType` is `digits % 3` → PAYG/PAYM/Business.
+          Reserved error suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier whose trailing digits (held days) >= (today − tenureDate)"
+            result: "200 { tenureDateCheck: true }"
+          - input: "identifier whose trailing digits (held days) < (today − tenureDate)"
+            result: "200 { tenureDateCheck: false }"
+          - input: same number, a recent tenureDate vs an old one
+            result: tenureDateCheck flips true → false (tenureDate is a control plane)
+          - input: any resolved identifier
+            result: "contractType = [PAYG, PAYM, Business][digits % 3]"
+          - input: no phoneNumber, an E.164 token subject (three-legged)
+            result: same cases, driven by the subject's trailing three digits
+          - input: phoneNumber submitted on a three-legged line token
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no phoneNumber and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: malformed or impossible tenureDate
+            result: "400 INVALID_ARGUMENT"
+          - input: tenureDate in the future
+            result: "400 OUT_OF_RANGE"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    Tenure:
+      type: object
+      description: |
+        Request to check the tenure of a phone number against a reference date.
+        The `phoneNumber` is valued only in two-legged authentication; supplying
+        it with a three-legged (line) token yields `422 UNNECESSARY_IDENTIFIER`.
+      required:
+        - tenureDate
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        tenureDate:
+          type: string
+          format: date
+          description: >-
+            The reference date (RFC 3339 full-date, `YYYY-MM-DD`). The response
+            reports whether the subscriber has held the line since at least this
+            date. Must not be in the future.
+          minLength: 10
+          maxLength: 10
+          example: "2025-01-01"
+
+    TenureInfo:
+      type: object
+      description: The tenure verdict for the line.
+      required:
+        - tenureDateCheck
+      properties:
+        tenureDateCheck:
+          type: boolean
+          description: >-
+            `true` when the current end user has held the phone number since at
+            least `tenureDate` (the tenure started on or before it), `false`
+            otherwise.
+        contractType:
+          type: string
+          description: >-
+            The subscription's contract type. In CamaraSim this is derived
+            deterministically from the identifier's trailing digits (`% 3`).
+          enum:
+            - PAYG
+            - PAYM
+            - Business
+
+    KycTenureError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the KYC Tenure `code` set (adds `OUT_OF_RANGE` and the 422 identifier
+        codes).
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - OUT_OF_RANGE
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - IDENTIFIER_NOT_FOUND
+                - MISSING_IDENTIFIER
+                - UNNECESSARY_IDENTIFIER
+                - SERVICE_NOT_APPLICABLE
+                - CONFLICT
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

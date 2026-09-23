@@ -1,0 +1,398 @@
+# CamaraSim — Call Forwarding Signal, API version v0.4 (CAMARA 0.4.0, r3.3).
+#
+# Vendored from the CAMARA Call Forwarding Signal API (release r3.3, the latest
+# published version — so mounted at its real sub-1.0 base path `/v0.4`, like KYC
+# Match / Device Identifier / Location Retrieval) and annotated with CamaraSim's
+# parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/call_forwarding_signal/v0_4.rs`; spec and code must not drift.
+#
+# Serves `POST /unconditional-call-forwardings` and `POST /call-forwardings`
+# (the full forwarding-type set).
+openapi: 3.0.3
+info:
+  title: Call Forwarding Signal
+  description: |
+    Service that answers whether a line has call forwarding configured — a
+    signal used in anti-fraud flows, since a hijacked line often has
+    unconditional forwarding switched on to intercept calls and one-time
+    passwords.
+
+    This is the CamaraSim reference double for CAMARA Call Forwarding Signal
+    0.4.0. The `/unconditional-call-forwardings` endpoint requires the
+    `call-forwarding-signal:unconditional-call-forwardings:read` scope; the
+    `/call-forwardings` endpoint requires the
+    `call-forwarding-signal:call-forwardings:read` scope.
+
+    ## Identifier resolution — two-legged vs three-legged
+
+    Faithful to CAMARA, the `phoneNumber` in the request body is valid *only* in
+    two-legged auth. In a three-legged token the line is already identified by
+    the token **subject** (`sub`), so the number must not be resubmitted:
+
+    - `phoneNumber` present **and** the token subject is itself an E.164 number
+      (a line-authenticated three-legged token) → `422 UNNECESSARY_IDENTIFIER`.
+    - `phoneNumber` present, subject not a line → the submitted number is the
+      identifier (two-legged).
+    - `phoneNumber` absent, subject is an E.164 number → the subject is the
+      identifier (three-legged).
+    - `phoneNumber` absent **and** the subject is not a line → the line cannot be
+      identified → `422 MISSING_IDENTIFIER`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Once the identifier is resolved, the result is deterministic from it:
+
+    - **Reserved error suffix** — if the identifier's trailing three digits name
+      a reserved CAMARA status, the endpoint answers with that canonical CAMARA
+      error (shared convention — see the referenced `errors.yaml`): `…400`,
+      `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`.
+    - **Active marker** — an **odd** trailing-three-digit tail → `active: true`
+      (unconditional forwarding is on).
+    - **Happy path** — an **even** tail (including `…000`) → `active: false`
+      (no unconditional forwarding — the common case).
+
+    Examples: `+123456789013` → `true`; `+123456789012` → `false`;
+    `+123456789404` → `404 NOT_FOUND`.
+
+    ### `/call-forwardings` — the forwarding-type set
+
+    `POST /call-forwardings` (`retrieveCallForwarding`) uses the same identifier
+    resolution and reserved-error convention, but answers the wider question: the
+    **set** of forwarding types active for the line (`CallForwardingSignal`).
+    Once the identifier is resolved, the set is deterministic from its trailing
+    three digits taken as a **4-bit mask** (`digits % 16`), one bit per active
+    type:
+
+    - bit 0 (`digits` odd) → `unconditional` (lines up with the unconditional
+      endpoint — an odd tail always includes `unconditional`)
+    - bit 1 → `conditional_busy`
+    - bit 2 → `conditional_not_reachable`
+    - bit 3 → `conditional_no_answer`
+
+    A zero mask (e.g. `…000`, or no digits) → `["inactive"]` (no forwarding — the
+    common case). The set is always non-empty (`minItems: 1`) and listed in the
+    enum's canonical order. Examples: `+123456789000` → `["inactive"]`;
+    `+123456789001` → `["unconditional"]`; `+123456789012` (12 = `0b1100`) →
+    `["conditional_not_reachable","conditional_no_answer"]`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical CAMARA 0.4.0 declares a subset
+    (400/401/403/404/422/429).
+  version: "0.4.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/call-forwarding-signal/v0.4"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /unconditional-call-forwardings:
+    post:
+      operationId: retrieveUnconditionalCallForwarding
+      summary: Retrieve unconditional call forwarding status
+      description: |
+        Answers whether *unconditional* call forwarding (every incoming call
+        diverted, regardless of the line's state) is active for the line.
+
+        The line is identified by the submitted `phoneNumber` (two-legged) or by
+        the access-token subject (three-legged) — see the API description for the
+        identifier-resolution rules and the parameter-driven functional cases.
+      security:
+        - openId:
+            - call-forwarding-signal:unconditional-call-forwardings:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCallForwardingSignal"
+      responses:
+        "200":
+          description: Unconditional call forwarding status.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnconditionalCallForwardingSignal"
+              examples:
+                inactive:
+                  summary: No unconditional forwarding (even tail — happy path)
+                  value:
+                    active: false
+                active:
+                  summary: Unconditional forwarding on (odd tail)
+                  value:
+                    active: true
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            line cannot be identified (no `phoneNumber` and a non-line subject),
+            `UNNECESSARY_IDENTIFIER` when a `phoneNumber` is submitted on a
+            three-legged line token, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallForwardingError"
+              examples:
+                missingIdentifier:
+                  summary: The line cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The phone number cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The number is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The phone number is already identified by the access token.
+                serviceNotApplicable:
+                  summary: Reserved `…422` suffix
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved line identifier (docs/DESIGN.md §7).
+          Reserved error suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: phoneNumber (two-legged) ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: phoneNumber (two-legged) with an odd trailing-three-digit tail
+            result: "200 { active: true }"
+          - input: phoneNumber (two-legged) with an even tail (incl. …000)
+            result: "200 { active: false }"
+          - input: no phoneNumber, an E.164 token subject (three-legged)
+            result: same cases, driven by the subject's trailing three digits
+          - input: phoneNumber submitted on a three-legged line token
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no phoneNumber and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+
+  /call-forwardings:
+    post:
+      operationId: retrieveCallForwarding
+      summary: Retrieve the set of active call forwarding types
+      description: |
+        Answers the **set** of call-forwarding types currently active for the
+        line — any of `unconditional`, `conditional_busy`,
+        `conditional_not_reachable`, `conditional_no_answer`, or `inactive` when
+        none is configured (`CallForwardingSignal`).
+
+        The line is identified by the submitted `phoneNumber` (two-legged) or by
+        the access-token subject (three-legged) — see the API description for the
+        identifier-resolution rules and the parameter-driven functional cases
+        (the trailing three digits form a 4-bit mask over the active types).
+      security:
+        - openId:
+            - call-forwarding-signal:call-forwardings:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCallForwardingSignal"
+      responses:
+        "200":
+          description: The set of call forwarding types active for the line.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallForwardingSignal"
+              examples:
+                inactive:
+                  summary: No forwarding configured (zero mask — happy path)
+                  value: ["inactive"]
+                unconditional:
+                  summary: Unconditional forwarding only (odd tail, mask bit 0)
+                  value: ["unconditional"]
+                conditionalSet:
+                  summary: A conditional set (…012 → mask 0b1100)
+                  value: ["conditional_not_reachable", "conditional_no_answer"]
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            line cannot be identified (no `phoneNumber` and a non-line subject),
+            `UNNECESSARY_IDENTIFIER` when a `phoneNumber` is submitted on a
+            three-legged line token, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallForwardingError"
+              examples:
+                missingIdentifier:
+                  summary: The line cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The phone number cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The number is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The phone number is already identified by the access token.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved line identifier (docs/DESIGN.md §7).
+          The trailing three digits form a 4-bit mask (digits % 16) over the four
+          active forwarding types; a zero mask reports ["inactive"]. Reserved
+          error suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: identifier with a zero mask (…000, or no digits)
+            result: '200 ["inactive"]'
+          - input: identifier with an odd tail (mask bit 0)
+            result: '200 set including "unconditional"'
+          - input: '…012 (12 = 0b1100)'
+            result: '200 ["conditional_not_reachable","conditional_no_answer"]'
+          - input: phoneNumber submitted on a three-legged line token
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no phoneNumber and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    CreateCallForwardingSignal:
+      type: object
+      description: |
+        Resource carrying the phone number for the call-forwarding check. The
+        `phoneNumber` is valued only in two-legged authentication; supplying it
+        with a three-legged (line) token yields `422 UNNECESSARY_IDENTIFIER`.
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+
+    UnconditionalCallForwardingSignal:
+      type: object
+      description: Whether the unconditional call forwarding service is active.
+      required:
+        - active
+      properties:
+        active:
+          type: boolean
+          description: >-
+            `true` if unconditional call forwarding is active for the line,
+            `false` otherwise.
+
+    CallForwardingSignal:
+      description: >-
+        The set of call-forwarding types active for the line. `inactive` means no
+        forwarding is configured; it is reported alone (never combined). The set
+        is non-empty and its entries are unique.
+      type: array
+      minItems: 1
+      uniqueItems: true
+      items:
+        type: string
+        enum:
+          - inactive
+          - unconditional
+          - conditional_busy
+          - conditional_not_reachable
+          - conditional_no_answer
+      example: ["unconditional", "conditional_busy"]
+
+    CallForwardingError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Call Forwarding Signal `code` set (adds the 422 identifier codes).
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - IDENTIFIER_NOT_FOUND
+                - MISSING_IDENTIFIER
+                - UNNECESSARY_IDENTIFIER
+                - SERVICE_NOT_APPLICABLE
+                - CONFLICT
+                - TOO_MANY_REQUESTS
+                - QUOTA_EXCEEDED
+                - INTERNAL
+                - UNAVAILABLE

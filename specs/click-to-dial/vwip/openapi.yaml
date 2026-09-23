@@ -1,0 +1,973 @@
+# CamaraSim — Click to Dial, API version vwip (CAMARA Click to Dial, wip).
+#
+# Vendored from the CAMARA Click to Dial API (work-in-progress — no released
+# version yet, so mounted at its canonical `vwip` base path, like Verified
+# Caller / Sponsored Data) and annotated with CamaraSim's parameter-driven
+# functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/click_to_dial/vwip.rs`; spec and code must not drift.
+#
+# Serves `POST /calls` (createCall), the stateful `GET /calls/{callId}`
+# (getCall), `DELETE /calls/{callId}` (terminateCall) and
+# `GET /calls/{callId}/recording` (getRecording).
+openapi: 3.0.3
+info:
+  title: Click to Dial
+  description: |
+    Service that lets an application place a voice call between two phone
+    numbers on behalf of a user: the network dials the `caller`, then bridges to
+    the `callee`, so a "click" in an app (a contact card, a "call me back"
+    button) becomes a real carrier-originated call without the app ever handling
+    media. The call's progress is reported back to the application and — when
+    enabled — the call can be recorded.
+
+    This is the CamaraSim reference double for CAMARA Click to Dial (`wip`).
+    `POST /calls` (createCall) requires the `click-to-dial:calls:create` scope;
+    `GET /calls/{callId}` (getCall) requires `click-to-dial:calls:read`;
+    `DELETE /calls/{callId}` (terminateCall) requires
+    `click-to-dial:calls:delete`; `GET /calls/{callId}/recording`
+    (getRecording) requires `click-to-dial:recordings:read` (a dedicated
+    recordings scope, distinct from the call scopes).
+
+    ## Two-legged, business-facing
+
+    Both the `caller` (the party dialled first) and the `callee` (the party
+    bridged to) are carried in the request body. There is no line **subject** to
+    fall back to, so — like Verified Caller — this API has no
+    two-legged/three-legged identifier resolution: the two participants are
+    always supplied explicitly.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    The `callee` (the party being reached) is the identifier, and the two numbers
+    plus `recordingEnabled` drive every case:
+
+    - **Reserved error suffix (identifier).** If the `callee` number's trailing
+      three digits name a reserved CAMARA status, the endpoint answers with that
+      canonical CAMARA error (shared convention — see the referenced
+      `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+      `…500`, `…503`.
+    - **`callee` not available (`…000`).** A `callee` number ending `000` cannot
+      be reached → `422 CALLEE_NOT_AVAILABLE`.
+    - **`caller` not available (`…000`).** A `caller` number ending `000` cannot
+      be dialled → `422 CALLER_NOT_AVAILABLE` (checked before the callee, so a
+      caller-side problem is surfaced first).
+    - **Recording not supported (`…777` + `recordingEnabled`).** When
+      `recordingEnabled` is `true` and the `callee` number ends `777`, that line
+      cannot be recorded → `422 RECORDING_NOT_SUPPORTED`. (`777` is a documented
+      CamaraSim sentinel; recording on any other line is honoured, and `777`
+      without recording is a normal, reachable line.)
+    - **Duplicate call (`409`).** Because the `callId` is deterministic from the
+      pair, re-creating a call that is still live (not yet terminated) for the
+      same `caller`/`callee` pair → `409 ALREADY_EXISTS`. This is the one
+      `createCall` case keyed on **store state** rather than the request alone,
+      making `createCall` stateful; the pair is creatable again once
+      `terminateCall` evicts the call. (A `callee` reserved suffix `…409` also
+      yields a 409, but with the canonical `CONFLICT` code.)
+    - **Happy path.** Any other pair, not already live → `201` with a `Call` whose
+      `status` is `initiating`. `callId` is a deterministic, UUID-shaped token
+      derived from the two numbers.
+
+    Validation: a malformed body, an unknown field, or a missing
+    `caller`/`callee`/`number` → `400 INVALID_ARGUMENT`; a participant number
+    present but not in E.164 form → `422 INVALID_PHONE_NUMBER`; identical
+    `caller` and `callee` numbers → `422 SAME_CALLER_CALLEE`.
+
+    ## getCall / terminateCall — the store is the only control plane
+
+    `GET /calls/{callId}` reads a created call back and
+    `DELETE /calls/{callId}` terminates it. The `callId` is an opaque,
+    UUID-shaped token (not a phone number), so — unlike `createCall` — there is
+    no reserved-identifier control plane here (mirrors QoD `getSession` / Carrier
+    Billing `retrievePayment`): a `callId` present in the store → `200` that
+    `Call` (getCall) or `204 No Content` (terminateCall, which evicts it); an
+    unknown/never-created id → `404 NOT_FOUND`. Eviction is single-use, so a
+    second getCall/terminateCall for a terminated id is a `404`.
+
+    ## getRecording — the store + `recordingEnabled` are the control plane
+
+    `GET /calls/{callId}/recording` fetches the call's recording. The `callId` is
+    the same opaque token, so the store state is the primary control plane and
+    the stored call's `recordingEnabled` flag is a second signal (docs/DESIGN.md
+    §7). Per CAMARA a recording exists only when the call was created with
+    `recordingEnabled: true`:
+
+    - a stored call with `recordingEnabled: true` → `200` with a
+      `RecordingResource` (the `callId`, a base64-encoded `content`, the
+      `contentType`, and `generatedAt`);
+    - a stored call created without recording → `404 NOT_FOUND` (none was
+      generated);
+    - an unknown/never-created `callId` → `404 NOT_FOUND`.
+
+    Both 404 cases use the canonical `NOT_FOUND` code (CAMARA does not
+    distinguish "call not found" from "recording unavailable"), differing only in
+    message. CamaraSim's `content` is a fixed, deterministic silent WAV
+    (`contentType: audio/wav`) — the simulator has no real captured media.
+
+    ## Documented cuts
+
+    - **Synthetic recording.** `getRecording`'s `content` is a fixed silent WAV,
+      not real captured audio, and the recording is available as soon as the call
+      exists — the CAMARA precondition that the call session has *completed* is
+      not modelled (lifecycle `status` transitions past `initiating` remain a
+      deferred slice).
+    - **Notifications — create-time, terminate, and simulated progression.** A
+      `createCall` that supplies a `sink` delivers one create-time `status-changed`
+      CloudEvent reflecting the call's initial `initiating` state (documented by the
+      `createCall` callback), and `terminateCall` delivers a terminal one
+      reflecting the `disconnected` state (with a `reason` in `data.status`).
+      Additionally, the `callee` line's trailing three digits request a **simulated
+      progression** after the create-time event, each step delivered as a
+      `status-changed` CloudEvent in order (a deterministic identifier tail drives
+      the transition, mirroring Quality on Demand's `…001` `NETWORK_TERMINATED`); a
+      concurrent `terminateCall` halts it, so a terminated call never emits a later
+      step: a `…001` callee advances `callingCallee` → `connected` (**success**),
+      a `…002` callee advances `callingCallee` → `failed` (**failure** — the
+      network reaches the callee but the call is not answered; the terminal `failed`
+      step carries a `reason` in `data.status`, like the terminate event), and a
+      `…003` callee advances `callingCaller` → `callingCallee` → `connected` (the
+      **full front leg** — the platform alerts the caller first, then reaches the
+      callee, then the parties connect; the only path that emits the caller-alerting
+      `callingCaller` state). Delivery
+      is fire-and-forget, off the request path: an `http://` sink is POSTed over
+      raw TCP and an `https://` sink over a `rustls` TLS session (server cert
+      verified against the bundled Mozilla roots); any other scheme is a no-op cut.
+      A `sinkCredential` is applied to every
+      callback's `Authorization` header — `ACCESSTOKEN` → `Bearer <accessToken>`
+      (RFC 6750), `PLAIN` → `Basic base64(identifier:secret)` (RFC 7617) —
+      `REFRESHTOKEN` remains a cut. The stored `Call.status` is **not** advanced by
+      the progression (it stays `initiating`) — with no live call engine the
+      progression is observable only through the delivered events. Each success
+      progression (`…001`/`…003`) closes with a natural completion event — a terminal
+      `disconnected` carrying `callDuration` (deterministic from the callee digits)
+      and `recordingResult` (`succeeded`/`not_recorded`).
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical Click to Dial declares a subset.
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/click-to-dial/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /calls:
+    post:
+      operationId: createCall
+      summary: Create a new Click to Dial call session
+      description: |
+        Creates a call between `caller` and `callee`. Returns `201` with the new
+        `Call` resource, whose `status` is `initiating` — see the API description
+        for the parameter-driven functional cases (the `callee` identifier selects
+        a reserved error or an availability/recording case; the pair of numbers is
+        echoed back). The `callId` is deterministic from the pair, so re-creating
+        a call that is still live (not yet terminated) for the same
+        `caller`/`callee` pair returns `409 ALREADY_EXISTS` (a store-keyed control
+        plane) rather than overwriting it.
+
+        When the request supplies a `sink`, a single create-time `status-changed`
+        CloudEvent reflecting the call's initial `initiating` state is delivered
+        to it (see the `statusChanged` callback and the API description's
+        notification cut). Later lifecycle transitions are a deferred slice.
+      security:
+        - openId:
+            - click-to-dial:calls:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCallRequest"
+      responses:
+        "201":
+          description: The call was created.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Call"
+              examples:
+                created:
+                  summary: A newly-created call, initiating
+                  value:
+                    callId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    caller:
+                      number: "+123456789111"
+                    callee:
+                      number: "+123456789012"
+                    status: initiating
+                    createdAt: "2024-01-01T14:27:08Z"
+                    recordingEnabled: false
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body, an unknown field, or a missing
+            `caller`/`callee`/`number`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClickToDialError"
+              examples:
+                invalidArgument:
+                  summary: Malformed body or missing field
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "Request body is not a valid CreateCallRequest."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          description: |
+            409 — conflict with the current state. CamaraSim returns
+            `ALREADY_EXISTS` when a still-live call already exists for the same
+            `caller`/`callee` pair (the `callId` is deterministic from the pair,
+            so a re-create before the call is terminated is a conflict, not an
+            overwrite — this is the store-keyed control plane that makes
+            `createCall` stateful), and the canonical `CONFLICT` when the `callee`
+            number's reserved suffix is `…409`.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClickToDialError"
+              examples:
+                alreadyExists:
+                  summary: A live call already exists for this caller/callee pair
+                  value:
+                    status: 409
+                    code: ALREADY_EXISTS
+                    message: "A call already exists for this caller and callee. Terminate it before creating a new one."
+                conflict:
+                  summary: callee reserved suffix …409
+                  value:
+                    status: 409
+                    code: CONFLICT
+                    message: "A specified resource duplicate entry found."
+        "422":
+          description: |
+            422 — the request is well-formed but cannot be processed. CamaraSim
+            returns `INVALID_PHONE_NUMBER` for a number that is present but not in
+            E.164 form, `SAME_CALLER_CALLEE` when the two numbers are identical,
+            `CALLER_NOT_AVAILABLE` / `CALLEE_NOT_AVAILABLE` when a line ends `000`,
+            `RECORDING_NOT_SUPPORTED` when recording is requested for a `…777`
+            callee, and `SERVICE_NOT_APPLICABLE` for a `callee` whose reserved
+            suffix is `…422`.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClickToDialError"
+              examples:
+                invalidPhoneNumber:
+                  summary: A participant number is not E.164
+                  value:
+                    status: 422
+                    code: INVALID_PHONE_NUMBER
+                    message: "`callee.number` must be in E.164 format (e.g. +123456789)."
+                sameCallerCallee:
+                  summary: caller equals callee
+                  value:
+                    status: 422
+                    code: SAME_CALLER_CALLEE
+                    message: "`caller` and `callee` must be different phone numbers."
+                calleeNotAvailable:
+                  summary: callee line ends 000
+                  value:
+                    status: 422
+                    code: CALLEE_NOT_AVAILABLE
+                    message: "The callee line is not available to receive the call."
+                callerNotAvailable:
+                  summary: caller line ends 000
+                  value:
+                    status: 422
+                    code: CALLER_NOT_AVAILABLE
+                    message: "The caller line is not available to place the call."
+                recordingNotSupported:
+                  summary: recording requested for a 777 callee
+                  value:
+                    status: 422
+                    code: RECORDING_NOT_SUPPORTED
+                    message: "Call recording is not supported for the callee line."
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      callbacks:
+        statusChanged:
+          "{$request.body#/sink}":
+            post:
+              summary: >-
+                Call status-changed notification (CloudEvents). CamaraSim delivers
+                one create-time event reflecting the `initiating` state; a `…001`
+                callee also drives a simulated `callingCallee` → `connected`
+                (success) progression, a `…002` callee a `callingCallee` →
+                `failed` (failure, with a `reason`) progression, and a `…003`
+                callee the full `callingCaller` → `callingCallee` → `connected`
+                front-leg progression. Each success progression (`…001`/`…003`)
+                closes with a natural completion event — a terminal `disconnected`
+                carrying `callDuration` and `recordingResult`.
+              requestBody:
+                required: true
+                content:
+                  application/cloudevents+json:
+                    schema:
+                      $ref: "#/components/schemas/StatusChangedEvent"
+              responses:
+                "204":
+                  description: The consumer accepted the notification.
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `callee` identifier, the `caller` number, and
+          `recordingEnabled` (docs/DESIGN.md §7). A reserved trailing suffix on
+          the `callee` number selects a canonical CAMARA error; `…000` on either
+          line is a not-available case; a `…777` callee blocks recording when
+          asked for. Reserved error suffixes come from the shared convention in
+          errors.yaml.
+        cases:
+          - input: callee number ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "non-reserved callee, distinct caller, no line ending 000, not already live"
+            result: "201 { Call, status = initiating }"
+          - input: "a happy-path create that supplies a `sink` (http://)"
+            result: "201, plus a create-time status-changed CloudEvent delivered to the sink"
+          - input: "a happy-path create that supplies an https:// sink"
+            result: "201, plus a create-time status-changed CloudEvent delivered over a verified rustls TLS session"
+          - input: "a happy-path create with an ACCESSTOKEN sinkCredential"
+            result: "201; the callback carries Authorization: Bearer <accessToken> (RFC 6750)"
+          - input: "a happy-path create with a PLAIN sinkCredential (identifier + secret)"
+            result: "201; the callback carries Authorization: Basic base64(identifier:secret) (RFC 7617)"
+          - input: "a happy-path create with a callee number ending 001 and an http:// sink"
+            result: >-
+              201; after the create-time initiating event, a simulated progression
+              delivers callingCallee then connected status-changed CloudEvents (in
+              order), then a natural completion event (terminal disconnected with a
+              reason, callDuration = 30 + (001 % 571) = 31, and recordingResult);
+              the stored Call.status stays initiating
+          - input: "a callee number ending 001 created with recordingEnabled true"
+            result: "the completion event reports recordingResult = succeeded"
+          - input: "a callee number ending 001/003 created without recordingEnabled"
+            result: "the completion event reports recordingResult = not_recorded"
+          - input: "a callee number ending 001 whose call is terminated mid-progression"
+            result: "the progression halts — no connected/completion event after the terminal disconnected"
+          - input: "a happy-path create with a callee number ending 002 and an http:// sink"
+            result: >-
+              201; after the create-time initiating event, a simulated progression
+              delivers callingCallee then failed status-changed CloudEvents (in
+              order); the terminal failed event carries a data.status.reason; the
+              stored Call.status stays initiating
+          - input: "a happy-path create with a callee number ending 003 and an http:// sink"
+            result: >-
+              201; after the create-time initiating event, a simulated full
+              progression delivers callingCaller then callingCallee then connected
+              status-changed CloudEvents (in order); none of those carries a reason;
+              then a natural completion event (terminal disconnected with callDuration
+              = 33 and recordingResult); the stored Call.status stays initiating
+          - input: "a create that supplies a non-http(s) sink (e.g. ftp://), or that errors before 201"
+            result: "201 (unsupported-scheme no-op cut) / the error — no CloudEvent is delivered"
+          - input: "a re-create of a still-live call for the same caller/callee pair"
+            result: "409 ALREADY_EXISTS (store-keyed; not an overwrite)"
+          - input: callee number ending 000
+            result: "422 CALLEE_NOT_AVAILABLE"
+          - input: caller number ending 000
+            result: "422 CALLER_NOT_AVAILABLE"
+          - input: "recordingEnabled true with a callee number ending 777"
+            result: "422 RECORDING_NOT_SUPPORTED"
+          - input: "callee number ending 777 without recordingEnabled"
+            result: "201 (777 alone is a reachable line)"
+          - input: caller number equal to callee number
+            result: "422 SAME_CALLER_CALLEE"
+          - input: a participant number present but not E.164
+            result: "422 INVALID_PHONE_NUMBER"
+          - input: missing caller/callee/number, unknown field, or malformed body
+            result: "400 INVALID_ARGUMENT"
+
+  /calls/{callId}:
+    get:
+      operationId: getCall
+      summary: Retrieve a Click to Dial call session
+      description: |
+        Reads a previously-created call back by its `callId`. Returns `200` with
+        the stored `Call`, or `404 NOT_FOUND` for a `callId` that was never
+        created. The `callId` is an opaque, UUID-shaped token, so the store state
+        is the only control plane (there is no reserved-identifier convention
+        here — see the API description).
+      security:
+        - openId:
+            - click-to-dial:calls:read
+      parameters:
+        - $ref: "#/components/parameters/CallId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The call was found.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Call"
+              examples:
+                found:
+                  summary: A stored call, still initiating
+                  value:
+                    callId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    caller:
+                      number: "+123456789111"
+                    callee:
+                      number: "+123456789222"
+                    status: initiating
+                    createdAt: "2024-01-01T14:27:08Z"
+                    recordingEnabled: true
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          description: |
+            404 — no call was found for the provided `callId` (unknown or never
+            created).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClickToDialError"
+              examples:
+                notFound:
+                  summary: Unknown callId
+                  value:
+                    status: 404
+                    code: NOT_FOUND
+                    message: "No call found for the provided callId."
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the store state only (docs/DESIGN.md §7). The
+          `callId` is opaque, so there is no reserved-identifier plane: a stored
+          id returns the call, an unknown id is a 404.
+        cases:
+          - input: a callId returned by a prior createCall
+            result: "200 { Call }"
+          - input: an unknown/never-created callId
+            result: "404 NOT_FOUND"
+    delete:
+      operationId: terminateCall
+      summary: Terminate a Click to Dial call session
+      description: |
+        Terminates a previously-created call by its `callId`, evicting it from
+        the store. Returns `204 No Content` when the call was terminated, or
+        `404 NOT_FOUND` for a `callId` that was never created (or already
+        terminated — eviction is single-use). The `callId` is an opaque,
+        UUID-shaped token, so the store state is the only control plane (there is
+        no reserved-identifier convention here).
+
+        When the call was created with a `sink`, terminating it delivers a single
+        **terminal** `status-changed` CloudEvent to that sink reflecting the
+        `disconnected` state (with a `reason`) — fire-and-forget, off the request
+        path; delivered over raw TCP (`http://`) or a verified `rustls` TLS session
+        (`https://`); the `sinkCredential` recorded at create time applied
+        (ACCESSTOKEN → `Bearer`, PLAIN → `Basic`). This mirrors QoD's `deleteSession` →
+        `DELETE_REQUESTED` event. It is **not** modelled as an OpenAPI `callbacks`
+        object here because the callback target (`sink`) was supplied on the
+        original `createCall`, not on this bodyless `DELETE` — a runtime expression
+        cannot reference it. See the `createCall` `statusChanged` callback for the
+        CloudEvent shape (`StatusChangedEvent`).
+      security:
+        - openId:
+            - click-to-dial:calls:delete
+      parameters:
+        - $ref: "#/components/parameters/CallId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "204":
+          description: The call was terminated. No response body.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          description: |
+            404 — no call was found for the provided `callId` (unknown, never
+            created, or already terminated).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClickToDialError"
+              examples:
+                notFound:
+                  summary: Unknown callId
+                  value:
+                    status: 404
+                    code: NOT_FOUND
+                    message: "No call found for the provided callId."
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the store state only (docs/DESIGN.md §7). The
+          `callId` is opaque, so there is no reserved-identifier plane: a stored
+          id is evicted and returns 204, an unknown/already-terminated id is a
+          404. A terminated call that was created with an `http://` or `https://`
+          `sink` also delivers one terminal `status-changed` CloudEvent
+          (`disconnected`).
+        cases:
+          - input: a callId returned by a prior createCall (not yet terminated)
+            result: "204 No Content (the call is evicted)"
+          - input: "a terminated call created with an http:// or https:// sink"
+            result: "204, plus a terminal status-changed CloudEvent (state=disconnected, with reason)"
+          - input: "a terminated call whose create recorded an ACCESSTOKEN/PLAIN sinkCredential"
+            result: "204; the terminal callback carries Authorization: Bearer/Basic accordingly"
+          - input: "a terminated call created with a non-http(s) sink, or with no sink"
+            result: "204 — no CloudEvent is delivered (unsupported-scheme no-op cut / no sink recorded)"
+          - input: an unknown, never-created, or already-terminated callId
+            result: "404 NOT_FOUND (no CloudEvent — the eviction is single-use)"
+
+  /calls/{callId}/recording:
+    get:
+      operationId: getRecording
+      summary: Retrieve the recording of a Click to Dial call
+      description: |
+        Fetches the recording of a previously-created call. A recording exists
+        only when the call was created with `recordingEnabled: true`; otherwise
+        (or for an unknown `callId`) the endpoint returns `404 NOT_FOUND`. The
+        `callId` is opaque, so the store state — plus the stored call's
+        `recordingEnabled` flag — is the control plane (see the API
+        description). CamaraSim's `content` is a fixed, deterministic silent WAV
+        (the simulator has no real captured media).
+      security:
+        - openId:
+            - click-to-dial:recordings:read
+      parameters:
+        - $ref: "#/components/parameters/CallId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The call recording resource.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecordingResource"
+              examples:
+                recording:
+                  summary: A recording for a recorded call
+                  value:
+                    callId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    content: UklGRjQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YRAAAACAgICAgICAgICAgICAgICA
+                    contentType: audio/wav
+                    generatedAt: "2024-01-01T14:27:08Z"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          description: |
+            404 — no recording is available: either the `callId` is unknown/never
+            created, or the call exists but was not created with
+            `recordingEnabled: true` (so no recording was generated). Both use the
+            canonical `NOT_FOUND` code, differing only in message.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClickToDialError"
+              examples:
+                callNotFound:
+                  summary: Unknown callId
+                  value:
+                    status: 404
+                    code: NOT_FOUND
+                    message: "No call found for the provided callId."
+                recordingUnavailable:
+                  summary: The call exists but has no recording
+                  value:
+                    status: 404
+                    code: NOT_FOUND
+                    message: "No recording is available for the call."
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the store state and the stored call's
+          `recordingEnabled` flag (docs/DESIGN.md §7). The `callId` is opaque, so
+          there is no reserved-identifier plane: a recorded call yields the
+          recording, a non-recorded or unknown call is a 404.
+        cases:
+          - input: a callId of a call created with recordingEnabled true
+            result: "200 { RecordingResource, contentType audio/wav }"
+          - input: a callId of a call created without recording
+            result: "404 NOT_FOUND (no recording generated)"
+          - input: an unknown/never-created callId
+            result: "404 NOT_FOUND"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+    CallId:
+      name: callId
+      in: path
+      required: true
+      description: The opaque, UUID-shaped identifier of a created call.
+      schema:
+        type: string
+        format: uuid
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    PhoneNumber:
+      type: string
+      description: A phone number in E.164 format (starting with `+`).
+      pattern: '^\+[1-9][0-9]{4,14}$'
+      example: "+123456789012"
+
+    Party:
+      type: object
+      description: A call participant, carrying its phone number.
+      required:
+        - number
+      properties:
+        number:
+          $ref: "#/components/schemas/PhoneNumber"
+
+    CreateCallRequest:
+      type: object
+      description: |
+        Request to create a Click to Dial call. Both participants are required
+        and carried explicitly (two-legged, business-facing — there is no line
+        subject). `recordingEnabled` opts into call recording; when a `sink` is
+        supplied, a create-time `status-changed` CloudEvent is delivered to it
+        (see the `createCall` callback), authenticated with an `ACCESSTOKEN` or
+        `PLAIN` `sinkCredential` if one is present.
+      required:
+        - caller
+        - callee
+      properties:
+        caller:
+          allOf:
+            - $ref: "#/components/schemas/Party"
+          description: The party dialled first (the caller).
+        callee:
+          allOf:
+            - $ref: "#/components/schemas/Party"
+          description: The party bridged to (the callee) — the identifier.
+        recordingEnabled:
+          type: boolean
+          description: Whether to record the call. Defaults to `false`.
+          default: false
+        sink:
+          type: string
+          format: uri
+          description: >-
+            Optional callback URL for `status-changed` notifications. CamaraSim
+            delivers to an `http://` sink over raw TCP and to an `https://` sink
+            over a verified `rustls` TLS session; any other scheme is accepted but
+            a no-op cut.
+          maxLength: 2048
+        sinkCredential:
+          allOf:
+            - $ref: "#/components/schemas/SinkCredential"
+          description: >-
+            Optional credential presented on the `sink` callback. CamaraSim
+            applies an `ACCESSTOKEN` bearer (`Authorization: Bearer`) or a `PLAIN`
+            identifier/secret pair (`Authorization: Basic base64(identifier:secret)`,
+            RFC 7617); `REFRESHTOKEN` is a cut.
+
+    Call:
+      type: object
+      description: A Click to Dial call resource.
+      required:
+        - callId
+        - caller
+        - callee
+        - status
+        - createdAt
+      properties:
+        callId:
+          type: string
+          description: >-
+            Opaque, UUID-shaped identifier of the call. Deterministic in
+            CamaraSim (derived from the two participant numbers).
+          format: uuid
+        caller:
+          $ref: "#/components/schemas/Party"
+        callee:
+          $ref: "#/components/schemas/Party"
+        status:
+          $ref: "#/components/schemas/CallStatus"
+        createdAt:
+          type: string
+          format: date-time
+          description: When the call was created (RFC 3339 UTC).
+        recordingEnabled:
+          type: boolean
+          description: Whether recording is enabled for the call.
+
+    RecordingResource:
+      type: object
+      description: >-
+        A recording file for a Click to Dial call, returned by `getRecording`.
+        The audio is carried inline as base64 in `content`. In CamaraSim the
+        content is a fixed, deterministic silent WAV (`contentType: audio/wav`) —
+        the simulator has no real captured media.
+      required:
+        - callId
+        - content
+        - contentType
+      properties:
+        callId:
+          type: string
+          format: uuid
+          description: The opaque, UUID-shaped identifier of the recorded call.
+        content:
+          type: string
+          format: byte
+          maxLength: 20971520
+          description: Base64-encoded audio content of the recording.
+          example: UklGRgAAAABXQVZF
+        contentType:
+          type: string
+          description: The media type of the recording's audio content.
+          enum:
+            - audio/wav
+            - audio/mp3
+            - audio/mpeg
+            - audio/ogg
+        generatedAt:
+          type: string
+          format: date-time
+          description: When the recording was generated (RFC 3339 UTC).
+
+    CallStatus:
+      type: string
+      description: >-
+        The lifecycle state of the call. CamaraSim's `createCall` always returns
+        `initiating`; `disconnected` is reached when the call is ended by
+        `terminateCall` — or when a `…001`/`…003` success progression completes on
+        its own (both carried by a terminal `status-changed` notification). A
+        `…001` callee drives a simulated **success** progression through
+        `callingCallee` and `connected`, a `…002` callee a simulated **failure**
+        progression through `callingCallee` and `failed`, and a `…003` callee the
+        **full front-leg** progression through `callingCaller`, `callingCallee` and
+        `connected` — the only path that emits the caller-alerting `callingCaller`
+        state (all carried by the progression `status-changed` notifications; the
+        stored resource `status` stays `initiating`).
+      enum:
+        - initiating
+        - callingCaller
+        - callingCallee
+        - connected
+        - disconnected
+        - failed
+
+    SinkCredential:
+      type: object
+      description: >-
+        A credential the platform presents on the `sink` callback (CAMARA
+        Commonalities `SinkCredential`). CamaraSim applies the `ACCESSTOKEN` variant
+        as an `Authorization: Bearer <accessToken>` header (RFC 6750) and the `PLAIN`
+        variant as an `Authorization: Basic base64(identifier:secret)` header (RFC
+        7617); `REFRESHTOKEN` is accepted for schema fidelity but not applied (it
+        needs a token-exchange round trip).
+      required:
+        - credentialType
+      properties:
+        credentialType:
+          type: string
+          enum:
+            - PLAIN
+            - ACCESSTOKEN
+            - REFRESHTOKEN
+        identifier:
+          type: string
+          description: >-
+            The identity (username) for `credentialType: PLAIN`, applied as the
+            userid of the RFC 7617 Basic credential `base64(identifier:secret)`.
+        secret:
+          type: string
+          description: >-
+            The secret (password) for `credentialType: PLAIN`. An empty value is
+            permitted (the schema requires the field, not a value).
+        accessToken:
+          type: string
+          description: The bearer token (for `credentialType: ACCESSTOKEN`).
+        accessTokenExpiresUtc:
+          type: string
+          format: date-time
+        accessTokenType:
+          type: string
+          enum:
+            - bearer
+
+    StatusChangedEvent:
+      type: object
+      description: >-
+        The CloudEvents 1.0 envelope POSTed to a call's `sink` when its status
+        changes (`type: org.camaraproject.click-to-dial.v0.status-changed`).
+        CamaraSim delivers a create-time event reflecting the `initiating` state,
+        one at `terminateCall` reflecting the terminal `disconnected` state (with a
+        `reason` in `data.status`), and — for a `…001`/`…003` callee — a simulated
+        `callingCallee` → `connected` (success) progression that closes with a
+        natural **completion** event (terminal `disconnected` carrying
+        `callDuration` + `recordingResult`), or — for a `…002` callee — a
+        `callingCallee` → `failed` (failure, with a `reason`) progression. Re-deriving
+        the stored `Call.status` past `initiating` remains a documented cut (no live
+        call engine).
+      required:
+        - id
+        - source
+        - type
+        - specversion
+        - data
+      properties:
+        id:
+          type: string
+          description: Unique event id within `source` (UUID-shaped in CamaraSim).
+        source:
+          type: string
+          format: uri-reference
+        type:
+          type: string
+          enum:
+            - org.camaraproject.click-to-dial.v0.status-changed
+        specversion:
+          type: string
+          enum:
+            - "1.0"
+        datacontenttype:
+          type: string
+          enum:
+            - application/json
+        time:
+          type: string
+          format: date-time
+        data:
+          $ref: "#/components/schemas/CallEventData"
+
+    CallEventData:
+      type: object
+      description: The `data` payload of a `status-changed` CloudEvent.
+      required:
+        - callId
+        - caller
+        - callee
+        - status
+      properties:
+        callId:
+          type: string
+          format: uuid
+        caller:
+          $ref: "#/components/schemas/Party"
+        callee:
+          $ref: "#/components/schemas/Party"
+        status:
+          type: object
+          description: >-
+            The call's status as an object (note the `Call` resource's own
+            `status` is a plain-string `CallStatus`).
+          required:
+            - state
+          properties:
+            state:
+              $ref: "#/components/schemas/CallStatus"
+            reason:
+              type: string
+              description: >-
+                The transition reason, present on a terminal state. CamaraSim
+                populates it on the `terminateCall` event (`state: disconnected`),
+                on the simulated `…002` terminal `failed` step, and on the natural
+                completion event that closes a `…001`/`…003` success progression;
+                it is absent on the create-time event and on non-terminal
+                transitions (`callingCallee`/`connected`).
+            callDuration:
+              type: integer
+              format: int32
+              minimum: 0
+              description: >-
+                The connected-call duration in whole seconds, reported only on the
+                natural completion event that closes a `…001`/`…003` success
+                progression. CamaraSim derives it deterministically from the
+                `callee` line's trailing three digits `d` as `30 + (d % 571)` (a
+                30–600 s call); it is absent on every non-completion event.
+            recordingResult:
+              type: string
+              enum:
+                - succeeded
+                - not_recorded
+              description: >-
+                Whether a recording was captured, reported only on the completion
+                event. `succeeded` when the call was created with
+                `recordingEnabled: true` (consistent with `getRecording`
+                returning the recording), else `not_recorded`.
+
+    ClickToDialError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Click to Dial `code` set.
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - OUT_OF_RANGE
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - CONFLICT
+                - SERVICE_NOT_APPLICABLE
+                - INVALID_PHONE_NUMBER
+                - SAME_CALLER_CALLEE
+                - RECORDING_NOT_SUPPORTED
+                - CALLER_NOT_AVAILABLE
+                - CALLEE_NOT_AVAILABLE
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

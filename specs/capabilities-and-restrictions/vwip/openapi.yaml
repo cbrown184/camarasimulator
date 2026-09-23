@@ -1,0 +1,430 @@
+# CamaraSim — Capabilities and Restrictions, API version vwip (CAMARA
+# CapabilitiesAndRuntimeRestrictions, `wip`).
+#
+# Vendored from the CAMARA Capabilities and Restrictions API
+# (capabilities-and-restrictions.yaml, version `wip` — no released version yet,
+# so its canonical base path is `capabilities-and-restrictions/vwip` and
+# CamaraSim mounts it there, honouring the version in the URL) and annotated with
+# CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed
+# by `src/apis/capabilities_and_restrictions/vwip.rs`; spec and code must not
+# drift.
+#
+# Serves the synchronous `POST /retrieve` happy path plus the standard error
+# set. Documented cuts (mirroring the other first-landing API skeletons):
+#   * the `subscriptionRequest` change-notification callback (accepted, not
+#     applied — no CloudEvents are delivered);
+#   * the `CapabilitySetFootprint` branch of `CapabilityDetail` (CamaraSim always
+#     answers with the `CapabilitySetBitmap` + `CapabilityBitmap` branch);
+#   * `ETag`/`If-None-Match`/`If-Modified-Since` caching and the `304 Not
+#     Modified` response;
+#   * resolving `overlayExtends` against real, published API definitions (the
+#     restriction catalogue is synthetic).
+openapi: 3.0.3
+info:
+  title: Capabilities and Restrictions
+  description: |
+    Query the CAMARA service capabilities — and their current runtime
+    restrictions — that apply to a consumer's context. The consumer submits one
+    or more `queries`; each names the API definitions it `overlayExtends` and,
+    optionally, the `resourceScopes` (e.g. a `phoneNumber`) it is asking about.
+    The operator returns a `CapabilityInfo` whose `details` carry, per query, a
+    catalogue of runtime capabilities (`bitmapCapabilities`, each a set of
+    overlay restrictions the consumer must enforce) plus a
+    `camaraCapabilitiesBitmap` integer whose bits convey which of those
+    capabilities are currently **active** for the queried context.
+
+    This is the CamaraSim reference double for CAMARA Capabilities and
+    Restrictions (`wip`). The `/retrieve` endpoint requires the
+    `camara-capability:read` scope.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    The identifier is the **first query's first `resourceScope` `phoneNumber`**
+    (when one is supplied):
+
+    - **Reserved error suffix (identifier).** If that phone number's trailing
+      three digits name a reserved CAMARA status, the endpoint answers with that
+      canonical CAMARA error (shared convention — see the referenced
+      `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+      `…500`, `…503`. The `…404` case is the API's "No Capability API found".
+    - **Happy path.** Otherwise `201` with a `CapabilityInfo`. For each query the
+      `camaraCapabilitiesBitmap` is derived from the context — the queried phone
+      number's trailing three digits (or, absent a phone number, a stable hash of
+      the query's `overlayExtends`) modulo the catalogue size — so the *active*
+      capability set is a genuine, input-driven second control plane. Each
+      query's `overlayExtends`/`resourceScopes` are echoed back on its detail.
+
+    Validation: a malformed body, an empty/absent `overlayExtends`, an
+    `overlayExtends` entry that is not a URI, or a non-E.164 `phoneNumber` in a
+    `resourceScope` → `400 INVALID_ARGUMENT`; more than 100 `queries` or more
+    than 20 `overlayExtends` in a query → `400 OUT_OF_RANGE`. `x-correlator` is
+    echoed on every response.
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/capabilities-and-restrictions/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /retrieve:
+    post:
+      operationId: postServiceCapability
+      summary: Retrieve tailored service capabilities based on consumer context
+      description: |
+        Returns service capability information tailored to the consumer's
+        context, including active/inactive runtime restrictions and mapping
+        metadata. See the API description for the parameter-driven functional
+        cases (a reserved suffix on the first query's first `phoneNumber` selects
+        a canonical error; otherwise the query succeeds with a context-derived
+        active bitmap).
+      security:
+        - openId:
+            - camara-capability:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CamaraCapabilityQueryRequest"
+            examples:
+              request:
+                summary: Query QoD capabilities for a phone number
+                value:
+                  queries:
+                    - resourceScopes:
+                        - phoneNumber: "+123456789012"
+                      overlayExtends:
+                        - "https://github.com/camaraproject/QualityOnDemand/blob/r2.2/code/API_definitions/quality-on-demand.yaml"
+      responses:
+        "201":
+          description: Tailored capability info with the current restriction mapping.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapabilityInfo"
+              examples:
+                info:
+                  summary: One capability detail per query
+                  value:
+                    details:
+                      - name: camarasim-capability-set
+                        version: "1.0.0"
+                        createdAt: "2025-05-09T14:25:38Z"
+                        lastModifiedAt: "2025-05-09T14:25:38Z"
+                        mappingVersion: "1.0.0"
+                        camaraCapabilitiesBitmap: 5
+                        overlayExtends:
+                          - "https://github.com/camaraproject/QualityOnDemand/blob/r2.2/code/API_definitions/quality-on-demand.yaml"
+                        resourceScopes:
+                          - phoneNumber: "+123456789012"
+                        bitmapCapabilities:
+                          "0":
+                            name: rr-accepted-device-identifiers
+                            version: "1.0.0"
+                            restrictions:
+                              - name: org.camaraproject.capability.v0.object-instance-restriction.rr-accepted-device-identifiers
+                                version: "0.0.1"
+                                extends: "https://github.com/camaraproject/QualityOnDemand/blob/r2.2/code/API_definitions/quality-on-demand.yaml"
+                                actions:
+                                  - target: "$.components.schemas['Device'].properties['ipv4Address']"
+                                    remove: true
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body, an empty/absent `overlayExtends`, a non-URI
+            `overlayExtends` entry, or a non-E.164 `resourceScopes` `phoneNumber`;
+            and `OUT_OF_RANGE` when a query carries more than 20 `overlayExtends`
+            or the request carries more than 100 `queries`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapabilityError"
+              examples:
+                invalidArgument:
+                  summary: Missing overlayExtends
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "Each query requires a non-empty `overlayExtends`."
+                outOfRange:
+                  summary: Too many overlayExtends
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`overlayExtends` must contain at most 20 entries."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the first query's first resource-scope
+          `phoneNumber` (docs/DESIGN.md §7), with the active-capabilities bitmap
+          derived from the queried context. Reserved error suffixes come from the
+          shared convention in errors.yaml.
+        cases:
+          - input: first query's first phoneNumber ending in a reserved suffix (e.g. …404)
+            result: the canonical CAMARA error for that status (…404 = no capability API found)
+          - input: "non-reserved (or absent) phoneNumber, valid overlayExtends"
+            result: "201 CapabilityInfo; camaraCapabilitiesBitmap = trailing three digits % 8 (or an overlay hash)"
+          - input: empty/absent `overlayExtends`, a non-URI overlay, or a non-E.164 phoneNumber
+            result: "400 INVALID_ARGUMENT"
+          - input: more than 20 `overlayExtends` in a query, or more than 100 `queries`
+            result: "400 OUT_OF_RANGE"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    PhoneNumber:
+      type: string
+      description: A phone number (MSISDN) in E.164 format (starting with `+`).
+      pattern: '^\+[1-9][0-9]{4,14}$'
+      example: "+123456789012"
+
+    ResourceScope:
+      type: object
+      description: |
+        One resource scope the query asks about. The upstream schema allows
+        several identifier kinds; CamaraSim reads `phoneNumber` (the error /
+        derivation plane) and ignores any other keys.
+      properties:
+        phoneNumber:
+          $ref: "#/components/schemas/PhoneNumber"
+      additionalProperties: true
+
+    CamaraCapabilityQuery:
+      type: object
+      description: A single capability query.
+      required:
+        - overlayExtends
+      properties:
+        resourceScopes:
+          type: array
+          description: The resource scopes (e.g. phone numbers) the query is about.
+          items:
+            $ref: "#/components/schemas/ResourceScope"
+        overlayExtends:
+          type: array
+          description: The API definitions this query extends. Non-empty.
+          minItems: 1
+          maxItems: 20
+          uniqueItems: true
+          items:
+            type: string
+            format: uri
+            example: "https://github.com/camaraproject/QualityOnDemand/blob/r2.2/code/API_definitions/quality-on-demand.yaml"
+      additionalProperties: true
+
+    CamaraCapabilityQueryRequest:
+      type: object
+      description: |
+        A list of capability queries. `subscriptionRequest` (a change-notification
+        registration) is accepted but not applied by CamaraSim (documented cut).
+      required:
+        - queries
+      properties:
+        queries:
+          type: array
+          description: The capability queries. At least one, at most 100.
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/CamaraCapabilityQuery"
+      additionalProperties: true
+
+    VersionedName:
+      type: object
+      description: A named, semantically-versioned object.
+      required:
+        - name
+        - version
+      properties:
+        name:
+          type: string
+          minLength: 3
+          maxLength: 256
+          pattern: '^[^;]*$'
+          example: cap1
+        version:
+          type: string
+          minLength: 1
+          example: "1.0.0"
+
+    CamaraOverlay:
+      type: object
+      description: |
+        An OpenAPI-Overlay-shaped runtime restriction: a set of `actions` over a
+        target document (`extends`). CamaraSim emits `remove` actions.
+      required:
+        - name
+        - version
+        - actions
+      properties:
+        name:
+          type: string
+          example: org.camaraproject.capability.v0.object-instance-restriction.rr-accepted-device-identifiers
+        version:
+          type: string
+          example: "0.0.1"
+        extends:
+          type: string
+          format: uri
+          description: The API definition the overlay restricts.
+        actions:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            type: object
+            properties:
+              target:
+                type: string
+                description: A JSONPath into the extended document.
+              remove:
+                type: boolean
+              update: {}
+            required:
+              - target
+
+    SchemaRestrictionsSet:
+      description: A named set of overlay restrictions.
+      allOf:
+        - $ref: "#/components/schemas/VersionedName"
+        - type: object
+          required:
+            - restrictions
+          properties:
+            restrictions:
+              type: array
+              minItems: 1
+              maxItems: 10
+              items:
+                $ref: "#/components/schemas/CamaraOverlay"
+
+    CapabilityBitmap:
+      description: |
+        The mapping version and the active/inactive bitmap for a capability set.
+        `camaraCapabilitiesBitmap` is a bitfield: bit `n` (0-based, from the
+        least-significant bit) maps to key `"n"` in `bitmapCapabilities`.
+      allOf:
+        - $ref: "#/components/schemas/CamaraCapabilityQuery"
+        - type: object
+          required:
+            - mappingVersion
+            - camaraCapabilitiesBitmap
+          properties:
+            mappingVersion:
+              type: string
+              example: "1.0.0"
+            camaraCapabilitiesBitmap:
+              type: integer
+              format: int64
+              minimum: 0
+              example: 5
+
+    CapabilitySetBitmap:
+      description: A capability set defined by a bitmap of runtime restriction sets.
+      allOf:
+        - $ref: "#/components/schemas/VersionedName"
+        - type: object
+          required:
+            - bitmapCapabilities
+          properties:
+            createdAt:
+              type: string
+              format: date-time
+            lastModifiedAt:
+              type: string
+              format: date-time
+            bitmapCapabilities:
+              type: object
+              description: Map of stringified bit position (`^[0-9]+$`) → restriction set.
+              additionalProperties:
+                $ref: "#/components/schemas/SchemaRestrictionsSet"
+
+    CapabilityDetail:
+      description: |
+        A capability set snapshot. CamaraSim always answers with the
+        `CapabilitySetBitmap` + `CapabilityBitmap` branch; the upstream
+        `CapabilitySetFootprint` branch is out of scope (documented cut).
+      allOf:
+        - $ref: "#/components/schemas/CapabilitySetBitmap"
+        - $ref: "#/components/schemas/CapabilityBitmap"
+
+    CapabilityInfo:
+      type: object
+      description: A list of capability details, one per query.
+      properties:
+        details:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/CapabilityDetail"
+
+    CapabilityError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Capabilities `code` set.
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - OUT_OF_RANGE
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - CONFLICT
+                - SERVICE_NOT_APPLICABLE
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

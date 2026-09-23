@@ -1,0 +1,465 @@
+# CamaraSim — Connectivity Insights, API version v0.6 (CAMARA 0.6.0).
+#
+# Vendored from the CAMARA Connectivity Insights API (connectivity-insights
+# 0.6.0, meta-release r3.2 — the latest published version) and annotated with
+# CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed
+# by `src/apis/connectivity_insights/v0_6.rs`; spec and code must not drift.
+#
+# Mounted under its real published name/version (mirroring the KYC Match v0.3 /
+# Device Identifier v0.3 / Connected Network Type v0.2 decisions — DESIGN §9).
+#
+# Serves only the stateless `POST /check-network-quality`. The Connectivity
+# Insights subproject's stateful companions (Application Profiles CRUD and the
+# `connectivity-insights-subscriptions` event API) are separate APIs, out of
+# scope for this contract.
+openapi: 3.0.3
+info:
+  title: Connectivity Insights
+  description: |
+    Answers whether the network can meet an application's quality requirements
+    for a given device and application server right now — a set of per-KPI
+    *policy fulfilment* verdicts (`meets` / `unable to meet the application
+    requirements`), never raw measurements or the device's location.
+
+    This is the CamaraSim reference double for CAMARA Connectivity Insights
+    0.6.0. The device can be identified either by the `device` object in the
+    request body (two-legged / CIBA) or by the identity a three-legged access
+    token authenticated (in which case `device` is omitted). The endpoint
+    requires the `connectivity-insights:check` scope.
+
+    ## Application profile & server (accepted, lightly validated)
+
+    `applicationProfileId` is **required** and must be a well-formed UUID, but
+    CamaraSim has no Application Profiles store, so it is not resolved against a
+    stored profile (a documented cut — the device identifier, not the profile's
+    thresholds, drives the answer). `applicationServer` is **required** and must
+    carry at least one of `ipv4Address` / `ipv6Address`. `applicationServerPorts`
+    (if present) must carry ports / ranges within `0..=65535`.
+    `monitoringTimeStamp` (if present) must look like an RFC 3339 instant.
+
+    ## Identifier resolution (two-legged vs three-legged)
+
+    The `device` object is only needed in two-legged auth; a three-legged token
+    identifies the device by its subject. Connectivity Insights 0.6.0 does
+    **not** define `UNNECESSARY_IDENTIFIER`, so a `device` submitted alongside a
+    line token is simply used (no 422 for resubmission):
+
+    - `device` carries an identifier → that identifier is used. Precedence:
+      `phoneNumber` → `networkAccessIdentifier` → the IPv4 `publicAddress` →
+      `ipv6Address`.
+    - `device` absent, subject is an E.164 line → the subject is the identifier
+      (three-legged).
+    - `device` absent **and** the subject is not a line → the device cannot be
+      identified → `422 MISSING_IDENTIFIER`.
+    - `device` present but carrying **no** identifier (`minProperties: 1`
+      violated) → `400 INVALID_ARGUMENT`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Once the identifier is resolved, the answer is deterministic from it:
+
+    - **Reserved error suffix** — if the identifier's trailing three digits name
+      a reserved CAMARA status, the endpoint answers with that canonical CAMARA
+      error instead of a result (shared convention — see the referenced
+      `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+      `…500`, `…503`.
+    - **Network-quality verdicts** — otherwise the identifier's trailing three
+      digits `d` drive every field. The low five bits of `d` (`d & 0x1F`) form an
+      *unmet mask*, one bit per KPI in the order `packetDelayBudget`,
+      `targetMinDownstreamRate`, `targetMinUpstreamRate`, `packetlossErrorRate`,
+      `jitter`: a set bit → that KPI is `unable to meet…`, a clear bit → `meets…`.
+      So `…000` (or no digits) → all five KPIs met (a healthy default); a tail
+      whose low bits are all set (e.g. `…031`) → all five unmet.
+
+    The `additionalKPIs` track how many KPIs are met (`met` = `5 −` the number of
+    set bits): `signalStrength` and `connectivityType` both degrade coherently
+    with `met` (5 → `excellent` / `5G-SA`, down to 0–1 → `no signal` / `3G`), so
+    the whole response is internally consistent and driven by the one input.
+
+    The response echoes the device back only when the identifier is a
+    `phoneNumber` (the CAMARA `DeviceResponse` carries only `phoneNumber`); for an
+    IP-/NAI-keyed request the `device` field is omitted.
+
+    Examples: `+123456789000` → all KPIs met, `excellent` / `5G-SA`;
+    `+123456789001` → `packetDelayBudget` unmet (four met), `good` / `5G-NSA`;
+    `+123456789031` → all five KPIs unmet, `no signal` / `3G`;
+    `+123456789404` → `404 NOT_FOUND`.
+  version: "0.6.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/connectivity-insights/v0.6"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /check-network-quality:
+    post:
+      operationId: checkNetworkQuality
+      summary: Check whether the network can meet the application's requirements
+      description: |
+        Returns per-KPI policy-fulfilment verdicts for a device/application
+        server against an application profile. Supply a `device`, or omit it to
+        use the device identified by a three-legged access token.
+
+        See the API description for the identifier-resolution rules and the
+        parameter-driven functional cases.
+      security:
+        - openId:
+            - connectivity-insights:check
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NetworkQualityInsightRequest"
+      responses:
+        "200":
+          description: The network-quality insight for the device.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkQualityInsightResponse"
+              examples:
+                healthy:
+                  summary: Healthy default (`…000`) — all KPIs met, device echoed
+                  value:
+                    packetDelayBudget: meets the application requirements
+                    targetMinDownstreamRate: meets the application requirements
+                    targetMinUpstreamRate: meets the application requirements
+                    packetlossErrorRate: meets the application requirements
+                    jitter: meets the application requirements
+                    additionalKPIs:
+                      signalStrength: excellent
+                      connectivityType: 5G-SA
+                    device:
+                      phoneNumber: "+123456789000"
+                degraded:
+                  summary: Tail `…001` — packetDelayBudget unmet (four met)
+                  value:
+                    packetDelayBudget: unable to meet the application requirements
+                    targetMinDownstreamRate: meets the application requirements
+                    targetMinUpstreamRate: meets the application requirements
+                    packetlossErrorRate: meets the application requirements
+                    jitter: meets the application requirements
+                    additionalKPIs:
+                      signalStrength: good
+                      connectivityType: 5G-NSA
+                    device:
+                      phoneNumber: "+123456789001"
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            missing/malformed `applicationProfileId` (must be a UUID), a missing
+            `applicationServer` (or one with no address), an empty `device`, a
+            malformed `phoneNumber` / `monitoringTimeStamp`, or an unknown field;
+            and `OUT_OF_RANGE` for a port / port-range outside `0..=65535` (or a
+            range with `from > to`).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                invalidArgument:
+                  summary: Missing / malformed required field
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`applicationProfileId` must be a UUID."
+                outOfRange:
+                  summary: Port outside 0..=65535
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: A port must be within 0..=65535.
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            device cannot be identified (no `device` and a non-line subject), or
+            the reserved shared `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                missingIdentifier:
+                  summary: The device cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The device cannot be identified.
+                serviceNotApplicable:
+                  summary: Reserved `…422` suffix
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The network-quality verdicts are selected from the identifier (the
+          first present device identifier, else the access token subject) whose
+          trailing three digits drive every field (docs/DESIGN.md §7). Reserved
+          error suffixes come from the shared convention in errors.yaml. Note:
+          canonical Connectivity Insights 0.6.0 declares
+          400/401/403/404/422/429; CamaraSim exposes the full shared error set so
+          every reserved case is reachable (409/500/503 are CamaraSim
+          extensions). CamaraSim does not model the API-specific 404
+          IDENTIFIER_NOT_FOUND / 422 SERVICE_NOT_APPLICABLE / 429 QUOTA_EXCEEDED
+          sub-codes beyond the shared reserved-suffix convention, does not define
+          UNNECESSARY_IDENTIFIER (a device on a line token is simply used), and
+          does not resolve `applicationProfileId` against a profile store.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier ending in …000 (or no trailing digits)"
+            result: "200 — all five KPIs meet; additionalKPIs excellent / 5G-SA"
+          - input: "identifier whose low five bits set KPI slots (e.g. …001)"
+            result: "200 — those KPIs unable to meet; additionalKPIs degrade with the count met"
+          - input: "identifier with all low five bits set (e.g. …031)"
+            result: "200 — all five KPIs unable to meet; no signal / 3G"
+          - input: phoneNumber-keyed request
+            result: "200 with the device echoed (`device.phoneNumber`)"
+          - input: IP-/NAI-keyed request
+            result: "200 with no `device` field"
+          - input: "missing/malformed applicationProfileId or applicationServer"
+            result: "400 INVALID_ARGUMENT"
+          - input: "port / range outside 0..=65535 (or from > to)"
+            result: "400 OUT_OF_RANGE"
+          - input: "`device` present but carrying no identifier"
+            result: "400 INVALID_ARGUMENT"
+          - input: no `device` and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    NetworkQualityInsightRequest:
+      type: object
+      description: Request a network-quality insight for a device / application server.
+      required:
+        - applicationProfileId
+        - applicationServer
+      properties:
+        applicationProfileId:
+          type: string
+          format: uuid
+          description: >-
+            The application profile whose requirements to check against. Required
+            and validated as a UUID; CamaraSim does not resolve it against a
+            stored profile (no Application Profiles store).
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        device:
+          $ref: "#/components/schemas/Device"
+        applicationServer:
+          $ref: "#/components/schemas/ApplicationServer"
+        applicationServerPorts:
+          $ref: "#/components/schemas/PortsSpec"
+        monitoringTimeStamp:
+          type: string
+          format: date-time
+          description: >-
+            Optional instant to evaluate at (RFC 3339). Accepted and lightly
+            validated; the simulator always treats status as fresh.
+          example: "2024-01-01T14:27:08Z"
+
+    Device:
+      type: object
+      description: >-
+        Identifies the device. At least one identifier must be present. Optional
+        at the request level: omit `device` to use the device identified by a
+        three-legged access token. CamaraSim keys its functional cases off the
+        first present identifier, in the order phoneNumber →
+        networkAccessIdentifier → ipv4Address.publicAddress → ipv6Address.
+      minProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789000"
+        networkAccessIdentifier:
+          type: string
+          description: A network access identifier assigned by the operator.
+          example: "user012@example.com"
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          description: The device's IPv6 address.
+          example: "2001:db8::11"
+
+    DeviceIpv4Addr:
+      type: object
+      description: >-
+        The device's IPv4 address information. CamaraSim reads `publicAddress` as
+        the identifier; `privateAddress`/`publicPort` are accepted for fidelity.
+      properties:
+        publicAddress:
+          type: string
+          example: "203.0.113.12"
+        privateAddress:
+          type: string
+          example: "192.0.2.25"
+        publicPort:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          example: 59765
+
+    ApplicationServer:
+      type: object
+      description: >-
+        The server the application traffic flows to (CIDR notation). At least one
+        of `ipv4Address` / `ipv6Address` must be present.
+      minProperties: 1
+      properties:
+        ipv4Address:
+          type: string
+          example: "198.51.100.1/24"
+        ipv6Address:
+          type: string
+          example: "2001:db8:85a3:8d3:1319:8a2e:370:7344"
+
+    PortsSpec:
+      type: object
+      description: >-
+        Individual ports and/or port ranges the application uses. At least one of
+        `ports` / `ranges` must be present; every port lies within `0..=65535`.
+      minProperties: 1
+      properties:
+        ports:
+          type: array
+          minItems: 1
+          items:
+            type: integer
+            minimum: 0
+            maximum: 65535
+          example: [443]
+        ranges:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/PortRange"
+
+    PortRange:
+      type: object
+      required:
+        - from
+        - to
+      properties:
+        from:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          example: 1000
+        to:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          example: 2000
+
+    DeviceResponse:
+      type: object
+      description: >-
+        The device echoed back on the response. Present only for a
+        phone-number-keyed request (this schema carries only `phoneNumber`).
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789000"
+
+    PolicyFulfilmentConfidence:
+      type: string
+      description: Whether the network can meet a given KPI for the application.
+      enum:
+        - meets the application requirements
+        - unable to meet the application requirements
+      example: meets the application requirements
+
+    NetworkQualityInsightResponse:
+      type: object
+      description: The per-KPI policy-fulfilment verdicts for the device.
+      required:
+        - packetDelayBudget
+        - targetMinDownstreamRate
+        - targetMinUpstreamRate
+        - packetlossErrorRate
+        - jitter
+      properties:
+        packetDelayBudget:
+          $ref: "#/components/schemas/PolicyFulfilmentConfidence"
+        targetMinDownstreamRate:
+          $ref: "#/components/schemas/PolicyFulfilmentConfidence"
+        targetMinUpstreamRate:
+          $ref: "#/components/schemas/PolicyFulfilmentConfidence"
+        packetlossErrorRate:
+          $ref: "#/components/schemas/PolicyFulfilmentConfidence"
+        jitter:
+          $ref: "#/components/schemas/PolicyFulfilmentConfidence"
+        additionalKPIs:
+          $ref: "#/components/schemas/AdditionalKpis"
+        device:
+          $ref: "#/components/schemas/DeviceResponse"
+
+    AdditionalKpis:
+      type: object
+      description: Coarse additional indicators, degrading with the number of KPIs met.
+      properties:
+        signalStrength:
+          type: string
+          enum: [excellent, good, fair, poor, no signal]
+          example: excellent
+        connectivityType:
+          type: string
+          enum: [5G-SA, 5G-NSA, 4G, 3G]
+          example: 5G-SA

@@ -1,0 +1,405 @@
+# CamaraSim — KYC Age Verification, API version v0.1 (CAMARA 0.1.0, r2.2).
+#
+# Vendored from the CAMARA KYC Age Verification API (release r2.2 →
+# kyc-age-verification 0.1.0, the latest published version — so mounted at its
+# real sub-1.0 base path `/v0.1`, like KYC Match / Number Recycling / Call
+# Forwarding Signal) and annotated with CamaraSim's parameter-driven functional
+# cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/kyc_age_verification/v0_1.rs`; spec and code must not drift.
+#
+# Serves `POST /verify`.
+openapi: 3.0.3
+info:
+  title: KYC Age Verification
+  description: |
+    Service that answers whether the person behind a phone number is **at or
+    above a caller-supplied age threshold** — a privacy-preserving alternative to
+    disclosing a birthdate. A service that must gate a minor (age-restricted
+    goods, adult content, a signup floor) asks "is this line's holder ≥ N?" and
+    receives only a `true` / `false` / `not_available` verdict, never the actual
+    age.
+
+    This is the CamaraSim reference double for CAMARA KYC Age Verification 0.1.0.
+    The `/verify` endpoint requires the `kyc-age-verification:verify` scope.
+
+    ## Identifier resolution — two-legged vs three-legged
+
+    Faithful to CAMARA, the `phoneNumber` in the request body is valid *only* in
+    two-legged auth. In a three-legged token the line is already identified by
+    the token **subject** (`sub`), so the number must not be resubmitted:
+
+    - `phoneNumber` present **and** the token subject is itself an E.164 number
+      (a line-authenticated three-legged token) → `422 UNNECESSARY_IDENTIFIER`.
+    - `phoneNumber` present, subject not a line → the submitted number is the
+      identifier (two-legged).
+    - `phoneNumber` absent, subject is an E.164 number → the subject is the
+      identifier (three-legged).
+    - `phoneNumber` absent **and** the subject is not a line → the line cannot be
+      identified → `422 MISSING_IDENTIFIER`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    - **`ageThreshold` range.** Outside `0..=120` → `400 OUT_OF_RANGE`.
+    - **Reserved error suffix (identifier).** If the resolved identifier's
+      trailing three digits name a reserved CAMARA status, the endpoint answers
+      with that canonical CAMARA error (shared convention — see the referenced
+      `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+      `…500`, `…503`.
+    - **Age verdict (identifier digits × `ageThreshold`).** Otherwise the
+      identifier's trailing three digits `d` encode the holder's **held age** as
+      `d % 100` (0–99 years). `ageCheck` is `"true"` iff that age is at or above
+      the requested `ageThreshold`, else `"false"`. This makes `ageThreshold` a
+      genuine second control plane: the **same** number reads `"true"` against a
+      low threshold and `"false"` against a high one. A `…000` tail (the operator
+      holds no birthdate for the line) → `"not_available"`.
+    - **Identity attributes (optional response fields).**
+      - `identityMatchScore` (fixed `90`) is returned when any identity attribute
+        (`idDocument`/`name`/`givenName`/`familyName`/`middleNames`/
+        `familyNameAtBirth`/`birthdate`/`email`) is supplied — the caller gave
+        something to match against. CamaraSim has no real identity backend, so
+        the score is fixed (a documented simplification, mirroring KYC Match).
+      - `verifiedStatus: true` is returned when an `idDocument` is supplied (the
+        answer was checked against an official document).
+      - `contentLock` is returned only when `includeContentLock: true`, and
+        `parentalControl` only when `includeParentalControl: true`. Each is
+        `"true"` when the held age is a minor (`< 18`), `"false"` for an adult,
+        and `"not_available"` when the age is unknown (`…000`).
+
+    Example: `+123456789025` (held age 25) with `ageThreshold: 18` → `"true"`;
+    the same number with `ageThreshold: 30` → `"false"`; `+123456789404` →
+    `404 NOT_FOUND`; `+123456789000` → `"not_available"`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical KYC Age Verification 0.1.0 declares a subset
+    (400/401/403/404/422/429).
+  version: "0.1.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/kyc-age-verification/v0.1"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /verify:
+    post:
+      operationId: verifyAge
+      summary: Verify whether the holder is at or above an age threshold
+      description: |
+        Answers whether the person behind the phone number is at or above the
+        supplied `ageThreshold` (`{ "ageCheck": "true" | "false" |
+        "not_available" }`), without disclosing the actual age.
+
+        The line is identified by the submitted `phoneNumber` (two-legged) or by
+        the access-token subject (three-legged) — see the API description for the
+        identifier-resolution rules and the parameter-driven functional cases
+        (the trailing three digits encode the held age as `d % 100`, compared
+        against `ageThreshold`). Optional identity attributes drive the extra
+        `identityMatchScore` / `verifiedStatus` fields, and the `include*`
+        toggles opt into the `contentLock` / `parentalControl` signals.
+      security:
+        - openId:
+            - kyc-age-verification:verify
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgeVerificationRequest"
+      responses:
+        "200":
+          description: The age-verification verdict for the line.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgeVerificationResponse"
+              examples:
+                aboveThreshold:
+                  summary: Holder at or above the threshold
+                  value:
+                    ageCheck: "true"
+                belowThreshold:
+                  summary: Holder below the threshold
+                  value:
+                    ageCheck: "false"
+                notAvailable:
+                  summary: No age on record for the line
+                  value:
+                    ageCheck: "not_available"
+                withIdentityAndLocks:
+                  summary: Identity attributes + opt-in signals (minor)
+                  value:
+                    ageCheck: "false"
+                    identityMatchScore: 90
+                    verifiedStatus: true
+                    contentLock: "true"
+                    parentalControl: "true"
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body or phone number, and `OUT_OF_RANGE` when
+            `ageThreshold` is outside `0..=120`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgeVerificationError"
+              examples:
+                invalidArgument:
+                  summary: Malformed body or phone number
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`phoneNumber` must be in E.164 format (e.g. +123456789)."
+                outOfRange:
+                  summary: ageThreshold outside 0..=120
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`ageThreshold` must be between 0 and 120."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            line cannot be identified (no `phoneNumber` and a non-line subject),
+            `UNNECESSARY_IDENTIFIER` when a `phoneNumber` is submitted on a
+            three-legged line token, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgeVerificationError"
+              examples:
+                missingIdentifier:
+                  summary: The line cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The phone number cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The number is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The phone number is already identified by the access token.
+                serviceNotApplicable:
+                  summary: Reserved `…422` suffix
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved line identifier and `ageThreshold`
+          (docs/DESIGN.md §7). The identifier's trailing three digits encode the
+          held age as `d % 100`; `ageCheck` is `"true"` iff that age is ≥
+          `ageThreshold`, `"not_available"` for a `…000` tail. Reserved error
+          suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier whose held age (d % 100) >= ageThreshold"
+            result: '200 { ageCheck: "true" }'
+          - input: "identifier whose held age (d % 100) < ageThreshold"
+            result: '200 { ageCheck: "false" }'
+          - input: same number, a low ageThreshold vs a high one
+            result: ageCheck flips true → false (ageThreshold is a control plane)
+          - input: "identifier ending in …000 (no age on record)"
+            result: '200 { ageCheck: "not_available" }'
+          - input: any identity attribute supplied (name, birthdate, idDocument, …)
+            result: response adds identityMatchScore = 90
+          - input: idDocument supplied
+            result: "response adds verifiedStatus = true"
+          - input: "includeContentLock / includeParentalControl = true"
+            result: >-
+              response adds contentLock / parentalControl ("true" for a minor,
+              "false" for an adult, "not_available" when age is unknown)
+          - input: no phoneNumber, an E.164 token subject (three-legged)
+            result: same cases, driven by the subject's trailing three digits
+          - input: phoneNumber submitted on a three-legged line token
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no phoneNumber and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: ageThreshold outside 0..=120
+            result: "400 OUT_OF_RANGE"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    AgeVerificationRequest:
+      type: object
+      description: |
+        Request to verify whether a line's holder is at or above `ageThreshold`.
+        The `phoneNumber` is valued only in two-legged authentication; supplying
+        it with a three-legged (line) token yields `422 UNNECESSARY_IDENTIFIER`.
+        The optional identity attributes drive `identityMatchScore` /
+        `verifiedStatus`, and the `include*` flags opt into the `contentLock` /
+        `parentalControl` signals.
+      required:
+        - ageThreshold
+      properties:
+        ageThreshold:
+          type: integer
+          minimum: 0
+          maximum: 120
+          description: The age to be verified (the holder is checked as ≥ this value).
+          example: 18
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789025"
+        idDocument:
+          type: string
+          description: >-
+            An official identity-document identifier. When supplied, the response
+            reports `verifiedStatus`.
+        name:
+          type: string
+          description: The full name to match against operator records.
+        givenName:
+          type: string
+        familyName:
+          type: string
+        middleNames:
+          type: string
+        familyNameAtBirth:
+          type: string
+        birthdate:
+          type: string
+          format: date
+          description: The holder's date of birth (`YYYY-MM-DD`).
+        email:
+          type: string
+          format: email
+          example: holder@example.com
+        includeContentLock:
+          type: boolean
+          default: false
+          description: >-
+            When `true`, the response includes the `contentLock` signal
+            (`"true"` for a minor).
+        includeParentalControl:
+          type: boolean
+          default: false
+          description: >-
+            When `true`, the response includes the `parentalControl` signal
+            (`"true"` for a minor).
+
+    AgeVerificationResponse:
+      type: object
+      description: The age-verification verdict for the line.
+      required:
+        - ageCheck
+      properties:
+        ageCheck:
+          type: string
+          description: >-
+            Whether the holder is at or above the requested `ageThreshold`.
+          enum:
+            - "true"
+            - "false"
+            - "not_available"
+        verifiedStatus:
+          type: boolean
+          description: >-
+            `true` when the provided information was checked against an official
+            identity document (returned only when `idDocument` was supplied).
+        identityMatchScore:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: >-
+            A confidence score for the identity match (returned only when at
+            least one identity attribute was supplied). CamaraSim reports a fixed
+            `90` — a documented simplification.
+        contentLock:
+          type: string
+          description: >-
+            Whether adult content should be locked for the holder (returned only
+            when `includeContentLock: true`).
+          enum:
+            - "true"
+            - "false"
+            - "not_available"
+        parentalControl:
+          type: string
+          description: >-
+            Whether parental controls apply to the holder (returned only when
+            `includeParentalControl: true`).
+          enum:
+            - "true"
+            - "false"
+            - "not_available"
+
+    AgeVerificationError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the KYC Age Verification `code` set (adds `OUT_OF_RANGE` and the 422
+        identifier codes).
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - OUT_OF_RANGE
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - IDENTIFIER_NOT_FOUND
+                - MISSING_IDENTIFIER
+                - UNNECESSARY_IDENTIFIER
+                - SERVICE_NOT_APPLICABLE
+                - CONFLICT
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

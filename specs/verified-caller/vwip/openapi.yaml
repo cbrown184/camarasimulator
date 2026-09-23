@@ -1,0 +1,312 @@
+# CamaraSim — Verified Caller, API version vwip (CAMARA Verified Caller, wip).
+#
+# Vendored from the CAMARA Verified Caller API (work-in-progress — no released
+# version yet, so mounted at its canonical `vwip` base path, like Device Data
+# Volume / Media Streaming Rate / Optimal Edge Discovery) and annotated with
+# CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed
+# by `src/apis/verified_caller/vwip.rs`; spec and code must not drift.
+#
+# Serves `POST /pre-announce`.
+openapi: 3.0.3
+info:
+  title: Verified Caller
+  description: |
+    Service that lets a calling party (typically a business / call-centre)
+    **pre-announce** an outbound call to the network so it can prove the call's
+    authenticity to the called party — via an out-of-band SMS or a branded caller
+    display — before the phone rings. It is an anti-scam / caller-trust signal:
+    the recipient sees a verified brand instead of an unknown or spoofable
+    number, defeating impersonation ("APP") fraud.
+
+    This is the CamaraSim reference double for CAMARA Verified Caller (`wip`). The
+    `/pre-announce` endpoint requires the `verified-caller:create` scope.
+
+    ## Two-legged, business-facing
+
+    Both the `callingParticipant` (the business placing the call) and the
+    `calledParticipant` (the consumer being called) are carried in the request
+    body. There is no line **subject** to fall back to, so — unlike the
+    phone-number-keyed anti-fraud APIs — this API has no two-legged/three-legged
+    identifier resolution: the two participants are always supplied explicitly.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    The `calledParticipant` (the consumer whose call is being announced) is the
+    identifier, and two body fields shape a happy-path response:
+
+    - **Reserved error suffix (identifier).** If the `calledParticipant`'s
+      trailing three digits name a reserved CAMARA status, the endpoint answers
+      with that canonical CAMARA error (shared convention — see the referenced
+      `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+      `…500`, `…503`. The `…404` case is Verified Caller's participant-not-found.
+    - **Response shape (`strategy`).** Otherwise the `strategy` selects how the
+      platform acknowledges the pre-announcement. `BRAND_DISPLAY` needs a
+      client-side handle to correlate the branded display, so it returns
+      `201 { preAnnouncementId, expiresAt }`; `SMS` (the default when `strategy`
+      is omitted) is a fire-and-forget out-of-band message, so it returns
+      `204 No Content`. `strategy` is thus a genuine control plane over the
+      response.
+    - **Validity window (`timeToLive`).** On the `201` path, `expiresAt` is
+      *now + timeToLive* (RFC 3339 UTC), so `timeToLive` (default `120` s when
+      omitted) is a second happy-path control plane. `preAnnouncementId` is a
+      deterministic, UUID-shaped token derived from the two participants and the
+      strategy.
+
+    Validation: a malformed body, a participant not in E.164 form, an unknown
+    `strategy`, or an over-length `registrationId`/`dynamicDisplayName`/
+    `callReason` → `400 INVALID_ARGUMENT`; a `timeToLive` outside `1..=86400` →
+    `400 OUT_OF_RANGE`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical Verified Caller declares a subset
+    (400/401/403/404/409/422/429).
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/verified-caller/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /pre-announce:
+    post:
+      operationId: createPreAnnouncement
+      summary: Create a call pre-announcement in the service platform
+      description: |
+        Pre-announces an outbound call from `callingParticipant` to
+        `calledParticipant` so the platform can verify the calling party to the
+        called party. Returns `201 { preAnnouncementId, expiresAt }` when the
+        chosen `strategy` needs a client-side handle (`BRAND_DISPLAY`) or
+        `204 No Content` for a fire-and-forget acknowledgement (`SMS`, the
+        default) — see the API description for the parameter-driven functional
+        cases (`strategy` selects the response shape, `timeToLive` sets
+        `expiresAt`, and a reserved suffix on `calledParticipant` selects a
+        canonical error).
+      security:
+        - openId:
+            - verified-caller:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePreAnnouncementRequest"
+      responses:
+        "201":
+          description: |
+            The pre-announcement was created and the platform returns a handle
+            for it (`BRAND_DISPLAY` strategy).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnnouncementInfo"
+              examples:
+                created:
+                  summary: Branded-display pre-announcement with a handle
+                  value:
+                    preAnnouncementId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    expiresAt: "2024-01-01T14:29:08Z"
+        "204":
+          description: |
+            The pre-announcement was created and acknowledged with no content
+            (`SMS` strategy, the default). CamaraSim still echoes `x-correlator`.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body, a participant not in E.164 form, an unknown
+            `strategy`, or an over-length `registrationId`/`dynamicDisplayName`/
+            `callReason`, and `OUT_OF_RANGE` when `timeToLive` is outside
+            `1..=86400`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerifiedCallerError"
+              examples:
+                invalidArgument:
+                  summary: Malformed body or participant
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`calledParticipant` must be in E.164 format (e.g. +123456789)."
+                outOfRange:
+                  summary: timeToLive out of range
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`timeToLive` must be between 1 and 86400 seconds."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `calledParticipant` identifier, the
+          `strategy`, and `timeToLive` (docs/DESIGN.md §7). A reserved trailing
+          suffix on `calledParticipant` selects a canonical CAMARA error;
+          otherwise `strategy` selects the response shape and `timeToLive` sets
+          `expiresAt`. Reserved error suffixes come from the shared convention in
+          errors.yaml.
+        cases:
+          - input: calledParticipant ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status (…404 = participant not found)
+          - input: "strategy BRAND_DISPLAY, non-reserved calledParticipant"
+            result: "201 { preAnnouncementId, expiresAt = now + timeToLive }"
+          - input: "strategy SMS (or omitted), non-reserved calledParticipant"
+            result: "204 No Content"
+          - input: "BRAND_DISPLAY with a larger timeToLive"
+            result: expiresAt pushed further out (timeToLive is a control plane)
+          - input: missing/malformed callingParticipant or calledParticipant, or unknown strategy
+            result: "400 INVALID_ARGUMENT"
+          - input: timeToLive outside 1..=86400
+            result: "400 OUT_OF_RANGE"
+          - input: over-length registrationId / dynamicDisplayName / callReason
+            result: "400 INVALID_ARGUMENT"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    PhoneNumber:
+      type: string
+      description: A phone number in E.164 format (starting with `+`).
+      pattern: '^\+[1-9][0-9]{4,14}$'
+      example: "+123456789012"
+
+    CreatePreAnnouncementRequest:
+      type: object
+      description: |
+        Request to pre-announce an outbound call. Both participants are required
+        and carried explicitly (two-legged, business-facing — there is no line
+        subject). `strategy` selects the response shape and `timeToLive` sets the
+        validity window of the returned handle.
+      required:
+        - callingParticipant
+        - calledParticipant
+      properties:
+        callingParticipant:
+          $ref: "#/components/schemas/PhoneNumber"
+        calledParticipant:
+          $ref: "#/components/schemas/PhoneNumber"
+        strategy:
+          type: string
+          description: >-
+            The method used to verify the authenticity of the calling party.
+            `BRAND_DISPLAY` returns a handle (`201`); `SMS` (the default) is
+            fire-and-forget (`204`).
+          enum:
+            - SMS
+            - BRAND_DISPLAY
+          maxLength: 32
+          example: BRAND_DISPLAY
+        timeToLive:
+          type: integer
+          description: >-
+            How long the pre-announcement is valid, in seconds. Sets `expiresAt`
+            = now + timeToLive on the `201` path. Defaults to 120 (a CamaraSim
+            choice; the schema sets only the bounds).
+          minimum: 1
+          maximum: 86400
+          example: 120
+        registrationId:
+          type: string
+          description: An optional pre-registered brand/campaign identifier.
+          format: uuid
+          maxLength: 256
+        dynamicDisplayName:
+          type: string
+          description: An optional display name to show to the called party.
+          maxLength: 32
+        callReason:
+          type: string
+          description: An optional short reason for the call.
+          maxLength: 32
+
+    AnnouncementInfo:
+      type: object
+      description: A handle for the created pre-announcement (`BRAND_DISPLAY`).
+      required:
+        - preAnnouncementId
+        - expiresAt
+      properties:
+        preAnnouncementId:
+          type: string
+          description: >-
+            Opaque, UUID-shaped identifier of the pre-announcement. Deterministic
+            in CamaraSim (derived from the participants and strategy).
+          format: uuid
+          maxLength: 256
+        expiresAt:
+          type: string
+          format: date-time
+          description: >-
+            When the pre-announcement stops being valid (RFC 3339 UTC), i.e.
+            now + `timeToLive`.
+
+    VerifiedCallerError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Verified Caller `code` set (adds `OUT_OF_RANGE`).
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - OUT_OF_RANGE
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - IDENTIFIER_NOT_FOUND
+                - SERVICE_NOT_APPLICABLE
+                - CONFLICT
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

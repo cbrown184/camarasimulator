@@ -1,0 +1,276 @@
+//! In-memory Quality-on-Demand **session store** shared by the QoD endpoints
+//! (docs/DESIGN.md §5 — "in-memory stores").
+//!
+//! Quality on Demand is a **stateful, resource-oriented** API: `POST /sessions`
+//! creates a QoS session and mints a `sessionId`, and later requests
+//! (`GET /sessions/{sessionId}`, and — in later passes — `DELETE` / `extend`)
+//! address that resource by its id. This module is the state that bridges those
+//! requests.
+//!
+//! ## Simulator constraints
+//!
+//! - **In-memory, single node** (docs/DESIGN.md §4): a process-global map guarded
+//!   by a `std::sync::Mutex`. The lock is held only for `HashMap` reads/writes —
+//!   never across an `.await` — so it does not block the async runtime (mirrors
+//!   [`crate::apis::one_time_password_sms::store`]).
+//! - **Opaque ids**: [`new_session_id`] mints a UUID-shaped `sessionId` (CAMARA
+//!   `SessionInfo.sessionId` is `format: uuid`) from a monotonic counter and the
+//!   clock, so ids are unique without a `uuid`/`rand` dependency.
+//! - The stored value is the session's rendered `SessionInfo` JSON, returned
+//!   verbatim by `GET` — the created representation is the source of truth for
+//!   this slice (time-based `qosStatus` transitions arrive with DELETE /
+//!   notifications).
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+/// The process-global session store: `sessionId` → rendered `SessionInfo`.
+/// In-memory only (single node, per DESIGN §4).
+fn store() -> &'static Mutex<HashMap<String, Value>> {
+    static STORE: OnceLock<Mutex<HashMap<String, Value>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The process-global **sink-credential** side-store: `sessionId` → the derived
+/// `Authorization` header value (e.g. `"Bearer <token>"`) for that session's
+/// notification callbacks. Kept apart from the `SessionInfo` map so the secret is
+/// never returned by `GET`/`retrieve-sessions` (those clone the `SessionInfo`
+/// only). In-memory only (single node, per DESIGN §4).
+fn credentials() -> &'static Mutex<HashMap<String, String>> {
+    static CREDS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    CREDS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Store `session` (its rendered `SessionInfo` JSON) under `id`.
+pub fn insert(id: String, session: Value) {
+    store()
+        .lock()
+        .expect("qod session store not poisoned")
+        .insert(id, session);
+}
+
+/// Remember the derived `Authorization` header (`auth`) for `id`'s notification
+/// callbacks. Only called when the session recorded both a `sink` and a usable
+/// `sinkCredential`; the secret lives here (in memory) and never in `SessionInfo`.
+pub fn insert_credential(id: String, auth: String) {
+    credentials()
+        .lock()
+        .expect("qod credential store not poisoned")
+        .insert(id, auth);
+}
+
+/// Remove and return the stored `Authorization` header for `id`, if any. Callers
+/// fetch it at delivery time (the session is being evicted), so the secret is
+/// dropped from memory as the session ends.
+pub fn take_credential(id: &str) -> Option<String> {
+    credentials()
+        .lock()
+        .expect("qod credential store not poisoned")
+        .remove(id)
+}
+
+/// Fetch the `SessionInfo` stored under `id`, or `None` if no such session
+/// exists (never created, or created in a different process).
+pub fn get(id: &str) -> Option<Value> {
+    store()
+        .lock()
+        .expect("qod session store not poisoned")
+        .get(id)
+        .cloned()
+}
+
+/// Remove the session stored under `id`, returning its `SessionInfo` if one was
+/// present, or `None` if no such session existed. `deleteSession` uses the
+/// distinction to answer `204` (a session was deleted) vs `404` (unknown id).
+pub fn remove(id: &str) -> Option<Value> {
+    store()
+        .lock()
+        .expect("qod session store not poisoned")
+        .remove(id)
+}
+
+/// Return a snapshot of every stored `SessionInfo` whose echoed `device` equals
+/// `device`. `retrieveSessionsByDevice` uses this to list a device's active
+/// sessions. The lock is held only for the scan + clone (never across an
+/// `.await`), and the returned `Vec` is an independent copy.
+pub fn find_by_device(device: &Value) -> Vec<Value> {
+    store()
+        .lock()
+        .expect("qod session store not poisoned")
+        .values()
+        .filter(|info| info.get("device") == Some(device))
+        .cloned()
+        .collect()
+}
+
+/// Atomically update the session stored under `id`: apply `f` to a mutable
+/// reference to its `SessionInfo`, then return the updated value — or `None` if
+/// no such session exists. `extendQosSession` uses this to bump a session's
+/// `duration`/`expiresAt` in place. The lock is held only for the map access and
+/// the pure closure (never across an `.await`), so read-then-write can't race
+/// against a concurrent delete.
+pub fn update<F: FnOnce(&mut Value)>(id: &str, f: F) -> Option<Value> {
+    let mut guard = store().lock().expect("qod session store not poisoned");
+    let info = guard.get_mut(id)?;
+    f(info);
+    Some(info.clone())
+}
+
+/// Mint a fresh, opaque, UUID-shaped `sessionId`. See [`mint_uuid`] for the shape.
+pub fn new_session_id() -> String {
+    mint_uuid()
+}
+
+/// Mint a fresh, opaque, UUID-shaped **CloudEvent id** for a notification. CAMARA
+/// requires `CloudEvent.id` to be unique in the source context; a UUID-shaped
+/// value satisfies that. Shares [`mint_uuid`]'s minting (and thus its monotonic
+/// counter) with `new_session_id`, so ids never collide across either use.
+pub fn new_event_id() -> String {
+    mint_uuid()
+}
+
+/// Mint a fresh, opaque, UUID-v4-shaped identifier.
+///
+/// The 16 bytes come from `SHA-256(counter ‖ now)` — the monotonic counter alone
+/// guarantees uniqueness — with the RFC 4122 version (4) and variant (`10`) bits
+/// set so it is a well-formed v4-shaped UUID, matching CAMARA's `format: uuid`.
+/// No `uuid`/`rand` dependency.
+fn mint_uuid() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut hasher = Sha256::new();
+    hasher.update(n.to_be_bytes());
+    hasher.update(unix_now().to_be_bytes());
+    let d = hasher.finalize();
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&d[..16]);
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant 10xx
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+    )
+}
+
+/// Current Unix time in seconds (server runtime clock; not on any hot loop).
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn session_ids_are_unique_and_uuid_v4_shaped() {
+        let a = new_session_id();
+        let b = new_session_id();
+        assert_ne!(a, b, "each session id must be unique");
+        // 8-4-4-4-12 lowercase hex.
+        let parts: Vec<&str> = a.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12]
+        );
+        assert!(a.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-'));
+        // Version nibble is 4; variant nibble is one of 8/9/a/b.
+        assert_eq!(parts[2].as_bytes()[0], b'4', "version 4");
+        assert!(matches!(parts[3].as_bytes()[0], b'8' | b'9' | b'a' | b'b'));
+    }
+
+    #[test]
+    fn event_ids_are_unique_uuid_shaped_and_distinct_from_session_ids() {
+        let e1 = new_event_id();
+        let e2 = new_event_id();
+        assert_ne!(e1, e2, "each event id must be unique");
+        // Shares the counter with session ids, so the two never collide.
+        assert_ne!(e1, new_session_id());
+        let parts: Vec<&str> = e1.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12]
+        );
+        assert_eq!(parts[2].as_bytes()[0], b'4', "version 4");
+        assert!(matches!(parts[3].as_bytes()[0], b'8' | b'9' | b'a' | b'b'));
+    }
+
+    #[test]
+    fn stored_session_can_be_read_back_and_unknown_is_none() {
+        let id = new_session_id();
+        assert!(get(&id).is_none(), "not stored yet");
+        let info = json!({ "sessionId": id, "qosStatus": "AVAILABLE" });
+        insert(id.clone(), info.clone());
+        assert_eq!(get(&id), Some(info));
+        assert!(get("no-such-session").is_none());
+    }
+
+    #[test]
+    fn update_mutates_in_place_and_unknown_is_none() {
+        let id = new_session_id();
+        // No session yet → the closure never runs and update is None.
+        assert!(update(&id, |_| panic!("must not run")).is_none());
+        insert(id.clone(), json!({ "sessionId": id, "duration": 60 }));
+        // Applying the closure bumps the stored value and returns the new one…
+        let updated = update(&id, |info| {
+            info["duration"] = json!(120);
+        });
+        assert_eq!(updated.unwrap()["duration"], 120);
+        // …and the mutation persists for a later read.
+        assert_eq!(get(&id).unwrap()["duration"], 120);
+    }
+
+    #[test]
+    fn find_by_device_matches_only_sessions_with_that_device_echo() {
+        // Two devices, uniquely keyed so this shares the process-global store
+        // with nothing else. A session carrying `device` A is found only when
+        // querying A; a session with no `device` echo is never matched.
+        let dev_a = json!({ "phoneNumber": "+15550000001" });
+        let dev_b = json!({ "networkAccessIdentifier": "store-unit-nai-b" });
+        let id_a = new_session_id();
+        let id_b = new_session_id();
+        let id_none = new_session_id();
+        insert(id_a.clone(), json!({ "sessionId": id_a, "device": dev_a }));
+        insert(id_b.clone(), json!({ "sessionId": id_b, "device": dev_b }));
+        insert(id_none.clone(), json!({ "sessionId": id_none })); // no device
+
+        let found = find_by_device(&json!({ "phoneNumber": "+15550000001" }));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0]["sessionId"], json!(id_a));
+        // A device nobody stored → empty.
+        assert!(find_by_device(&json!({ "phoneNumber": "+15550000099" })).is_empty());
+    }
+
+    #[test]
+    fn credential_is_stored_and_taken_once_then_none() {
+        let id = new_session_id();
+        assert!(take_credential(&id).is_none(), "not stored yet → None");
+        insert_credential(id.clone(), "Bearer sekret".to_string());
+        // First take yields the header and removes it (single-use, dropped as the
+        // session ends)…
+        assert_eq!(take_credential(&id), Some("Bearer sekret".to_string()));
+        // …a second take finds nothing.
+        assert!(take_credential(&id).is_none());
+    }
+
+    #[test]
+    fn remove_returns_the_session_once_then_none() {
+        let id = new_session_id();
+        assert!(remove(&id).is_none(), "not stored yet → None");
+        let info = json!({ "sessionId": id, "qosStatus": "AVAILABLE" });
+        insert(id.clone(), info.clone());
+        // First remove yields the stored session and evicts it…
+        assert_eq!(remove(&id), Some(info));
+        // …a second remove finds nothing (single-use delete), and get agrees.
+        assert!(remove(&id).is_none());
+        assert!(get(&id).is_none());
+    }
+}

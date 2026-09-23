@@ -1,0 +1,1924 @@
+# CamaraSim — Carrier Billing, API version v0.5 (CAMARA 0.5.0, release r3.2).
+#
+# Vendored from the CAMARA Carrier Billing API (carrier-billing 0.5.0, the first
+# public release, shipped in release r3.2) and annotated with CamaraSim's
+# parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/carrier_billing/v0_5.rs`; spec and code must not drift.
+#
+# Carrier Billing has never reached 1.0.0, so — like KYC Match v0.3 and Location
+# Retrieval v0.4 — it is mounted under its real published sub-1.0 version
+# `/carrier-billing/v0.5` rather than a loose "v1" (DESIGN §9).
+#
+# This slice serves `POST /payments` (the one-step `createPayment`),
+# `GET /payments/{paymentId}` (`retrievePayment`, read-back), `GET /payments`
+# (`retrievePayments`, list), `POST /payments/prepare` (`preparePayment`, the
+# two-step flow's reserve step), `POST /payments/{paymentId}/validate`
+# (`validatePayment`, the two-step flow's OTP-validation step),
+# `POST /payments/{paymentId}/confirm` (`confirmPayment`, the confirm step), and
+# `POST /payments/{paymentId}/cancel` (`cancelPayment`, the cancel step). The
+# two-step reserve → validate → confirm / cancel flow is now complete.
+openapi: 3.0.3
+info:
+  title: Carrier Billing
+  description: |
+    Charges a purchase to an end user's mobile account: the operator adds it to
+    the phone bill or deducts it from prepaid credit. This is the CamaraSim
+    reference double for CAMARA Carrier Billing 0.5.0.
+
+    In this version only **one-off** (one-step) payments are covered:
+    `POST /payments` creates *and* charges a payment in a single call, so a
+    happy path returns `201` with `paymentStatus: "succeeded"`. There is no real
+    billing system — the outcome is chosen deterministically from the input.
+
+    The account to charge is identified either by `amountTransaction.phoneNumber`
+    in the request body (two-legged / CIBA) or by the identity a three-legged
+    access token authenticated (in which case `phoneNumber` is omitted). The
+    endpoint requires the `carrier-billing:payments:create` scope.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Two independent control planes:
+
+    1. **The charged phone number** — the submitted
+       `amountTransaction.phoneNumber`, else the access token subject (`sub`).
+       If its trailing three digits name a reserved CAMARA status, the endpoint
+       answers with that canonical CAMARA error instead of charging (shared
+       convention — see the referenced `errors.yaml`): `…400`, `…401`, `…403`,
+       `…404`, `…409`, `…422`, `…429`, `…500`, `…503`. A malformed submitted
+       `phoneNumber` → `400 INVALID_ARGUMENT`; no `phoneNumber` and a non-E.164
+       token subject (the account cannot be identified) →
+       `422 MISSING_IDENTIFIER`.
+    2. **The requested `amount`** (`paymentAmount.chargingInformation.amount`):
+       below the schema minimum `0.001` → `400 INVALID_ARGUMENT`; above the
+       simulator's authorised ceiling of `1000` (currency not modelled) →
+       `422 CARRIER_BILLING.UNAUTHORIZED_AMOUNT`; otherwise the charge
+       **succeeds**.
+
+    The identifier plane is evaluated before the amount plane, so a
+    reserved-error phone number wins even when the amount is also out of range.
+
+    Examples: `+123456789012` charging `9.99` → `201 succeeded`; `+123456789404`
+    → `404 NOT_FOUND`; `+123456789012` charging `5000` →
+    `422 CARRIER_BILLING.UNAUTHORIZED_AMOUNT`.
+
+    ## Read-back — `GET /payments/{paymentId}` (`retrievePayment`)
+
+    Reading a payment back makes Carrier Billing **stateful**: `createPayment`
+    persists the payment it charges in an in-memory store (single node), and
+    `retrievePayment` returns it verbatim (`200`) or `404 NOT_FOUND` for an
+    unknown/never-created id. The `paymentId` is opaque (UUID-shaped), so the
+    store state is `retrievePayment`'s only control plane — there is no
+    reserved-identifier suffix here. It requires the
+    `carrier-billing:payments:read` scope.
+
+    ## List — `GET /payments` (`retrievePayments`)
+
+    Lists created payments as a `PaymentArray` — a JSON array of the payments
+    held in the in-memory store (`200`, an empty array when none exist; CAMARA
+    lists never `404` on an empty result). Like `retrievePayment` it requires the
+    `carrier-billing:payments:read` scope. The three list controls this spec
+    defines are **applied**: `order` (sort by `paymentCreationDate`, `asc`/`desc`,
+    default `desc`) and `page`/`perPage` pagination (defaults `1`/`10`), so the
+    query parameters are a genuine control plane over the stored payments (a
+    non-integer `page`/`perPage` → `400 INVALID_ARGUMENT`; a value below the
+    schema minimum → `400 OUT_OF_RANGE`; an unknown `order` → `400
+    INVALID_ARGUMENT`). Payments are not scoped per client (every stored payment
+    is a pagination candidate); no `paymentCreationDate`/`paymentStatus`/
+    `merchantIdentifier` filters are defined.
+
+    ## Reserve — `POST /payments/prepare` (`preparePayment`)
+
+    First step of the two-step flow: reserves the amount against the account
+    **without charging it**. A happy path returns `201` with
+    `paymentStatus: "reserved"` and no `paymentDate`; the reservation is
+    persisted (so `retrievePayment` reads it back) and, in later slices, is
+    confirmed (`confirmPayment` → `succeeded`) or cancelled (`cancelPayment` →
+    `cancelled`). It requires the `carrier-billing:payments:create` scope and
+    shares `createPayment`'s two control planes (charged/reserved phone number
+    and requested `amount`).
+
+    A reservation whose resolved phone number ends in `888` instead lands in
+    `paymentStatus: "pending_validation"`, carrying a `validationInfo`
+    (`action: "validate"`, an `authorizationId`) — it must be cleared by
+    `validatePayment` before it can be confirmed.
+
+    ## Validate — `POST /payments/{paymentId}/validate` (`validatePayment`)
+
+    Second step of the two-step flow: clears the OTP validation on a
+    `pending_validation` reservation. The caller submits the `authorizationId`
+    (echoed by `preparePayment` in `validationInfo`) and the OTP `code`; on
+    success the reservation moves to `reserved` and the endpoint answers `204 No
+    Content`. It requires the `carrier-billing:payments:write` scope. The OTP
+    `code` is deterministic from the reserved phone number — its last six digits,
+    zero-padded (there is no real SMS; mirrors One Time Password SMS) — so a
+    headless caller can compute what to submit. E.g. a reservation for
+    `+123456789888` validates with code `789888`.
+
+    Keyed on the store state + submitted `code` (no reserved-identifier plane —
+    the `paymentId` is opaque): correct id + code → `204`; wrong `authorizationId`
+    → `400 CARRIER_BILLING.INVALID_AUTHORIZATION_ID`; correct id, wrong `code` →
+    `400 CARRIER_BILLING.INVALID_CODE` until the 3-attempt budget is spent, when
+    the last wrong code denies the reservation → `400
+    CARRIER_BILLING.VALIDATION_FAILED` (reservation → `denied`); a payment not
+    awaiting validation (already reserved / succeeded / denied) → `409
+    ALREADY_EXISTS`; an unknown `paymentId` → `404 NOT_FOUND`.
+
+    ## Confirm — `POST /payments/{paymentId}/confirm` (`confirmPayment`)
+
+    Third step of the two-step flow: charges a `reserved` payment. On success the
+    payment moves to `succeeded` (gaining a `paymentDate`) and the endpoint
+    answers `202 Accepted` (no body). It requires the
+    `carrier-billing:payments:write` scope. Keyed only on the store state (no
+    reserved-identifier plane — the `paymentId` is opaque): a `reserved` payment →
+    `202`; an already-`succeeded` payment → `409
+    CARRIER_BILLING.PAYMENT_CONFIRMED`; an already-`cancelled` payment → `409
+    CARRIER_BILLING.PAYMENT_CANCELLED`; any other non-`reserved` state
+    (`pending_validation` — its OTP is not cleared — or `denied`) → `409 CONFLICT`;
+    an unknown `paymentId` → `404 NOT_FOUND`. The optional `phoneNumber` body
+    field is accepted but not applied.
+
+    ## Cancel — `POST /payments/{paymentId}/cancel` (`cancelPayment`)
+
+    Final step of the two-step flow: releases a `reserved` payment **without
+    charging it**. On success the payment moves to `cancelled` (and, since
+    nothing is charged, gains no `paymentDate`) and the endpoint answers `202
+    Accepted` (no body). It requires the `carrier-billing:payments:write` scope.
+    Keyed only on the store state (no reserved-identifier plane — the `paymentId`
+    is opaque): a `reserved` payment → `202`; an already-`cancelled` payment →
+    `409 CARRIER_BILLING.PAYMENT_CANCELLED`; an already-`succeeded` (charged)
+    payment → `409 CARRIER_BILLING.PAYMENT_CONFIRMED` (a charged payment can no
+    longer be cancelled); any other non-`reserved` state (`pending_validation` —
+    its OTP is not cleared — or `denied`) → `409 CONFLICT`; an unknown
+    `paymentId` → `404 NOT_FOUND`. The optional `phoneNumber` body field is
+    accepted but not applied.
+
+    ## Documented cuts (this slice)
+
+    - `POST /payments` (`createPayment`), `GET /payments/{paymentId}`
+      (`retrievePayment`), `GET /payments` (`retrievePayments`, list),
+      `POST /payments/prepare` (`preparePayment`),
+      `POST /payments/{paymentId}/validate` (`validatePayment`),
+      `POST /payments/{paymentId}/confirm` (`confirmPayment`), and
+      `POST /payments/{paymentId}/cancel` (`cancelPayment`) are all implemented —
+      the two-step reserve → validate → confirm / cancel flow is complete.
+      `preparePayment` produces `pending_validation` (with `validationInfo`) for
+      the `…888` tail and `reserved` otherwise; the 409 `ALREADY_EXISTS`
+      duplicate-session case on `preparePayment` (a `clientCorrelator` already
+      in flight) is not modelled. `confirmPayment`'s / `cancelPayment`'s optional
+      `phoneNumber` body field is accepted but not applied (the reservation is
+      addressed by its `paymentId`).
+    - `retrievePayments` applies its `page`/`perPage`/`order` query parameters
+      (sort by `paymentCreationDate`, then paginate) but is not scoped per
+      client; no `paymentCreationDate`/`paymentStatus`/`merchantIdentifier`
+      filters are defined by this spec.
+    - **Charging notifications.** A successful one-step `createPayment` charge
+      now delivers a `payment-completed` CloudEvent to the request's `sink` (see
+      the operation's `callbacks`), fire-and-forget over raw TCP to an `http://`
+      sink or over a `rustls` TLS session to an `https://` sink (server cert
+      verified against the bundled Mozilla roots), with a `sinkCredential` applied as an
+      `Authorization` header: `ACCESSTOKEN` → `Bearer <accessToken>` (RFC 6750),
+      `PLAIN` → `Basic <base64(identifier:secret)>` (RFC 7617); `REFRESHTOKEN`
+      accepted but not applied. The `sink` is used only to notify — it is never persisted
+      with the payment, so a `retrievePayment` response omits it (the `Payment`
+      schema's `sink` is optional). A successful two-step `preparePayment`
+      **reservation** now likewise delivers a `payment-reserved` CloudEvent to
+      the request's `sink` (see the operation's `callbacks`; same transport and
+      `sinkCredential` handling as `createPayment`). A `preparePayment` that
+      lands in `pending_validation` (the `…888` tail) fires **no**
+      `payment-reserved`; it instead delivers a `payment-pending-validation`
+      CloudEvent to the request's `sink` (same transport and `sinkCredential`
+      handling) — the two are mutually exclusive. Per the CAMARA schema this
+      notification carries only `paymentId`/`status`/`description` (no
+      `validationInfo`; the `authorizationId` is delivered only in the
+      synchronous `preparePayment` body). A successful `confirmPayment` now
+      delivers the terminal `payment-completed` CloudEvent (`data.status:
+      succeeded`, with a `paymentDate`): because the `confirmPayment` request
+      body carries no `sink`, the `sink` (and any `ACCESSTOKEN` `sinkCredential`
+      bearer) recorded at `preparePayment` is stashed in an in-memory side-store
+      keyed by `paymentId` and taken single-use when the reservation is charged
+      (so exactly one terminal event fires; the secret is never echoed by a
+      `retrievePayment`). A successful `cancelPayment` likewise delivers the
+      terminal `payment-cancelled` CloudEvent (`data.status: failed`, no
+      `paymentDate` — nothing is charged) to the `sink` recorded at
+      `preparePayment`, taken single-use from the same side-store (so a
+      reservation fires exactly one terminal event — confirm *or* cancel).
+      Finally, a `validatePayment` that exhausts its OTP-attempt budget denies
+      the reservation and delivers the terminal `payment-denied` CloudEvent
+      (`data.status: failed`, no `paymentDate` — nothing is charged) to the same
+      `sink` recorded at `preparePayment`, taken single-use from the side-store
+      (so a `…888` reservation still fires exactly one terminal event — confirm,
+      cancel, *or* deny). This completes the two-step charging notifications.
+  version: "0.5.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/carrier-billing/v0.5"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /payments:
+    post:
+      operationId: createPayment
+      summary: Create (and, one-step, charge) a payment
+      description: |
+        Creates a new payment to charge to an end user's mobile account. In the
+        one-step flow covered by this version the payment is charged immediately,
+        so a happy path returns `201` with `paymentStatus: "succeeded"`.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - carrier-billing:payments:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePayment"
+      responses:
+        "201":
+          description: The payment was created (and, one-step, charged).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentCreated"
+              examples:
+                succeeded:
+                  summary: One-step charge succeeded
+                  value:
+                    paymentId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    amountTransaction:
+                      phoneNumber: "+123456789012"
+                      paymentAmount:
+                        chargingInformation:
+                          amount: 9.99
+                          currency: EUR
+                          description: A digital good
+                      referenceCode: ref-001
+                    paymentStatus: succeeded
+                    paymentCreationDate: "2024-01-01T14:27:08Z"
+                    paymentDate: "2024-01-01T14:27:08Z"
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body, a malformed `phoneNumber`, or an `amount` below the
+            schema minimum `0.001`, plus the reserved-suffix `…400` case.
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              example:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: Client specified an invalid argument, request body or query param.
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            account cannot be identified, `CARRIER_BILLING.UNAUTHORIZED_AMOUNT`
+            when the `amount` exceeds the authorised ceiling, or the reserved
+            shared `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CarrierBillingError"
+              examples:
+                unauthorizedAmount:
+                  summary: Amount above the authorised ceiling
+                  value:
+                    status: 422
+                    code: CARRIER_BILLING.UNAUTHORIZED_AMOUNT
+                    message: Unauthorized amount requested.
+                missingIdentifier:
+                  summary: The account cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The phone number cannot be identified.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from two control planes (docs/DESIGN.md §7): the charged
+          phone number (submitted `amountTransaction.phoneNumber`, else the access
+          token subject) and the requested `amount`. Reserved error suffixes come
+          from the shared convention in errors.yaml; the identifier plane is
+          checked first. Note: CamaraSim exposes the full shared error set so
+          every reserved case is reachable — canonical Carrier Billing 0.5.0 also
+          declares 410 GONE, which CamaraSim does not model in this slice.
+        cases:
+          - input: phone number ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: valid phone number, amount in `[0.001, 1000]`
+            result: '201 { paymentStatus: "succeeded" }'
+          - input: amount below `0.001`
+            result: "400 INVALID_ARGUMENT"
+          - input: amount above `1000`
+            result: "422 CARRIER_BILLING.UNAUTHORIZED_AMOUNT"
+          - input: malformed `phoneNumber`
+            result: "400 INVALID_ARGUMENT"
+          - input: no `phoneNumber` and a non-E.164 token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: successful charge with an `http://` `sink`
+            result: "201; a payment-completed CloudEvent POSTed to the sink"
+          - input: successful charge with an `https://` `sink`
+            result: "201; the payment-completed CloudEvent POSTed over TLS (server cert verified)"
+          - input: successful charge with a `sink` + ACCESSTOKEN `sinkCredential`
+            result: "the callback carries Authorization: Bearer <accessToken>"
+          - input: successful charge with a `sink` + PLAIN `sinkCredential`
+            result: "the callback carries Authorization: Basic <base64(identifier:secret)> (RFC 7617)"
+      callbacks:
+        chargingNotifications:
+          "{$request.body#/sink}":
+            post:
+              summary: Charging status notification
+              description: |
+                Delivered by the API provider to the `sink` URL supplied in the
+                `createPayment` request when the payment reaches a terminal
+                charging outcome. The body is a CloudEvents 1.0 event.
+
+                CamaraSim delivers the `payment-completed` event
+                (`data.status: succeeded`) on a successful one-step charge.
+                Delivery is best-effort, fire-and-forget, to an `http://` sink
+                (raw TCP) or an `https://` sink (`rustls` TLS, server cert
+                verified against the bundled Mozilla roots). When the payment was created with
+                an `ACCESSTOKEN` `sinkCredential`, the request carries an
+                `Authorization: Bearer <accessToken>` header (RFC 6750), and with a
+                `PLAIN` `sinkCredential` an `Authorization: Basic
+                <base64(identifier:secret)>` header (RFC 7617); the `REFRESHTOKEN`
+                credential type is accepted but not applied (a documented cut).
+              requestBody:
+                required: true
+                content:
+                  application/cloudevents+json:
+                    schema:
+                      $ref: "#/components/schemas/CloudEvent"
+              responses:
+                "204":
+                  description: Notification received.
+    get:
+      operationId: retrievePayments
+      summary: List created payments
+      description: |
+        Lists created payments as a `PaymentArray`. Returns the payments held in
+        the in-memory store (`200`, an empty array when none exist).
+
+        The `page`/`perPage`/`order` query parameters below are **applied**: the
+        stored payments are sorted by `paymentCreationDate` in `order`
+        (`paymentId` breaks ties deterministically) and the `page`-th window of
+        `perPage` items is returned. Payments are not scoped per client (a
+        documented simplification) — every stored payment is a pagination
+        candidate. Invalid parameters are rejected with `400` (see below).
+      security:
+        - openId:
+            - carrier-billing:payments:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: page
+          in: query
+          required: false
+          description: >-
+            1-based page index. Applied. A non-integer value → `400
+            INVALID_ARGUMENT`; a value below the minimum → `400 OUT_OF_RANGE`.
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: perPage
+          in: query
+          required: false
+          description: >-
+            Page size. Applied. A non-integer value → `400 INVALID_ARGUMENT`; a
+            value below the minimum → `400 OUT_OF_RANGE`.
+          schema:
+            type: integer
+            minimum: 1
+            default: 10
+        - name: order
+          in: query
+          required: false
+          description: >-
+            Sort order by `paymentCreationDate`. Applied. A value outside the
+            enum → `400 INVALID_ARGUMENT`.
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+      responses:
+        "200":
+          description: The list of payments (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentArray"
+              examples:
+                oneItem:
+                  summary: A store holding one payment
+                  value:
+                    - paymentId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                      amountTransaction:
+                        phoneNumber: "+123456789012"
+                        paymentAmount:
+                          chargingInformation:
+                            amount: 9.99
+                            currency: EUR
+                            description: A digital good
+                        referenceCode: ref-001
+                      paymentStatus: succeeded
+                      paymentCreationDate: "2024-01-01T14:27:08Z"
+                      paymentDate: "2024-01-01T14:27:08Z"
+                empty:
+                  summary: An empty store
+                  value: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Two control planes (docs/DESIGN.md §7): the in-memory payment store
+          (every payment created by `createPayment`/`preparePayment` is a
+          candidate; an empty store yields `200 []`) and the `page`/`perPage`/
+          `order` query parameters, which sort the candidates by
+          `paymentCreationDate` (ties broken by `paymentId`) and page over them.
+        cases:
+          - input: no query parameters (defaults page=1, perPage=10, order=desc)
+            result: "200 with up to 10 payments, newest `paymentCreationDate` first"
+          - input: "`order=asc`"
+            result: "200 with the payments oldest `paymentCreationDate` first"
+          - input: "`page=2&perPage=5`"
+            result: "200 with the 6th–10th payment of the sorted list (empty once page runs past the end)"
+          - input: any read-scoped token, with no payments in the store
+            result: "200 []"
+          - input: "`page=abc` or `perPage=x` (non-integer)"
+            result: "400 INVALID_ARGUMENT"
+          - input: "`page=0` or `perPage=0` (below the minimum of 1)"
+            result: "400 OUT_OF_RANGE"
+          - input: "`order=sideways` (outside the enum)"
+            result: "400 INVALID_ARGUMENT"
+
+  /payments/prepare:
+    post:
+      operationId: preparePayment
+      summary: Reserve (do not yet charge) a payment
+      description: |
+        First step of the two-step flow: **reserves** the amount against the end
+        user's mobile account without charging it. A happy path returns `201`
+        with `paymentStatus: "reserved"` and no `paymentDate` (nothing has been
+        billed yet). The reservation is persisted, so it can be read back by
+        `retrievePayment` and — in later slices — confirmed (`confirmPayment` →
+        `succeeded`) or cancelled (`cancelPayment` → `cancelled`).
+
+        It shares `createPayment`'s two control planes (see the API description):
+        the reserved phone number (submitted `amountTransaction.phoneNumber`,
+        else the token subject) and the requested `amount`.
+      security:
+        - openId:
+            - carrier-billing:payments:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReservePayment"
+      responses:
+        "201":
+          description: The payment was reserved (not yet charged).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentReserved"
+              examples:
+                reserved:
+                  summary: Amount reserved, awaiting confirmation
+                  value:
+                    paymentId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    amountTransaction:
+                      phoneNumber: "+123456789012"
+                      paymentAmount:
+                        chargingInformation:
+                          amount: 9.99
+                          currency: EUR
+                          description: A digital good
+                      referenceCode: ref-001
+                    paymentStatus: reserved
+                    paymentCreationDate: "2024-01-01T14:27:08Z"
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body, a malformed `phoneNumber`, or an `amount` below the
+            schema minimum `0.001`, plus the reserved-suffix `…400` case.
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              example:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: Client specified an invalid argument, request body or query param.
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            account cannot be identified, `CARRIER_BILLING.UNAUTHORIZED_AMOUNT`
+            when the `amount` exceeds the authorised ceiling, or the reserved
+            shared `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CarrierBillingError"
+              examples:
+                unauthorizedAmount:
+                  summary: Amount above the authorised ceiling
+                  value:
+                    status: 422
+                    code: CARRIER_BILLING.UNAUTHORIZED_AMOUNT
+                    message: Unauthorized amount requested.
+                missingIdentifier:
+                  summary: The account cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The phone number cannot be identified.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Same two control planes as `createPayment` (docs/DESIGN.md §7): the
+          reserved phone number and the requested `amount`; the identifier plane
+          is checked first. The happy path reserves into the `reserved` state
+          (nothing is charged), except a phone number ending in `888`, which
+          lands in `pending_validation` with a `validationInfo` for
+          `validatePayment` to clear. The 409 `ALREADY_EXISTS` duplicate-session
+          case (a `clientCorrelator` already in flight) is not modelled.
+        cases:
+          - input: phone number ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: valid phone number ending in `888`, amount in `[0.001, 1000]`
+            result: >-
+              201 { paymentStatus: "pending_validation", validationInfo:
+              { action: "validate", authorizationId } } (persisted, no paymentDate)
+          - input: valid phone number, amount in `[0.001, 1000]`
+            result: '201 { paymentStatus: "reserved" } (persisted, no paymentDate)'
+          - input: amount below `0.001`
+            result: "400 INVALID_ARGUMENT"
+          - input: amount above `1000`
+            result: "422 CARRIER_BILLING.UNAUTHORIZED_AMOUNT"
+          - input: no `phoneNumber` and a non-E.164 token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: successful `reserved` reservation with an `http://` `sink`
+            result: "201; a payment-reserved CloudEvent POSTed to the sink"
+          - input: successful reservation with a `sink` + ACCESSTOKEN `sinkCredential`
+            result: "the callback carries Authorization: Bearer <accessToken>"
+          - input: successful reservation with a `sink` + PLAIN `sinkCredential`
+            result: "the callback carries Authorization: Basic <base64(identifier:secret)> (RFC 7617)"
+          - input: >-
+              `…888` (pending_validation) reservation with an `http://` `sink`
+            result: >-
+              201; NO payment-reserved fired — a payment-pending-validation
+              CloudEvent is POSTed to the sink instead (the two are mutually
+              exclusive)
+          - input: >-
+              `…888` reservation with a `sink` + ACCESSTOKEN `sinkCredential`
+            result: >-
+              the payment-pending-validation callback carries Authorization:
+              Bearer <accessToken>
+      callbacks:
+        reserveNotifications:
+          "{$request.body#/sink}":
+            post:
+              summary: Reservation status notification
+              description: |
+                Delivered by the API provider to the `sink` URL supplied in the
+                `preparePayment` request when the reservation reaches a terminal
+                outcome. The body is a CloudEvents 1.0 event.
+
+                CamaraSim delivers the `payment-reserved` event
+                (`data.status: succeeded`) when a reservation is created in the
+                `reserved` state. A reservation that lands in
+                `pending_validation` (the `…888` tail) fires **no**
+                `payment-reserved`; it delivers the separate
+                `payment-pending-validation` event instead (`data.status:
+                succeeded`, no `paymentDate` and no `validationInfo`).
+                Delivery is best-effort, fire-and-forget, to an `http://` sink (raw TCP) or an `https://` sink (rustls TLS, server cert verified). When the payment was created with
+                an `ACCESSTOKEN` `sinkCredential`, the request carries an
+                `Authorization: Bearer <accessToken>` header (RFC 6750), and with a
+                `PLAIN` `sinkCredential` an `Authorization: Basic
+                <base64(identifier:secret)>` header (RFC 7617); the `REFRESHTOKEN`
+                credential type is accepted but not applied (a documented cut).
+              requestBody:
+                required: true
+                content:
+                  application/cloudevents+json:
+                    schema:
+                      $ref: "#/components/schemas/CloudEvent"
+              responses:
+                "204":
+                  description: Notification received.
+
+  /payments/{paymentId}/validate:
+    post:
+      operationId: validatePayment
+      summary: Validate a two-step reservation's OTP
+      description: |
+        Second step of the two-step flow: clears the OTP validation on a
+        `pending_validation` reservation (created by `preparePayment` for a phone
+        number ending in `888`). The caller submits the `authorizationId` echoed
+        in the reservation's `validationInfo` and the OTP `code`; on success the
+        reservation moves to `reserved` and this returns `204 No Content`.
+
+        The OTP `code` is deterministic from the reserved phone number — its last
+        six digits, zero-padded (there is no real SMS; mirrors One Time Password
+        SMS) — so a headless caller can compute what to submit. Requires the
+        `carrier-billing:payments:write` scope. There is no reserved-identifier
+        control plane here (the `paymentId` is opaque); the store state and the
+        submitted `code` drive the outcome.
+
+        **Charging notification.** When the reservation was created by
+        `preparePayment` with a `sink`, exhausting the OTP-attempt budget denies
+        the reservation and delivers the terminal `payment-denied` CloudEvent
+        (`data.status: failed`, no `paymentDate` — nothing is charged) to that
+        sink (see the operation's `callbacks`). The validate request body carries
+        no `sink`, so CamaraSim uses the `sink` (and any `ACCESSTOKEN`
+        `sinkCredential` bearer) recorded at `preparePayment`, held in an
+        in-memory side-store keyed by `paymentId` and taken single-use when the
+        reservation is denied (so a `…888` reservation still fires exactly one
+        terminal event — confirm, cancel, *or* deny). Delivery is best-effort,
+        fire-and-forget, over raw TCP to an `http://` sink or over `rustls` TLS to an `https://` sink (server cert verified),
+        off the request path; a `PLAIN` `sinkCredential` is applied as HTTP Basic
+        (RFC 7617), `REFRESHTOKEN` accepted but not applied.
+      security:
+        - openId:
+            - carrier-billing:payments:write
+      parameters:
+        - $ref: "#/components/parameters/PaymentId"
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ValidatePayment"
+      responses:
+        "204":
+          description: Validation succeeded; the reservation is now `reserved`.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. Beyond a malformed body (`INVALID_ARGUMENT`),
+            CamaraSim returns the Carrier-Billing-specific validation codes:
+            `CARRIER_BILLING.INVALID_AUTHORIZATION_ID` (the `authorizationId` does
+            not match), `CARRIER_BILLING.INVALID_CODE` (wrong `code`, an attempt
+            consumed), or `CARRIER_BILLING.VALIDATION_FAILED` (the attempt budget
+            is exhausted; the reservation is denied).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CarrierBillingError"
+              examples:
+                invalidCode:
+                  summary: Wrong OTP code
+                  value:
+                    status: 400
+                    code: CARRIER_BILLING.INVALID_CODE
+                    message: Invalid code.
+                invalidAuthorizationId:
+                  summary: Unknown authorizationId
+                  value:
+                    status: 400
+                    code: CARRIER_BILLING.INVALID_AUTHORIZATION_ID
+                    message: Invalid authorizationId.
+                validationFailed:
+                  summary: Attempt budget exhausted
+                  value:
+                    status: 400
+                    code: CARRIER_BILLING.VALIDATION_FAILED
+                    message: The maximum number of validation attempts has been consumed.
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            409 — the payment is not awaiting validation (already `reserved`,
+            `succeeded`, or `denied`). CamaraSim returns `ALREADY_EXISTS`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CarrierBillingError"
+              example:
+                status: 409
+                code: ALREADY_EXISTS
+                message: The payment is not awaiting validation.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed on the in-memory store state + the submitted `code` (no
+          reserved-identifier plane — the `paymentId` is opaque). The OTP `code`
+          is the reserved phone number's last six digits, zero-padded.
+        cases:
+          - input: correct `authorizationId` + `code` on a pending reservation
+            result: "204 (reservation → reserved)"
+          - input: wrong `authorizationId`
+            result: "400 CARRIER_BILLING.INVALID_AUTHORIZATION_ID"
+          - input: correct `authorizationId`, wrong `code` (budget remaining)
+            result: "400 CARRIER_BILLING.INVALID_CODE (an attempt is consumed)"
+          - input: wrong `code` spending the last of the 3-attempt budget
+            result: "400 CARRIER_BILLING.VALIDATION_FAILED (reservation → denied)"
+          - input: a payment not awaiting validation (already settled)
+            result: "409 ALREADY_EXISTS"
+          - input: an unknown `paymentId`
+            result: "404 NOT_FOUND"
+          - input: >-
+              exhausting the budget on a reservation prepared with an `http://`
+              `sink`
+            result: >-
+              400 CARRIER_BILLING.VALIDATION_FAILED; a payment-denied CloudEvent
+              (data.status: failed) POSTed to that sink
+          - input: >-
+              exhausting the budget on a reservation prepared with a `sink` +
+              ACCESSTOKEN `sinkCredential`
+            result: >-
+              the payment-denied callback carries Authorization: Bearer
+              <accessToken> (the credential recorded at preparePayment)
+      callbacks:
+        chargingNotifications:
+          "{$request.body#/sink}":
+            post:
+              summary: Charging status notification
+              description: |
+                Delivered by the API provider to the `sink` URL recorded on the
+                originating `preparePayment` request (the `validatePayment`
+                request body carries no `sink`) when the reservation is denied
+                because its OTP-attempt budget is exhausted. The body is a
+                CloudEvents 1.0 event.
+
+                CamaraSim delivers the `payment-denied` event
+                (`data.status: failed`, no `paymentDate` — nothing is charged) on
+                a `VALIDATION_FAILED` outcome. Delivery is best-effort,
+                fire-and-forget, to an `http://` sink (raw TCP) or an `https://` sink (rustls TLS, server cert verified).
+                When the reservation was prepared with an `ACCESSTOKEN`
+                `sinkCredential`, the request carries an
+                `Authorization: Bearer <accessToken>` header (RFC 6750), and with a
+                `PLAIN` `sinkCredential` an `Authorization: Basic
+                <base64(identifier:secret)>` header (RFC 7617); the `REFRESHTOKEN`
+                credential type is accepted but not applied (a documented cut).
+              requestBody:
+                required: true
+                content:
+                  application/cloudevents+json:
+                    schema:
+                      $ref: "#/components/schemas/CloudEvent"
+              responses:
+                "204":
+                  description: Notification received.
+
+  /payments/{paymentId}/confirm:
+    post:
+      operationId: confirmPayment
+      summary: Confirm (charge) a reserved payment
+      description: |
+        Third step of the two-step flow: charges a `reserved` payment. On success
+        the payment moves to `succeeded` (gaining a `paymentDate`) and this
+        returns `202 Accepted` (no body). Requires the
+        `carrier-billing:payments:write` scope.
+
+        There is no reserved-identifier control plane here (the `paymentId` is
+        opaque); the store state drives the outcome. The optional `phoneNumber`
+        body field (CAMARA `ConfirmPayment` / `PhoneNumber`) is accepted but not
+        applied — the reservation is addressed by its `paymentId`.
+
+        **Charging notification.** When the reservation was created by
+        `preparePayment` with a `sink`, a successful confirm delivers the terminal
+        `payment-completed` CloudEvent (`data.status: succeeded`, with a
+        `paymentDate`) to that sink (see the operation's `callbacks`). The confirm
+        request body carries no `sink`, so CamaraSim uses the `sink` (and any
+        `ACCESSTOKEN` `sinkCredential` bearer) recorded at `preparePayment`, held
+        in an in-memory side-store keyed by `paymentId` and taken single-use when
+        the charge goes through. Delivery is best-effort, fire-and-forget, over raw
+        TCP to an `http://` sink, or over `rustls` TLS to an `https://` sink (server cert verified), off the request path; a
+        `PLAIN` `sinkCredential` is applied as HTTP Basic (RFC 7617), `REFRESHTOKEN`
+        accepted but not applied.
+      security:
+        - openId:
+            - carrier-billing:payments:write
+      parameters:
+        - $ref: "#/components/parameters/PaymentId"
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfirmPayment"
+      responses:
+        "202":
+          description: The confirmation was accepted; the payment is now `succeeded`.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            409 — the payment cannot be confirmed in its current state.
+            CamaraSim returns `CARRIER_BILLING.PAYMENT_CONFIRMED` when the payment
+            is already `succeeded`, `CARRIER_BILLING.PAYMENT_CANCELLED` when it is
+            already `cancelled`, and the generic `CONFLICT` for any other
+            non-`reserved` state (`pending_validation` — its OTP has not been
+            validated — or `denied`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CarrierBillingError"
+              examples:
+                paymentConfirmed:
+                  summary: Already confirmed
+                  value:
+                    status: 409
+                    code: CARRIER_BILLING.PAYMENT_CONFIRMED
+                    message: Payment has been confirmed.
+                paymentCancelled:
+                  summary: Already cancelled
+                  value:
+                    status: 409
+                    code: CARRIER_BILLING.PAYMENT_CANCELLED
+                    message: Payment has been cancelled.
+                notConfirmable:
+                  summary: Not in a confirmable state
+                  value:
+                    status: 409
+                    code: CONFLICT
+                    message: The payment cannot be confirmed in its current state.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed only on the in-memory store state (no reserved-identifier plane —
+          the `paymentId` is opaque). Only a `reserved` payment is confirmable.
+        cases:
+          - input: a `reserved` payment (from `preparePayment`, optionally validated)
+            result: "202 (reservation → succeeded, paymentDate set)"
+          - input: a payment already `succeeded`
+            result: "409 CARRIER_BILLING.PAYMENT_CONFIRMED"
+          - input: a payment already `cancelled`
+            result: "409 CARRIER_BILLING.PAYMENT_CANCELLED"
+          - input: a payment `pending_validation` (OTP not cleared) or `denied`
+            result: "409 CONFLICT"
+          - input: an unknown `paymentId`
+            result: "404 NOT_FOUND"
+          - input: confirming a reservation that was prepared with an `http://` `sink`
+            result: "202; a payment-completed CloudEvent POSTed to that sink"
+          - input: >-
+              confirming a reservation prepared with a `sink` + ACCESSTOKEN
+              `sinkCredential`
+            result: >-
+              the callback carries Authorization: Bearer <accessToken> (the
+              credential recorded at preparePayment)
+      callbacks:
+        chargingNotifications:
+          "{$request.body#/sink}":
+            post:
+              summary: Charging status notification
+              description: |
+                Delivered by the API provider to the `sink` URL recorded on the
+                originating `preparePayment` request (the `confirmPayment` request
+                body carries no `sink`) when the reserved payment is charged. The
+                body is a CloudEvents 1.0 event.
+
+                CamaraSim delivers the `payment-completed` event
+                (`data.status: succeeded`, with a `paymentDate`) on a successful
+                confirm. Delivery is best-effort, fire-and-forget, to an `http://` sink (raw TCP) or an `https://` sink (rustls TLS, server cert verified). When the reservation was prepared
+                with an `ACCESSTOKEN` `sinkCredential`, the request carries an
+                `Authorization: Bearer <accessToken>` header (RFC 6750), and with a
+                `PLAIN` `sinkCredential` an `Authorization: Basic
+                <base64(identifier:secret)>` header (RFC 7617); the `REFRESHTOKEN`
+                credential type is accepted but not applied (a documented cut).
+              requestBody:
+                required: true
+                content:
+                  application/cloudevents+json:
+                    schema:
+                      $ref: "#/components/schemas/CloudEvent"
+              responses:
+                "204":
+                  description: Notification received.
+
+  /payments/{paymentId}/cancel:
+    post:
+      operationId: cancelPayment
+      summary: Cancel (release) a reserved payment
+      description: |
+        Final step of the two-step flow: releases a `reserved` payment without
+        charging it. On success the payment moves to `cancelled` (and — since
+        nothing is charged — gains no `paymentDate`) and this returns `202
+        Accepted` (no body). Requires the `carrier-billing:payments:write` scope.
+
+        There is no reserved-identifier control plane here (the `paymentId` is
+        opaque); the store state drives the outcome. The optional `phoneNumber`
+        body field (CAMARA `CancelPayment` / `PhoneNumber`) is accepted but not
+        applied — the reservation is addressed by its `paymentId`.
+
+        **Charging notification.** When the reservation was created by
+        `preparePayment` with a `sink`, a successful cancel delivers the terminal
+        `payment-cancelled` CloudEvent (`data.status: failed`, no `paymentDate` —
+        nothing is charged) to that sink (see the operation's `callbacks`). The
+        cancel request body carries no `sink`, so CamaraSim uses the `sink` (and
+        any `ACCESSTOKEN` `sinkCredential` bearer) recorded at `preparePayment`,
+        held in an in-memory side-store keyed by `paymentId` and taken single-use
+        (so a reservation fires exactly one terminal event — confirm *or* cancel).
+        Delivery is best-effort, fire-and-forget, over raw TCP to an `http://` sink, or over `rustls` TLS to an `https://` sink (server cert verified), off the request path; a `PLAIN` `sinkCredential`
+        is applied as HTTP Basic (RFC 7617), `REFRESHTOKEN` accepted but not applied.
+      security:
+        - openId:
+            - carrier-billing:payments:write
+      parameters:
+        - $ref: "#/components/parameters/PaymentId"
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelPayment"
+      responses:
+        "202":
+          description: The cancellation was accepted; the payment is now `cancelled`.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            409 — the payment cannot be cancelled in its current state.
+            CamaraSim returns `CARRIER_BILLING.PAYMENT_CANCELLED` when the payment
+            is already `cancelled`, `CARRIER_BILLING.PAYMENT_CONFIRMED` when it is
+            already `succeeded` (a charged payment can no longer be cancelled),
+            and the generic `CONFLICT` for any other non-`reserved` state
+            (`pending_validation` — its OTP has not been validated — or `denied`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CarrierBillingError"
+              examples:
+                paymentCancelled:
+                  summary: Already cancelled
+                  value:
+                    status: 409
+                    code: CARRIER_BILLING.PAYMENT_CANCELLED
+                    message: Payment has been cancelled.
+                paymentConfirmed:
+                  summary: Already confirmed (charged)
+                  value:
+                    status: 409
+                    code: CARRIER_BILLING.PAYMENT_CONFIRMED
+                    message: Payment has been confirmed.
+                notCancellable:
+                  summary: Not in a cancellable state
+                  value:
+                    status: 409
+                    code: CONFLICT
+                    message: The payment cannot be cancelled in its current state.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed only on the in-memory store state (no reserved-identifier plane —
+          the `paymentId` is opaque). Only a `reserved` payment is cancellable.
+        cases:
+          - input: a `reserved` payment (from `preparePayment`, optionally validated)
+            result: "202 (reservation → cancelled, no paymentDate)"
+          - input: a payment already `cancelled`
+            result: "409 CARRIER_BILLING.PAYMENT_CANCELLED"
+          - input: a payment already `succeeded`
+            result: "409 CARRIER_BILLING.PAYMENT_CONFIRMED"
+          - input: a payment `pending_validation` (OTP not cleared) or `denied`
+            result: "409 CONFLICT"
+          - input: an unknown `paymentId`
+            result: "404 NOT_FOUND"
+          - input: cancelling a reservation that was prepared with an `http://` `sink`
+            result: "202; a payment-cancelled CloudEvent (data.status: failed) POSTed to that sink"
+          - input: >-
+              cancelling a reservation prepared with a `sink` + ACCESSTOKEN
+              `sinkCredential`
+            result: >-
+              the callback carries Authorization: Bearer <accessToken> (the
+              credential recorded at preparePayment)
+      callbacks:
+        chargingNotifications:
+          "{$request.body#/sink}":
+            post:
+              summary: Charging status notification
+              description: |
+                Delivered by the API provider to the `sink` URL recorded on the
+                originating `preparePayment` request (the `cancelPayment` request
+                body carries no `sink`) when the reserved payment is released. The
+                body is a CloudEvents 1.0 event.
+
+                CamaraSim delivers the `payment-cancelled` event
+                (`data.status: failed`, no `paymentDate`) on a successful cancel.
+                Delivery is best-effort, fire-and-forget, to an `http://` sink (raw TCP) or an `https://` sink (rustls TLS, server cert verified). When the reservation was prepared with an
+                `ACCESSTOKEN` `sinkCredential`, the request carries an
+                `Authorization: Bearer <accessToken>` header (RFC 6750), and with a
+                `PLAIN` `sinkCredential` an `Authorization: Basic
+                <base64(identifier:secret)>` header (RFC 7617); the `REFRESHTOKEN`
+                credential type is accepted but not applied (a documented cut).
+              requestBody:
+                required: true
+                content:
+                  application/cloudevents+json:
+                    schema:
+                      $ref: "#/components/schemas/CloudEvent"
+              responses:
+                "204":
+                  description: Notification received.
+
+  /payments/{paymentId}:
+    get:
+      operationId: retrievePayment
+      summary: Retrieve a payment by id
+      description: |
+        Reads a previously created payment back by its `paymentId`. Returns the
+        payment's representation (`200`) or `404 NOT_FOUND` when no payment
+        exists for the id.
+
+        The `paymentId` is opaque, so — unlike `createPayment` — there is no
+        reserved-identifier control plane: the only control plane is the
+        in-memory store state (known id → `200`, unknown id → `404`).
+      security:
+        - openId:
+            - carrier-billing:payments:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - $ref: "#/components/parameters/PaymentId"
+      responses:
+        "200":
+          description: The payment was found.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+              examples:
+                succeeded:
+                  summary: A previously created, succeeded payment
+                  value:
+                    paymentId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    amountTransaction:
+                      phoneNumber: "+123456789012"
+                      paymentAmount:
+                        chargingInformation:
+                          amount: 9.99
+                          currency: EUR
+                          description: A digital good
+                      referenceCode: ref-001
+                    paymentStatus: succeeded
+                    paymentCreationDate: "2024-01-01T14:27:08Z"
+                    paymentDate: "2024-01-01T14:27:08Z"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed only on the in-memory payment store (docs/DESIGN.md §7): a
+          payment created by `createPayment` is returned verbatim; an unknown or
+          never-created id yields `404 NOT_FOUND`. The `paymentId` is opaque, so
+          no reserved-identifier suffix applies here.
+        cases:
+          - input: a `paymentId` returned by a prior `createPayment`
+            result: "200 with the stored payment representation"
+          - input: an unknown / never-created `paymentId`
+            result: "404 NOT_FOUND"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      description: The id of a previously created payment.
+      schema:
+        type: string
+        format: uuid
+      example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    CreatePayment:
+      type: object
+      description: Request to create (and, one-step, charge) a payment.
+      required:
+        - amountTransaction
+      properties:
+        amountTransaction:
+          $ref: "#/components/schemas/AmountTransactionInput"
+        sink:
+          type: string
+          format: uri
+          description: >-
+            Optional callback URL for charging notifications. On a successful
+            one-step charge CamaraSim delivers a `payment-completed` CloudEvent
+            here (see the operation's `callbacks`). CAMARA specifies `https://`;
+            CamaraSim delivers over `rustls` TLS to an `https://` sink (server cert
+            verified) and also accepts an `http://` sink over raw TCP (a
+            simulator convenience for loopback test receivers).
+        sinkCredential:
+          $ref: "#/components/schemas/SinkCredential"
+
+    AmountTransactionInput:
+      type: object
+      description: What to charge and — for a two-legged / CIBA token — to whom.
+      required:
+        - paymentAmount
+        - referenceCode
+      properties:
+        phoneNumber:
+          type: string
+          description: >-
+            The mobile account to charge, in E.164 format (starting with `+`).
+            Optional: omit it to charge the account identified by a three-legged
+            access token.
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        clientCorrelator:
+          type: string
+          description: Client-supplied correlation id, echoed on the response.
+        paymentAmount:
+          $ref: "#/components/schemas/PaymentAmountForCharge"
+        referenceCode:
+          type: string
+          description: Merchant reference for the payment.
+          example: ref-001
+
+    PaymentAmountForCharge:
+      type: object
+      description: The amount to charge, plus optional metadata and line items.
+      required:
+        - chargingInformation
+      properties:
+        chargingInformation:
+          $ref: "#/components/schemas/ChargingInformation"
+        chargingMetaData:
+          $ref: "#/components/schemas/ChargingMetaData"
+        paymentDetails:
+          type: array
+          minItems: 1
+          description: Optional line items making up the total.
+          items:
+            $ref: "#/components/schemas/PaymentItem"
+
+    ChargingInformation:
+      type: object
+      description: The money to charge.
+      required:
+        - amount
+        - currency
+        - description
+      properties:
+        amount:
+          type: number
+          format: float
+          minimum: 0.001
+          multipleOf: 0.001
+          description: The amount to charge (at least `0.001`).
+          example: 9.99
+        currency:
+          type: string
+          description: ISO 4217 currency code.
+          example: EUR
+        description:
+          type: string
+          description: Human-readable description of the charge.
+          example: A digital good
+        isTaxIncluded:
+          type: boolean
+          default: false
+          description: Whether `amount` already includes tax.
+        taxAmount:
+          type: number
+          format: float
+          minimum: 0
+          multipleOf: 0.001
+          description: The tax portion of `amount`, if any.
+
+    ChargingMetaData:
+      type: object
+      description: >-
+        Optional merchant / channel metadata. Echoed verbatim by CamaraSim; not
+        used to drive functional cases.
+      properties:
+        merchantName:
+          type: string
+        merchantIdentifier:
+          type: string
+        fee:
+          type: number
+          multipleOf: 0.01
+        purchaseCategoryCode:
+          type: string
+        channel:
+          type: string
+        serviceId:
+          type: string
+        productId:
+          type: string
+
+    PaymentItem:
+      type: object
+      description: A single line item of a payment.
+      required:
+        - id
+        - amount
+        - currency
+        - description
+      properties:
+        id:
+          type: string
+        amount:
+          type: number
+          format: float
+          minimum: 0.001
+          multipleOf: 0.001
+        currency:
+          type: string
+        description:
+          type: string
+        isTaxIncluded:
+          type: boolean
+          default: false
+        taxAmount:
+          type: number
+          format: float
+          minimum: 0
+          multipleOf: 0.001
+
+    SinkCredential:
+      type: object
+      description: >-
+        Credential for the callback `sink`. Kept in memory only and never echoed
+        back in a `Payment` (it carries a secret). CamaraSim applies an
+        `ACCESSTOKEN` credential (its `accessToken` is sent on the charging
+        notification as `Authorization: Bearer <accessToken>`, RFC 6750) and a
+        `PLAIN` credential (its `identifier` + `secret` are sent as
+        `Authorization: Basic <base64(identifier:secret)>`, RFC 7617 — the standard
+        application of a plain identifier/secret pair). The `REFRESHTOKEN`
+        credential type is accepted for schema fidelity but not applied (a
+        documented cut — it needs a token-exchange round trip).
+      required:
+        - credentialType
+      properties:
+        credentialType:
+          type: string
+          enum:
+            - PLAIN
+            - ACCESSTOKEN
+            - REFRESHTOKEN
+          description: >-
+            The type of credential. CamaraSim applies `ACCESSTOKEN` and `PLAIN`.
+        accessToken:
+          type: string
+          description: >-
+            The access token, sent as `Authorization: Bearer <accessToken>` when
+            `credentialType` is `ACCESSTOKEN`.
+        accessTokenType:
+          type: string
+          enum:
+            - bearer
+          description: The access-token type; only `bearer` is defined.
+        identifier:
+          type: string
+          description: >-
+            The identifier (account or username) half of a `PLAIN` credential; sent
+            as the username in the callback's HTTP Basic `Authorization` header when
+            `credentialType` is `PLAIN`.
+        secret:
+          type: string
+          description: >-
+            The secret (password or passphrase) half of a `PLAIN` credential; sent
+            as the password in the callback's HTTP Basic `Authorization` header when
+            `credentialType` is `PLAIN`.
+
+    CloudEvent:
+      type: object
+      description: |
+        A CloudEvents 1.0 event delivered to a payment's `sink`. CamaraSim emits
+        the `payment-completed` type (one-step `createPayment` charge, or a
+        two-step `confirmPayment`; `data` is `EventPaymentCompleted`), the
+        `payment-reserved` type (two-step `preparePayment` reservation →
+        `reserved`; `data` is `EventPaymentReserved`), the
+        `payment-pending-validation` type (two-step `preparePayment` reservation →
+        `pending_validation`, the `…888` tail; `data` is
+        `EventPaymentPendingValidation`), the `payment-cancelled` type
+        (two-step `cancelPayment` releasing a `reserved` payment; `data` is
+        `EventPaymentCancelled`), and the `payment-denied` type (two-step
+        `validatePayment` that exhausts its OTP-attempt budget; `data` is
+        `EventPaymentDenied`).
+      required:
+        - id
+        - source
+        - specversion
+        - type
+        - time
+        - data
+      properties:
+        id:
+          type: string
+          description: Identifier of this event, unique within the source context.
+          example: "83a1c8e0-2b6a-4a2e-9c1f-0a1b2c3d4e5f"
+        source:
+          type: string
+          format: uri-reference
+          description: The context in which the event happened.
+          example: "//camarasimulator/carrier-billing"
+        type:
+          type: string
+          enum:
+            - "org.camaraproject.carrier-billing.v0.payment-completed"
+            - "org.camaraproject.carrier-billing.v0.payment-reserved"
+            - "org.camaraproject.carrier-billing.v0.payment-pending-validation"
+            - "org.camaraproject.carrier-billing.v0.payment-cancelled"
+            - "org.camaraproject.carrier-billing.v0.payment-denied"
+        specversion:
+          type: string
+          enum:
+            - "1.0"
+        datacontenttype:
+          type: string
+          enum:
+            - "application/json"
+        time:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp (with time zone) of the occurrence.
+          example: "2024-01-01T14:27:08Z"
+        data:
+          oneOf:
+            - $ref: "#/components/schemas/EventPaymentCompleted"
+            - $ref: "#/components/schemas/EventPaymentReserved"
+            - $ref: "#/components/schemas/EventPaymentPendingValidation"
+            - $ref: "#/components/schemas/EventPaymentCancelled"
+            - $ref: "#/components/schemas/EventPaymentDenied"
+      example:
+        id: "83a1c8e0-2b6a-4a2e-9c1f-0a1b2c3d4e5f"
+        source: "//camarasimulator/carrier-billing"
+        type: "org.camaraproject.carrier-billing.v0.payment-completed"
+        specversion: "1.0"
+        datacontenttype: "application/json"
+        time: "2024-01-01T14:27:08Z"
+        data:
+          paymentId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+          status: succeeded
+          description: The payment has been completed successfully.
+          paymentDate: "2024-01-01T14:27:08Z"
+
+    EventPaymentCompleted:
+      type: object
+      description: >-
+        The `data` payload of a `payment-completed` CloudEvent (the CAMARA
+        `BasicEvent` for a completed payment).
+      required:
+        - paymentId
+        - status
+        - description
+        - paymentDate
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+          description: The payment that completed.
+        status:
+          type: string
+          description: The charging outcome. `succeeded` for a completed charge.
+          enum:
+            - succeeded
+            - failed
+        description:
+          type: string
+          description: Human-readable explanation of the outcome.
+        paymentDate:
+          type: string
+          format: date-time
+          description: When the payment was charged (RFC 3339, `Z` offset).
+
+    EventPaymentReserved:
+      type: object
+      description: >-
+        The `data` payload of a `payment-reserved` CloudEvent (the CAMARA
+        `BasicEvent` for a reserved payment). A reservation charges nothing, so —
+        unlike `EventPaymentCompleted` — there is no `paymentDate`.
+      required:
+        - paymentId
+        - status
+        - description
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+          description: The payment that was reserved.
+        status:
+          type: string
+          description: The reservation outcome. `succeeded` for a created reservation.
+          enum:
+            - succeeded
+            - failed
+        description:
+          type: string
+          description: Human-readable explanation of the outcome.
+
+    EventPaymentPendingValidation:
+      type: object
+      description: >-
+        The `data` payload of a `payment-pending-validation` CloudEvent (the
+        CAMARA `BasicEvent` for a reservation awaiting OTP validation). Nothing
+        is charged or reserved yet, so — like `EventPaymentReserved` — there is
+        no `paymentDate`; and (per the CAMARA schema) the notification carries no
+        `validationInfo` — the `authorizationId` is delivered only in the
+        synchronous `preparePayment` response body.
+      required:
+        - paymentId
+        - status
+        - description
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+          description: The payment now awaiting validation.
+        status:
+          type: string
+          description: >-
+            The reservation outcome. `succeeded` — the reservation was accepted
+            into `pending_validation`.
+          enum:
+            - succeeded
+            - failed
+        description:
+          type: string
+          description: Human-readable explanation of the outcome.
+
+    EventPaymentCancelled:
+      type: object
+      description: >-
+        The `data` payload of a `payment-cancelled` CloudEvent (the CAMARA
+        `BasicEvent` for a cancelled payment). `cancelPayment` releases a
+        `reserved` payment without charging it, so the flow ends without a
+        charge: `status` is `failed` and — like `EventPaymentReserved` — there is
+        no `paymentDate`.
+      required:
+        - paymentId
+        - status
+        - description
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+          description: The payment that was cancelled.
+        status:
+          type: string
+          description: >-
+            The charging outcome. `failed` — the reservation was released
+            without a charge.
+          enum:
+            - succeeded
+            - failed
+        description:
+          type: string
+          description: Human-readable explanation of the outcome.
+
+    EventPaymentDenied:
+      type: object
+      description: >-
+        The `data` payload of a `payment-denied` CloudEvent (the CAMARA
+        `BasicEvent` for a denied payment). `validatePayment` denies a
+        `pending_validation` reservation when its OTP-attempt budget is
+        exhausted, without ever charging it, so the flow ends without a charge:
+        `status` is `failed` and — like `EventPaymentCancelled` — there is no
+        `paymentDate`.
+      required:
+        - paymentId
+        - status
+        - description
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+          description: The payment that was denied.
+        status:
+          type: string
+          description: >-
+            The charging outcome. `failed` — the reservation was denied without
+            a charge.
+          enum:
+            - succeeded
+            - failed
+        description:
+          type: string
+          description: Human-readable explanation of the outcome.
+
+    PaymentCreated:
+      type: object
+      description: A created payment.
+      required:
+        - paymentId
+        - amountTransaction
+        - paymentStatus
+        - paymentCreationDate
+      properties:
+        paymentId:
+          type: string
+          description: Server-assigned, opaque, UUID-shaped payment id.
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        amountTransaction:
+          $ref: "#/components/schemas/AmountTransaction"
+        paymentStatus:
+          type: string
+          description: >-
+            The payment's status. In the one-step flow a happy path is
+            `succeeded`.
+          enum:
+            - processing
+            - pending_validation
+            - denied
+            - reserved
+            - succeeded
+            - cancelled
+        paymentCreationDate:
+          type: string
+          format: date-time
+          description: When the payment was created (RFC 3339, `Z` offset).
+        paymentDate:
+          type: string
+          format: date-time
+          description: When the payment was charged (RFC 3339, `Z` offset).
+
+    Payment:
+      type: object
+      description: |
+        A payment as returned by `retrievePayment`. Identical to
+        `PaymentCreated` plus an optional `sink`. CamaraSim never applies a
+        `sink`, so the read-back representation omits it (it returns exactly what
+        `createPayment` produced).
+      required:
+        - paymentId
+        - amountTransaction
+        - paymentStatus
+        - paymentCreationDate
+      properties:
+        paymentId:
+          type: string
+          description: Server-assigned, opaque, UUID-shaped payment id.
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        amountTransaction:
+          $ref: "#/components/schemas/AmountTransaction"
+        paymentStatus:
+          type: string
+          description: The payment's status (a happy path is `succeeded`).
+          enum:
+            - processing
+            - pending_validation
+            - denied
+            - reserved
+            - succeeded
+            - cancelled
+        paymentCreationDate:
+          type: string
+          format: date-time
+          description: When the payment was created (RFC 3339, `Z` offset).
+        paymentDate:
+          type: string
+          format: date-time
+          description: When the payment was charged (RFC 3339, `Z` offset).
+        sink:
+          type: string
+          format: uri
+          description: >-
+            The callback that was registered at creation, if any. CamaraSim does
+            not act on or persist a `sink`, so it is always omitted here.
+
+    PaymentArray:
+      type: array
+      description: |
+        A list of payment(s), returned by `retrievePayments`. May be empty. Each
+        item is a `Payment` (identical to what `createPayment` produced;
+        CamaraSim never applies a `sink`, so items omit it).
+      items:
+        $ref: "#/components/schemas/Payment"
+
+    ReservePayment:
+      type: object
+      description: |
+        Request to **reserve** a payment (`preparePayment`), the first step of the
+        two-step flow. Structurally identical to `CreatePayment` in CamaraSim:
+        the same `amountTransaction` (what to reserve and, for a two-legged / CIBA
+        token, to whom), plus the `sink` / `sinkCredential` used for the
+        `payment-reserved` / `payment-pending-validation` (and later terminal)
+        charging notifications (see the operation's `callbacks`).
+      required:
+        - amountTransaction
+      properties:
+        amountTransaction:
+          $ref: "#/components/schemas/AmountTransactionInput"
+        sink:
+          type: string
+          format: uri
+          pattern: '^https://.+$'
+          example: "https://endpoint.example.com/sink"
+          description: >-
+            Optional callback URL for charging notifications. On a successful
+            reservation CamaraSim delivers a `payment-reserved` (or, for a `…888`
+            tail, `payment-pending-validation`) CloudEvent here, and later the
+            terminal `payment-completed` / `payment-cancelled` / `payment-denied`
+            event (see the operation's `callbacks`). CAMARA specifies `https://`;
+            CamaraSim delivers over `rustls` TLS to an `https://` sink (server cert
+            verified) and also accepts an `http://` sink over raw TCP (a
+            simulator convenience for loopback test receivers).
+        sinkCredential:
+          $ref: "#/components/schemas/SinkCredential"
+
+    PaymentReserved:
+      type: object
+      description: |
+        A reserved payment, returned by `preparePayment`. Like `PaymentCreated`
+        but with `paymentStatus: "reserved"` and no `paymentDate` — nothing has
+        been charged yet (a later `confirmPayment` charges it → `succeeded`, a
+        `cancelPayment` releases it → `cancelled`).
+      required:
+        - paymentId
+        - amountTransaction
+        - paymentStatus
+        - paymentCreationDate
+      properties:
+        paymentId:
+          type: string
+          description: Server-assigned, opaque, UUID-shaped payment id.
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        amountTransaction:
+          $ref: "#/components/schemas/AmountTransaction"
+        paymentStatus:
+          type: string
+          description: >-
+            The reservation's status: `reserved` when no OTP validation is
+            required, or `pending_validation` when it is (a phone number ending
+            in `888`), in which case `validationInfo` is present.
+          enum:
+            - processing
+            - pending_validation
+            - denied
+            - reserved
+            - succeeded
+            - cancelled
+        paymentCreationDate:
+          type: string
+          format: date-time
+          description: When the reservation was created (RFC 3339, `Z` offset).
+        validationInfo:
+          $ref: "#/components/schemas/ValidationInfo"
+
+    ValidationInfo:
+      type: object
+      description: |
+        Present on a `pending_validation` reservation: how the OTP validation is
+        to be performed. CamaraSim always uses the `validate` action (a `code`
+        submitted to `validatePayment`) — it never issues the `open` (browseable
+        URL) variant.
+      required:
+        - action
+        - authorizationId
+      properties:
+        action:
+          type: string
+          description: The validation action to perform.
+          enum:
+            - validate
+        authorizationId:
+          type: string
+          description: >-
+            Unique authorization identifier for this payment, submitted (with the
+            OTP `code`) to `validatePayment`.
+          example: "Fn34o8g239v3wrb3t"
+
+    ValidatePayment:
+      type: object
+      description: |
+        Request to validate a `pending_validation` reservation's OTP
+        (`validatePayment`). The `authorizationId` is the one echoed in the
+        reservation's `validationInfo`; the `code` is the OTP "received via SMS"
+        (deterministic here — the reserved phone number's last six digits).
+      required:
+        - authorizationId
+        - code
+      properties:
+        authorizationId:
+          type: string
+          description: Unique authorization identifier for a specific payment.
+          example: "Fn34o8g239v3wrb3t"
+        code:
+          type: string
+          description: Code received via SMS to validate and authorize the payment.
+          example: "789888"
+
+    ConfirmPayment:
+      type: object
+      description: |
+        Request body for `confirmPayment` (the CAMARA `PhoneNumber` shape). The
+        optional `phoneNumber` re-identifies the account for a two-legged
+        confirmation; CamaraSim addresses the reservation by its opaque
+        `paymentId`, so the field is accepted but not applied. The whole body is
+        optional — an empty body is accepted.
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          description: >-
+            E.164 phone number of the account. Accepted but not applied
+            (CamaraSim addresses the reservation by its `paymentId`).
+
+    CancelPayment:
+      type: object
+      description: |
+        Request body for `cancelPayment` (the CAMARA `PhoneNumber` shape,
+        mirroring `ConfirmPayment`). The optional `phoneNumber` re-identifies the
+        account for a two-legged cancellation; CamaraSim addresses the
+        reservation by its opaque `paymentId`, so the field is accepted but not
+        applied. The whole body is optional — an empty body is accepted.
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          description: >-
+            E.164 phone number of the account. Accepted but not applied
+            (CamaraSim addresses the reservation by its `paymentId`).
+
+    AmountTransaction:
+      type: object
+      description: The echoed charge, with the resolved `phoneNumber`.
+      required:
+        - phoneNumber
+        - paymentAmount
+        - referenceCode
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          description: The account that was charged.
+        clientCorrelator:
+          type: string
+        paymentAmount:
+          $ref: "#/components/schemas/PaymentAmountForCharge"
+        referenceCode:
+          type: string
+
+    CarrierBillingError:
+      type: object
+      description: |
+        The CAMARA error body with Carrier-Billing-specific `code` values (a
+        superset of the shared base catalog for this API's 422 cases).
+      required:
+        - status
+        - code
+        - message
+      properties:
+        status:
+          type: integer
+          description: The HTTP status code, echoed in the body.
+        code:
+          type: string
+          description: Machine-readable CAMARA / Carrier Billing error code.
+          enum:
+            - SERVICE_NOT_APPLICABLE
+            - MISSING_IDENTIFIER
+            - ALREADY_EXISTS
+            - CARRIER_BILLING.UNAUTHORIZED_AMOUNT
+            - CARRIER_BILLING.INVALID_AUTHORIZATION_ID
+            - CARRIER_BILLING.INVALID_CODE
+            - CARRIER_BILLING.VALIDATION_FAILED
+            - CARRIER_BILLING.PAYMENT_CONFIRMED
+            - CARRIER_BILLING.PAYMENT_CANCELLED
+            - CONFLICT
+        message:
+          type: string
+          description: Human-readable explanation.

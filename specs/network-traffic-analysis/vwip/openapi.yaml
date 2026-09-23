@@ -1,0 +1,494 @@
+# CamaraSim — Network Traffic Analysis, API version vwip (CAMARA NetworkInsights, wip).
+#
+# Vendored from the CAMARA NetworkInsights API suite's Network Traffic Analysis
+# API (work-in-progress — no released version yet, so mounted at its canonical
+# `vwip` base path `/network-traffic-analysis/vwip`, like the other pre-1.0 wip
+# APIs) and annotated with CamaraSim's parameter-driven functional cases
+# (docs/DESIGN.md §7, §9). Backed by `src/apis/network_traffic_analysis/vwip.rs`;
+# spec and code must not drift.
+#
+# Serves `GET /traffic-analysis`.
+#
+# Divergences from the upstream CAMARA source (documented cuts):
+#   - The upstream `$ref`s into `../common/CAMARA_common.yaml` for `DateTime`,
+#     `Page`, `PerPage`, `Pagination`, `XCorrelator`, and `ErrorInfo`; CamaraSim
+#     inlines the equivalent schemas here (and `$ref`s the shared error model in
+#     `../../shared/errors.yaml`) so every served spec resolves without vendoring
+#     the whole Commonalities file.
+#   - CamaraSim exposes the full shared reserved-error set (so every reserved
+#     suffix is reachable); canonical Network Traffic Analysis (wip) declares only
+#     400/401/403/404.
+#   - The analysis window is materialised as at most 100 time slots to keep the
+#     response bounded (see the `x-camarasim-scenarios` note).
+openapi: 3.0.3
+info:
+  title: Network Traffic Analysis
+  description: |
+    Reports **aggregated, service-level traffic statistics** for a specified
+    network (e.g. a private network or slice) over a requested time window: for
+    each DPI-detected application (e.g. `whatsapp`, `netflix`), the number of
+    accesses and the cumulative upstream / downstream / total traffic, grouped
+    into `DAY` or `HOUR` time slots. It is the traffic counterpart of the sibling
+    Network Health Assessment API in the same NetworkInsights suite.
+
+    This is the CamaraSim reference double for CAMARA Network Traffic Analysis
+    (part of the NetworkInsights suite, wip). The `/traffic-analysis` endpoint
+    requires the `network-traffic-analysis:traffic-analysis:read` scope.
+
+    ## Privacy and data granularity
+
+    All data is aggregated at the network level and derived from DPI collection;
+    it contains **no** individual device, user, or terminal identifier. The `app`
+    field names an application service, not a person. It is therefore a two-legged
+    (`client_credentials`) service-to-service query: no end-user personal data is
+    processed, so no user consent or three-legged token is required. The network
+    is identified by the required `networkId` query parameter (a UUID).
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Three independent control planes drive the answer:
+
+    - **Reserved error suffix (`networkId`).** The `networkId` UUID is the
+      identifier: if its trailing three digits name a reserved CAMARA status, the
+      endpoint answers with that canonical CAMARA error (shared convention — see
+      the referenced `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`,
+      `…422`, `…429`, `…500`, `…503`. A UUID contains digits, so the convention
+      applies unchanged — e.g. `…-000000000404` selects `404 NOT_FOUND` (the
+      spec's "networkId does not exist").
+    - **Applications (`networkId` digits).** Otherwise the `networkId`'s trailing
+      three digits `d` (`000`–`999`) fix how many applications appear:
+        - `d == 000` (or a `networkId` with fewer than three digits) → **no
+          data**: an empty `records` array with `totalCount: 0` (a successful
+          `200`, not a `404`).
+        - otherwise `((d % 5) + 1)` applications (1–5) are drawn from a fixed DPI
+          catalog, and `d` also scales each application's traffic counters.
+    - **Window × frequency.** The number of time slots is the count of whole
+      `frequency` units in `[startDate, endDate)` (at least one, capped at 100),
+      so the same window yields far more records at `HOUR` than at `DAY`
+      granularity. Each application contributes one record per slot.
+
+    The optional `app` filter narrows the records to a single application (an
+    unknown app → an empty page); every record still carries its `app` field.
+    `page`/`perPage` window the result. `accessFlow` is always
+    `accessUpFlow + accessDownFlow`.
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+externalDocs:
+  description: Project documentation at CAMARA
+  url: https://github.com/camaraproject/NetworkInsights
+
+servers:
+  - url: "{apiRoot}/network-traffic-analysis/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /traffic-analysis:
+    get:
+      operationId: getTrafficAnalysis
+      summary: Get network traffic analysis
+      description: |
+        Query aggregated, service-level traffic statistics for the network named
+        by `networkId` over `[startDate, endDate)` at `DAY` or `HOUR`
+        granularity, returning a paged list of per-application records plus a
+        pagination envelope.
+
+        The `networkId` UUID is the control-plane identifier — see the API
+        description for the parameter-driven functional cases (its trailing three
+        digits set the application count / traffic volumes or a reserved CAMARA
+        error). When no data is available for the requested period the endpoint
+        returns `200` with an empty `records` array (`…000` tail), never a `404`.
+      security:
+        - openId:
+            - network-traffic-analysis:traffic-analysis:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: networkId
+          in: query
+          required: true
+          description: Unique identifier of the analysed network (UUID format).
+          schema:
+            $ref: "#/components/schemas/NetworkId"
+        - name: startDate
+          in: query
+          required: true
+          description: Start of the analysis period (RFC 3339 with timezone), inclusive.
+          schema:
+            $ref: "#/components/schemas/DateTime"
+        - name: endDate
+          in: query
+          required: true
+          description: End of the analysis period (RFC 3339 with timezone), exclusive.
+          schema:
+            $ref: "#/components/schemas/DateTime"
+        - name: frequency
+          in: query
+          required: true
+          description: Analysis granularity (time interval for aggregation).
+          schema:
+            $ref: "#/components/schemas/Frequency"
+        - name: app
+          in: query
+          required: false
+          description: |
+            Optional filter to query traffic data for a specific application.
+            When provided, only records for that application are returned; when
+            omitted, records for all applications are returned. The `app` field
+            is always present in each record regardless.
+          schema:
+            type: string
+            maxLength: 128
+          example: "whatsapp"
+        - name: page
+          in: query
+          required: false
+          description: Requested page number (1-indexed). Defaults to 1.
+          schema:
+            $ref: "#/components/schemas/Page"
+        - name: perPage
+          in: query
+          required: false
+          description: Number of items per page. Defaults to 20, maximum 100.
+          schema:
+            $ref: "#/components/schemas/PerPage"
+      responses:
+        "200":
+          description: |
+            Traffic analysis data for the requested period. Returns an empty
+            `records` array (with `totalCount: 0`) when the `networkId` exists
+            but no traffic data is available for the period (`…000` tail).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrafficAnalysisResponse"
+              examples:
+                success:
+                  summary: Two applications, one DAY slot (`…012` tail)
+                  value:
+                    records:
+                      - app: whatsapp
+                        ipv4Address: "202.112.17.101"
+                        description: A free cross-platform app for messaging, calls, and media sharing.
+                        accessCount: 13
+                        accessUpFlow: 13312
+                        accessDownFlow: 26624
+                        accessFlow: 39936
+                        startDate: "2024-06-01T00:00:00Z"
+                        endDate: "2024-06-02T00:00:00Z"
+                        accessDate: "2024-06-01"
+                      - app: wechat
+                        ipv4Address: "202.112.17.102"
+                        description: A multi-purpose messaging, social media and mobile payment app.
+                        accessCount: 26
+                        accessUpFlow: 26624
+                        accessDownFlow: 53248
+                        accessFlow: 79872
+                        startDate: "2024-06-01T00:00:00Z"
+                        endDate: "2024-06-02T00:00:00Z"
+                        accessDate: "2024-06-01"
+                    pagination:
+                      page: 1
+                      perPage: 20
+                      totalCount: 2
+                      totalPages: 1
+                noData:
+                  summary: No data available (`…000` tail)
+                  value:
+                    records: []
+                    pagination:
+                      page: 1
+                      perPage: 20
+                      totalCount: 0
+                      totalPages: 0
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            missing/non-UUID `networkId`, a missing/unknown `frequency`, a
+            missing/malformed `startDate`/`endDate`, an empty or over-long `app`,
+            or a non-integer `page`/`perPage`; and `OUT_OF_RANGE` for
+            `endDate <= startDate`, a `page`/`perPage` below 1, or a `perPage`
+            above 100.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrafficAnalysisError"
+              examples:
+                invalidArgument:
+                  summary: Missing or malformed query parameter
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`networkId` must be a UUID (e.g. 123e4567-e89b-12d3-a456-426614174000)."
+                outOfRange:
+                  summary: endDate before startDate, or perPage above 100
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`endDate` must be strictly after `startDate`."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `networkId` identifier, the analysis window,
+          and `frequency` (docs/DESIGN.md §7). The `networkId`'s trailing three
+          digits set the application count / traffic volumes or a reserved error;
+          the window × frequency set the number of time slots. Reserved error
+          suffixes come from the shared convention in errors.yaml. The window is
+          materialised as at most 100 time slots (a documented cut to bound the
+          response).
+        cases:
+          - input: networkId ending in a reserved error suffix (e.g. …404, …429)
+            result: the canonical CAMARA error for that status
+          - input: "networkId trailing digits …000 (or fewer than three digits)"
+            result: "200 { records: [], pagination.totalCount: 0 }"
+          - input: "networkId trailing digits d (001–999, non-reserved)"
+            result: "200 with ((d % 5) + 1) applications per time slot; traffic scales with d"
+          - input: "frequency=DAY vs HOUR over the same window"
+            result: "one time slot per whole day vs per whole hour (min 1, capped at 100)"
+          - input: "app=<name> filter"
+            result: "only that application's records (an unknown app → empty page); app still present per record"
+          - input: "endDate <= startDate"
+            result: "400 OUT_OF_RANGE"
+          - input: "perPage > 100, or page/perPage < 1"
+            result: "400 OUT_OF_RANGE"
+          - input: "missing/non-UUID networkId, missing/unknown frequency, malformed startDate/endDate, empty/over-long app, non-integer page/perPage"
+            result: "400 INVALID_ARGUMENT"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    NetworkId:
+      type: string
+      format: uuid
+      maxLength: 36
+      description: Network ID in UUID format (unique identifier of the analysed network).
+      example: "123e4567-e89b-12d3-a456-426614174000"
+
+    Frequency:
+      type: string
+      description: Analysis granularity (time interval for aggregation).
+      enum:
+        - DAY
+        - HOUR
+      example: DAY
+
+    DateTime:
+      type: string
+      format: date-time
+      description: An RFC 3339 / ISO 8601 date-time with timezone, e.g. `2024-06-01T00:00:00Z`.
+      example: "2024-06-01T00:00:00Z"
+
+    Page:
+      type: integer
+      format: int32
+      minimum: 1
+      default: 1
+      description: Requested page number (1-indexed).
+
+    PerPage:
+      type: integer
+      format: int32
+      minimum: 1
+      maximum: 100
+      default: 20
+      description: Number of items per page.
+
+    TrafficRecord:
+      type: object
+      description: >-
+        A single traffic record — application-level aggregated statistics for one
+        time slot (as defined by `frequency`). `accessFlow` equals
+        `accessUpFlow + accessDownFlow`.
+      required:
+        - app
+        - accessCount
+        - accessUpFlow
+        - accessDownFlow
+        - accessFlow
+        - startDate
+        - endDate
+        - accessDate
+      properties:
+        app:
+          type: string
+          maxLength: 128
+          description: >-
+            Application identifier recognised by the DPI system, present in every
+            record. Names are normalised (lowercase, no special characters).
+          example: whatsapp
+        ipv4Address:
+          type: string
+          format: ipv4
+          maxLength: 15
+          description: Application server IPv4 address.
+          example: "202.112.17.101"
+        description:
+          type: string
+          maxLength: 512
+          description: Application description.
+          example: A free cross-platform app for messaging, calls, and media sharing.
+        accessCount:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+          description: Total number of accesses to the application.
+          example: 150
+        accessUpFlow:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+          description: Total upstream traffic (bytes).
+          example: 102400
+        accessDownFlow:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+          description: Total downstream traffic (bytes).
+          example: 204800
+        accessFlow:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+          description: Total traffic (up + down, bytes).
+          example: 307200
+        startDate:
+          allOf:
+            - $ref: "#/components/schemas/DateTime"
+          description: Start of the aggregation period for this record (inclusive).
+        endDate:
+          allOf:
+            - $ref: "#/components/schemas/DateTime"
+          description: End of the aggregation period for this record (exclusive).
+        accessDate:
+          type: string
+          format: date
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+          maxLength: 10
+          description: The calendar date (YYYY-MM-DD) of the record's slot.
+          example: "2024-06-01"
+
+    Pagination:
+      type: object
+      description: Pagination envelope for the returned page of records.
+      required:
+        - page
+        - perPage
+        - totalCount
+        - totalPages
+      properties:
+        page:
+          type: integer
+          format: int32
+          minimum: 1
+          description: The 1-indexed page number returned.
+          example: 1
+        perPage:
+          type: integer
+          format: int32
+          minimum: 1
+          description: The page size used.
+          example: 20
+        totalCount:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Total number of records matching the query (across all pages).
+          example: 22
+        totalPages:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Total number of pages (0 when there are no records).
+          example: 2
+
+    TrafficAnalysisResponse:
+      type: object
+      additionalProperties: false
+      description: |
+        The page of traffic records plus its pagination envelope. `records` is an
+        empty array when no data is available for the requested period.
+      required:
+        - records
+        - pagination
+      properties:
+        records:
+          type: array
+          minItems: 0
+          maxItems: 100
+          description: >-
+            Traffic records for the current page (one per application per time
+            slot). Empty when no data is available.
+          items:
+            $ref: "#/components/schemas/TrafficRecord"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    TrafficAnalysisError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Network Traffic Analysis `code` set.
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - OUT_OF_RANGE
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - CONFLICT
+                - SERVICE_NOT_APPLICABLE
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

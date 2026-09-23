@@ -1,0 +1,966 @@
+# CamaraSim — Quality on Demand, API version v1 (CAMARA 1.1.0).
+#
+# Vendored from the CAMARA Quality-On-Demand API (release r3.2,
+# quality-on-demand 1.1.0) and annotated with CamaraSim's parameter-driven
+# functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/quality_on_demand/v1.rs` and its in-memory session store; spec and
+# code must not drift.
+#
+# This slice serves `POST /sessions`, `GET /sessions/{sessionId}`,
+# `DELETE /sessions/{sessionId}`, `POST /sessions/{sessionId}/extend`, and
+# `POST /retrieve-sessions`. CloudEvents notifications on `sink` deliver a
+# `qos-status-changed` event on three transitions: `DELETE_REQUESTED` on
+# `deleteSession`, `DURATION_EXPIRED` when an `AVAILABLE` session reaches its
+# `expiresAt`, and `NETWORK_TERMINATED` when the (simulated) network drops a
+# `…001` `AVAILABLE` session early (see the `notifications` callback). An
+# `ACCESSTOKEN` `sinkCredential` authenticates those callbacks with an
+# `Authorization: Bearer` header, and a `PLAIN` one with an
+# `Authorization: Basic` header (in-memory only, never echoed). Both `http://`
+# (raw TCP) and `https://` (rustls TLS, server cert verified against the bundled
+# Mozilla roots) sinks are delivered to. Only the `REFRESHTOKEN` credential type
+# remains deferred. The served spec covers only what is implemented.
+openapi: 3.0.3
+info:
+  title: Quality On Demand
+  description: |
+    Lets an application request a specific quality profile (latency /
+    throughput) for the traffic between a device and an application server for a
+    bounded duration — the "boost this flow" request behind cloud gaming, live
+    video, and real-time control.
+
+    This is the CamaraSim reference double for CAMARA Quality-On-Demand 1.1.0. It
+    is a **stateful, resource-oriented** API: `POST /sessions` creates a QoS
+    session and returns a `SessionInfo` with a `sessionId`, and
+    `GET /sessions/{sessionId}` reads that session back by id. Sessions are held
+    in an in-memory store (single node).
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    `createSession` reads three control planes:
+
+    - **The identifier** — the submitted `device` identifier (`phoneNumber`, else
+      `networkAccessIdentifier`, else the IPv4 `publicAddress`, else
+      `ipv6Address`) or, when no `device` is supplied, the access-token subject.
+      If its trailing three digits name a reserved CAMARA status (`…400`, `…401`,
+      `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`) the endpoint answers
+      with that canonical CAMARA error (see the referenced `errors.yaml`) — so
+      `…409` exercises the QoD `409 CONFLICT` (duplicate-session) case. Otherwise
+      the trailing digits pick the grant state: `…000` (and an identifier with no
+      digits) → `qosStatus: REQUESTED` (no `startedAt`/`expiresAt` yet); any other
+      tail → `qosStatus: AVAILABLE`, granted from now for `duration` seconds. A
+      `…001` tail is a special `AVAILABLE` case: when the session records a
+      `sink`, the (simulated) network terminates it early — a `NETWORK_TERMINATED`
+      `qos-status-changed` CloudEvent is delivered and the session is evicted
+      shortly after creation, before its `expiresAt`.
+    - **`duration`** — seconds the session is requested for. `< 1` →
+      `400 INVALID_ARGUMENT`; greater than the simulator's fixed QoS-profile
+      ceiling of 86400 s (24 h) → `400 QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE`;
+      otherwise `expiresAt = startedAt + duration`.
+    - **`qosProfile`** — the requested profile name. A profile whose name (case-
+      insensitively) contains `unavailable` →
+      `422 QUALITY_ON_DEMAND.QOS_PROFILE_NOT_APPLICABLE`; any other well-formed
+      name is accepted.
+
+    `getSession` returns the stored `SessionInfo` (`200`), or `404 NOT_FOUND`
+    when no session exists for the id. `deleteSession` evicts the session and
+    returns `204 No Content`, or `404 NOT_FOUND` for an unknown id; if the session
+    was created with a `sink`, it delivers a `qos-status-changed` CloudEvent
+    (`DELETE_REQUESTED`) to that sink (best-effort; `http://` and `https://`).
+    Separately, an
+    `AVAILABLE` session created with a `sink` delivers a `DURATION_EXPIRED`
+    `qos-status-changed` CloudEvent when it reaches its `expiresAt` (the grant
+    lapses and the session is evicted), or — for a `…001` identifier — a
+    `NETWORK_TERMINATED` CloudEvent shortly after creation, when the simulated
+    network drops the session early.
+    `extendQosSession` adds `requestedAdditionalDuration` seconds to a stored
+    session's `duration` in place (and, for an `AVAILABLE` session, pushes
+    `expiresAt` out by the same amount), returning the updated `SessionInfo`
+    (`200`); the request seconds `< 1` → `400 INVALID_ARGUMENT`, and seconds — or
+    the resulting total duration — beyond the profile ceiling of 86400 s →
+    `400 QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE`; an unknown id → `404 NOT_FOUND`.
+  version: "1.1.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/quality-on-demand/v1"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /sessions:
+    post:
+      operationId: createSession
+      summary: Create a QoS session
+      description: |
+        Creates a QoS session for the requested `duration`, `qosProfile`, and
+        `applicationServer`, and returns its `SessionInfo`. The device is
+        identified by the `device` object (two-legged token) or by the access
+        token (three-legged). See the API description for the parameter-driven
+        functional cases.
+      security:
+        - openId:
+            - quality-on-demand:sessions:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSession"
+      responses:
+        "201":
+          description: The QoS session was created.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInfo"
+              examples:
+                available:
+                  summary: Session granted (AVAILABLE)
+                  value:
+                    sessionId: "11111111-1111-4111-8111-111111111111"
+                    device:
+                      phoneNumber: "+123456789012"
+                    applicationServer:
+                      ipv4Address: "203.0.113.0/24"
+                    qosProfile: "QOS_L"
+                    duration: 3600
+                    qosStatus: AVAILABLE
+                    startedAt: "2024-01-01T14:27:08Z"
+                    expiresAt: "2024-01-01T15:27:08Z"
+                requested:
+                  summary: Session pending (REQUESTED — identifier ends in …000)
+                  value:
+                    sessionId: "22222222-2222-4222-8222-222222222222"
+                    device:
+                      phoneNumber: "+123456789000"
+                    applicationServer:
+                      ipv4Address: "203.0.113.0/24"
+                    qosProfile: "QOS_L"
+                    duration: 60
+                    qosStatus: REQUESTED
+        "400":
+          description: |
+            Invalid request. The `code` is one of the generic `INVALID_ARGUMENT`
+            (malformed body, missing/invalid field) or the API-specific
+            `QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE` (the requested `duration`
+            exceeds the QoS profile's maximum).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                invalidArgument:
+                  summary: Malformed or missing field
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`qosProfile` is required."
+                durationOutOfRange:
+                  summary: Duration beyond the profile maximum
+                  value:
+                    status: 400
+                    code: QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE
+                    message: The requested duration is out of the allowed range for the QoS profile.
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          description: |
+            The request cannot be fulfilled for the provided identifier or
+            profile. The `code` is one of the generic `SERVICE_NOT_APPLICABLE` /
+            `MISSING_IDENTIFIER` or the API-specific
+            `QUALITY_ON_DEMAND.QOS_PROFILE_NOT_APPLICABLE` (the requested profile
+            is not applicable for this session).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                missingIdentifier:
+                  summary: No device and the token identifies none
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: No `device` supplied and the access token identifies no device.
+                qosProfileNotApplicable:
+                  summary: Profile not applicable
+                  value:
+                    status: 422
+                    code: QUALITY_ON_DEMAND.QOS_PROFILE_NOT_APPLICABLE
+                    message: The requested QoS profile is not applicable for this session.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the identifier, `duration`, and `qosProfile`
+          (docs/DESIGN.md §7). Reserved error suffixes come from the shared
+          convention in errors.yaml. Note: canonical Quality-On-Demand 1.1.0
+          declares 400/401/403/404/409/422/429 for this operation; CamaraSim also
+          exposes 500/503 so every reserved suffix is reachable (documented
+          extension). The three-legged `UNNECESSARY_IDENTIFIER` /
+          `UNSUPPORTED_IDENTIFIER` (422) cases and the `INVALID_SINK` (400) case
+          are declared by canonical QoD but not selected by an input pattern here
+          (documented cut, DESIGN §7). If a `sink` is supplied it is remembered and
+          a `qos-status-changed` CloudEvent is delivered to it on three transitions
+          (see the `notifications` callback and `deleteSession`):
+          `DELETE_REQUESTED` when the session is deleted, `DURATION_EXPIRED` when
+          an `AVAILABLE` session reaches its `expiresAt`, and `NETWORK_TERMINATED`
+          shortly after creation for a `…001` identifier (the simulated network
+          drops the session early). An `ACCESSTOKEN` `sinkCredential` authenticates
+          those callbacks with an `Authorization: Bearer <accessToken>` header, and a
+          `PLAIN` `sinkCredential` (an `identifier` + `secret` pair) authenticates
+          them with an `Authorization: Basic <base64(identifier:secret)>` header
+          (RFC 7617); credentials are kept in memory only, never echoed.
+          `REFRESHTOKEN` (which needs a token-exchange round trip) is accepted but not
+          applied (documented cut). Delivery is best-effort to an `http://` sink (raw
+          TCP) or an `https://` sink (rustls TLS; the server certificate is verified
+          against the bundled Mozilla root store).
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …409)
+            result: the canonical CAMARA error for that status (…409 → 409 CONFLICT)
+          - input: valid request, identifier tail other than …000/…001
+            result: "201 SessionInfo, qosStatus AVAILABLE, startedAt/expiresAt set"
+          - input: an AVAILABLE session created with a sink, once expiresAt is reached
+            result: "session evicted; DURATION_EXPIRED CloudEvent POSTed to the sink"
+          - input: valid request, identifier tail …001, session created with a sink
+            result: "201 AVAILABLE; then NETWORK_TERMINATED CloudEvent POSTed and the session evicted early"
+          - input: session created with a sink and an ACCESSTOKEN sinkCredential
+            result: "the CloudEvent callback carries Authorization: Bearer <accessToken>"
+          - input: session created with a sink and a PLAIN sinkCredential (identifier + secret)
+            result: "the CloudEvent callback carries Authorization: Basic <base64(identifier:secret)>"
+          - input: session created with an https:// sink
+            result: "the CloudEvent callback is POSTed over rustls TLS (server cert verified against the bundled Mozilla roots)"
+          - input: valid request, identifier tail …000 (or no digits)
+            result: "201 SessionInfo, qosStatus REQUESTED, no startedAt/expiresAt"
+          - input: duration < 1
+            result: "400 INVALID_ARGUMENT"
+          - input: duration > 86400
+            result: "400 QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE"
+          - input: qosProfile name containing "unavailable"
+            result: "422 QUALITY_ON_DEMAND.QOS_PROFILE_NOT_APPLICABLE"
+          - input: missing applicationServer/qosProfile/duration, bad phoneNumber, or unknown field
+            result: "400 INVALID_ARGUMENT"
+      callbacks:
+        notifications:
+          "{$request.body#/sink}":
+            post:
+              summary: QoS status change notification
+              description: |
+                Delivered by the API provider to the `sink` URL supplied at session
+                creation whenever the session's `qosStatus` changes. The body is a
+                CloudEvents 1.0 `qos-status-changed` event.
+
+                CamaraSim emits this callback (`qosStatus: UNAVAILABLE`) on three
+                transitions: `statusInfo: DELETE_REQUESTED` when a session is
+                deleted, `statusInfo: DURATION_EXPIRED` when an `AVAILABLE` session
+                reaches its `expiresAt`, and `statusInfo: NETWORK_TERMINATED`
+                shortly after creation for a `…001` `AVAILABLE` session (the
+                simulated network drops it early). Delivery is best-effort,
+                fire-and-forget, over an `http://` (raw TCP) or `https://` (rustls
+                TLS, server cert verified against the bundled Mozilla roots) sink. When
+                the session was created with an `ACCESSTOKEN` `sinkCredential`, the
+                request carries an `Authorization: Bearer <accessToken>` header
+                (RFC 6750); with a `PLAIN` `sinkCredential` it carries an
+                `Authorization: Basic <base64(identifier:secret)>` header (RFC 7617).
+                The `REFRESHTOKEN` credential type is accepted but not applied (a
+                documented cut).
+              requestBody:
+                required: true
+                content:
+                  application/cloudevents+json:
+                    schema:
+                      $ref: "#/components/schemas/CloudEvent"
+              responses:
+                "204":
+                  description: Notification received.
+
+  /sessions/{sessionId}:
+    get:
+      operationId: getSession
+      summary: Get a QoS session
+      description: |
+        Returns the `SessionInfo` for the session identified by `sessionId`, as
+        it was created. `404 NOT_FOUND` if no such session exists.
+      security:
+        - openId:
+            - quality-on-demand:sessions:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sessionId
+          in: path
+          required: true
+          description: The `sessionId` returned by `createSession`.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The session was found.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInfo"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed on the `sessionId` path parameter against the in-memory store.
+        cases:
+          - input: a sessionId returned by a prior createSession
+            result: "200 SessionInfo (the stored representation)"
+          - input: an unknown sessionId
+            result: "404 NOT_FOUND"
+    delete:
+      operationId: deleteSession
+      summary: Delete a QoS session
+      description: |
+        Deletes the session identified by `sessionId`, releasing its QoS grant,
+        and returns `204 No Content`. `404 NOT_FOUND` if no such session exists
+        (never created, or already deleted). If the session was created with a
+        `sink`, CamaraSim delivers a `qos-status-changed` CloudEvent to it
+        (`qosStatus: UNAVAILABLE`, `statusInfo: DELETE_REQUESTED`) — see the
+        `notifications` callback on `createSession`. Delivery is best-effort and
+        fire-and-forget, so it never delays this `204`.
+      security:
+        - openId:
+            - quality-on-demand:sessions:delete
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sessionId
+          in: path
+          required: true
+          description: The `sessionId` returned by `createSession`.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: The session was deleted. No response body.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed on the `sessionId` path parameter against the in-memory store:
+          delete is single-use, so a second delete of the same id is 404. When a
+          deleted session recorded a `sink`, a `qos-status-changed` CloudEvent
+          (`DELETE_REQUESTED`) is delivered to it (best-effort; `http://` or `https://`).
+        cases:
+          - input: a sessionId of a session that currently exists (created with a sink)
+            result: "204 No Content; DELETE_REQUESTED CloudEvent POSTed to the sink"
+          - input: a sessionId of a session that currently exists (no sink)
+            result: "204 No Content (the session is evicted; no notification)"
+          - input: an unknown or already-deleted sessionId
+            result: "404 NOT_FOUND"
+
+  /sessions/{sessionId}/extend:
+    post:
+      operationId: extendQosSession
+      summary: Extend the duration of a QoS session
+      description: |
+        Adds `requestedAdditionalDuration` seconds to the session's granted
+        `duration` and returns the updated `SessionInfo`. For an `AVAILABLE`
+        session `expiresAt` is pushed out by the same amount; the change is
+        persisted, so a later `getSession` reflects it. See the API description
+        for the parameter-driven functional cases.
+      security:
+        - openId:
+            - quality-on-demand:sessions:update
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sessionId
+          in: path
+          required: true
+          description: The `sessionId` returned by `createSession`.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExtendSessionDuration"
+      responses:
+        "200":
+          description: The session duration was extended.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInfo"
+        "400":
+          description: |
+            Invalid request. The `code` is one of the generic `INVALID_ARGUMENT`
+            (malformed body, missing/invalid field, `requestedAdditionalDuration`
+            `< 1`) or the API-specific `QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE`
+            (the requested seconds — or the resulting total duration — exceed the
+            QoS profile's maximum).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                invalidArgument:
+                  summary: Malformed or missing field
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`requestedAdditionalDuration` is required."
+                durationOutOfRange:
+                  summary: Extension beyond the profile maximum
+                  value:
+                    status: 400
+                    code: QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE
+                    message: The requested duration is out of the allowed range for the QoS profile.
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Two control planes (docs/DESIGN.md §7): the stored session (keyed on the
+          `sessionId` path parameter) and the requested `requestedAdditionalDuration`.
+          The out-of-range ceiling case is state-dependent — it fires when the
+          session's *current* duration plus the requested seconds exceed 86400 s.
+          Canonical Quality-On-Demand 1.1.0 declares 400/401/403/404/429 for this
+          operation; CamaraSim also exposes 500/503 for parity with the other
+          operations (documented extension).
+        cases:
+          - input: a valid extension on an existing session
+            result: "200 SessionInfo with the increased duration (and, if AVAILABLE, a later expiresAt)"
+          - input: requestedAdditionalDuration < 1, missing, or an unknown field
+            result: "400 INVALID_ARGUMENT"
+          - input: requestedAdditionalDuration > 86400, or current duration + requested > 86400
+            result: "400 QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE"
+          - input: an unknown or already-deleted sessionId
+            result: "404 NOT_FOUND"
+
+  /retrieve-sessions:
+    post:
+      operationId: retrieveSessionsByDevice
+      summary: Retrieve a device's QoS sessions
+      description: |
+        Returns the active QoS sessions for a device, as an array of
+        `SessionInfo`. The device is identified by the `device` object
+        (two-legged token) or by the access token (three-legged). An empty array
+        is returned when the device has no sessions — CAMARA does not 404 on an
+        empty result. See the API description and `x-camarasim-scenarios` for the
+        parameter-driven functional cases.
+      security:
+        - openId:
+            - quality-on-demand:sessions:retrieve-by-device
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        # CamaraSim leniency: `device` is optional (three-legged tokens take the
+        # device from the subject), so an empty body is accepted as `{}`.
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetrieveSessionsInput"
+      responses:
+        "200":
+          description: The device's active sessions (possibly an empty array).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SessionInfo"
+              examples:
+                some:
+                  summary: One active session for the device
+                  value:
+                    - sessionId: "11111111-1111-4111-8111-111111111111"
+                      device:
+                        phoneNumber: "+123456789012"
+                      applicationServer:
+                        ipv4Address: "203.0.113.0/24"
+                      qosProfile: "QOS_L"
+                      duration: 3600
+                      qosStatus: AVAILABLE
+                      startedAt: "2024-01-01T14:27:08Z"
+                      expiresAt: "2024-01-01T15:27:08Z"
+                none:
+                  summary: No sessions for the device
+                  value: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Two control planes (docs/DESIGN.md §7): the identifier — the submitted
+          `device` (phoneNumber, else networkAccessIdentifier, else the IPv4
+          publicAddress, else ipv6Address), else the token subject — and, on the
+          happy path, the in-memory store. A reserved error suffix on the
+          identifier selects the canonical CAMARA error (…404 → 404 NOT_FOUND,
+          the device-identifier-not-found case); otherwise the store is scanned
+          and every session whose echoed `device` equals the requested device is
+          returned (an empty array when there are none). Canonical
+          Quality-On-Demand 1.1.0 declares 400/401/403/404/422/429 for this
+          operation; CamaraSim also exposes 500/503 so every reserved suffix is
+          reachable (documented extension). Sessions are matched by their echoed
+          `device`, so a session created for a non-E.164 token subject (which
+          carries no `device` echo) is not retrievable — and a request that
+          resolves to such a subject with no submitted device returns an empty
+          array (documented cut, DESIGN §7).
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status (…404 → 404 NOT_FOUND)
+          - input: a device with one or more stored sessions
+            result: "200 with the array of that device's SessionInfo"
+          - input: a device (or resolvable subject) with no stored sessions
+            result: "200 with an empty array []"
+          - input: no device and a non-E.164 token subject
+            result: "200 with an empty array [] (no device echo to match)"
+          - input: malformed phoneNumber or an unknown field
+            result: "400 INVALID_ARGUMENT"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    CreateSession:
+      type: object
+      description: Request to create a QoS session.
+      required:
+        - applicationServer
+        - qosProfile
+        - duration
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+        applicationServer:
+          $ref: "#/components/schemas/ApplicationServer"
+        qosProfile:
+          type: string
+          description: The name of the requested QoS profile.
+          minLength: 3
+          maxLength: 256
+          pattern: '^[a-zA-Z0-9_.-]+$'
+          example: "QOS_L"
+        duration:
+          type: integer
+          format: int32
+          minimum: 1
+          description: >-
+            Requested session duration in seconds. CamaraSim caps the (single,
+            simulated) profile at 86400 s; a larger value →
+            QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE.
+          example: 3600
+        devicePorts:
+          $ref: "#/components/schemas/PortsSpec"
+        applicationServerPorts:
+          $ref: "#/components/schemas/PortsSpec"
+        sink:
+          type: string
+          format: uri
+          description: >-
+            Callback URL for CloudEvents notifications (see the `notifications`
+            callback). CamaraSim delivers a `DELETE_REQUESTED` event here when the
+            session is deleted, a `DURATION_EXPIRED` event when an `AVAILABLE`
+            session reaches its `expiresAt`, and a `NETWORK_TERMINATED` event
+            shortly after creation for a `…001` `AVAILABLE` session (the simulated
+            network drops it early); delivery is best-effort to an `http://` sink
+            (raw TCP) or an `https://` sink (rustls TLS, server certificate verified
+            against the bundled Mozilla root store).
+          example: "https://application-server.example.com/notifications"
+        sinkCredential:
+          type: object
+          description: >-
+            Credential the notification callback presents to the `sink`. Kept in
+            memory only and never echoed back in a `SessionInfo` (it carries a
+            secret). CamaraSim applies a `credentialType: ACCESSTOKEN` credential
+            (its `accessToken` is sent on every callback as
+            `Authorization: Bearer <accessToken>`, RFC 6750) and a
+            `credentialType: PLAIN` credential (its `identifier` + `secret` are sent
+            as `Authorization: Basic <base64(identifier:secret)>`, RFC 7617). The
+            `REFRESHTOKEN` credential type is accepted but not applied (a documented
+            cut).
+          properties:
+            credentialType:
+              type: string
+              enum: [PLAIN, ACCESSTOKEN, REFRESHTOKEN]
+              description: >-
+                The type of credential. CamaraSim applies `ACCESSTOKEN` and `PLAIN`.
+            accessToken:
+              type: string
+              description: >-
+                Bearer token sent on the notification callback when
+                `credentialType` is `ACCESSTOKEN`.
+            accessTokenType:
+              type: string
+              enum: [bearer]
+              description: The access-token type; only `bearer` is defined.
+            identifier:
+              type: string
+              description: >-
+                The identifier (account or username) half of a `PLAIN` credential;
+                sent as the username in the callback's HTTP Basic `Authorization`
+                header when `credentialType` is `PLAIN`.
+            secret:
+              type: string
+              description: >-
+                The secret (password or passphrase) half of a `PLAIN` credential;
+                sent as the password in the callback's HTTP Basic `Authorization`
+                header when `credentialType` is `PLAIN`.
+
+    ExtendSessionDuration:
+      type: object
+      description: Request to extend an existing QoS session's duration.
+      required:
+        - requestedAdditionalDuration
+      properties:
+        requestedAdditionalDuration:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 86400
+          description: >-
+            Seconds to add to the session's granted duration. CamaraSim rejects a
+            value beyond 86400 s — or one that pushes the resulting total duration
+            beyond 86400 s — with QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE.
+          example: 60
+
+    RetrieveSessionsInput:
+      type: object
+      description: >-
+        Parameters to list a device's QoS sessions. `device` is optional — for a
+        three-legged token the device is taken from the access-token subject.
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+
+    SessionInfo:
+      type: object
+      description: A QoS session and its current state.
+      required:
+        - sessionId
+        - applicationServer
+        - qosProfile
+        - duration
+        - qosStatus
+      properties:
+        sessionId:
+          type: string
+          format: uuid
+          description: Opaque, UUID-shaped identifier of the created session.
+          example: "11111111-1111-4111-8111-111111111111"
+        device:
+          $ref: "#/components/schemas/Device"
+        applicationServer:
+          $ref: "#/components/schemas/ApplicationServer"
+        qosProfile:
+          type: string
+          description: The QoS profile the session was created for.
+          example: "QOS_L"
+        duration:
+          type: integer
+          format: int32
+          minimum: 1
+          description: The session duration in seconds.
+          example: 3600
+        qosStatus:
+          type: string
+          description: >-
+            The session state. `AVAILABLE` when granted, `REQUESTED` when the
+            grant is still pending (CamaraSim: identifier tail …000).
+          enum:
+            - REQUESTED
+            - AVAILABLE
+            - UNAVAILABLE
+          example: AVAILABLE
+        statusInfo:
+          type: string
+          description: >-
+            Reason a session is `UNAVAILABLE`. Not produced by this slice
+            (present for schema fidelity).
+          enum:
+            - DURATION_EXPIRED
+            - NETWORK_TERMINATED
+            - DELETE_REQUESTED
+        startedAt:
+          type: string
+          format: date-time
+          description: When the session was granted. Omitted while `REQUESTED`.
+          example: "2024-01-01T14:27:08Z"
+        expiresAt:
+          type: string
+          format: date-time
+          description: When the session expires. Omitted while `REQUESTED`.
+          example: "2024-01-01T15:27:08Z"
+        devicePorts:
+          $ref: "#/components/schemas/PortsSpec"
+        applicationServerPorts:
+          $ref: "#/components/schemas/PortsSpec"
+        sink:
+          type: string
+          format: uri
+          description: The notification callback, echoed if one was supplied.
+
+    Device:
+      type: object
+      minProperties: 1
+      description: >-
+        The device, identified by at least one property. CamaraSim keys its
+        functional cases off the first present identifier, in the order
+        phoneNumber, networkAccessIdentifier, ipv4Address.publicAddress,
+        ipv6Address. In a `SessionInfo` response at most one identifier is echoed.
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          description: Device phone number in E.164 format (starting with `+`).
+          example: "+123456789012"
+        networkAccessIdentifier:
+          type: string
+          description: Device network access identifier.
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          description: Device IPv6 address.
+
+    DeviceIpv4Addr:
+      type: object
+      minProperties: 1
+      description: >-
+        The device's IPv4 addressing. CamaraSim reads `publicAddress` as the
+        identifier; the other fields are accepted for schema fidelity.
+      properties:
+        publicAddress:
+          type: string
+          example: "203.0.113.0"
+        privateAddress:
+          type: string
+        publicPort:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+
+    ApplicationServer:
+      type: object
+      minProperties: 1
+      description: The application server, identified by at least one address.
+      properties:
+        ipv4Address:
+          type: string
+          description: IPv4 address or subnet (CIDR) of the application server.
+          example: "203.0.113.0/24"
+        ipv6Address:
+          type: string
+          description: IPv6 address or subnet of the application server.
+
+    PortsSpec:
+      type: object
+      minProperties: 1
+      description: A set of ports, given as individual ports and/or ranges.
+      properties:
+        ranges:
+          type: array
+          items:
+            type: object
+            required:
+              - from
+              - to
+            properties:
+              from:
+                type: integer
+                format: int32
+                minimum: 0
+                maximum: 65535
+              to:
+                type: integer
+                format: int32
+                minimum: 0
+                maximum: 65535
+        ports:
+          type: array
+          items:
+            type: integer
+            format: int32
+            minimum: 0
+            maximum: 65535
+
+    CloudEvent:
+      type: object
+      description: |
+        A CloudEvents 1.0 event delivered to a session's `sink`. CamaraSim emits
+        the `qos-status-changed` type; the `data` payload is
+        `EventQosStatusChanged`.
+      required:
+        - id
+        - source
+        - specversion
+        - type
+        - time
+        - data
+      properties:
+        id:
+          type: string
+          description: Identifier of this event, unique within the source context.
+          example: "83a1c8e0-2b6a-4a2e-9c1f-0a1b2c3d4e5f"
+        source:
+          type: string
+          format: uri-reference
+          description: The context in which the event happened.
+          example: "//camarasimulator/quality-on-demand"
+        type:
+          type: string
+          enum:
+            - "org.camaraproject.quality-on-demand.v1.qos-status-changed"
+        specversion:
+          type: string
+          enum:
+            - "1.0"
+        datacontenttype:
+          type: string
+          enum:
+            - "application/json"
+        time:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp (with time zone) of the occurrence.
+          example: "2024-01-01T15:27:08Z"
+        data:
+          $ref: "#/components/schemas/EventQosStatusChanged"
+      example:
+        id: "83a1c8e0-2b6a-4a2e-9c1f-0a1b2c3d4e5f"
+        source: "//camarasimulator/quality-on-demand"
+        type: "org.camaraproject.quality-on-demand.v1.qos-status-changed"
+        specversion: "1.0"
+        datacontenttype: "application/json"
+        time: "2024-01-01T15:27:08Z"
+        data:
+          sessionId: "11111111-1111-4111-8111-111111111111"
+          qosStatus: UNAVAILABLE
+          statusInfo: DELETE_REQUESTED
+
+    EventQosStatusChanged:
+      type: object
+      description: The `data` payload of a `qos-status-changed` CloudEvent.
+      required:
+        - sessionId
+        - qosStatus
+      properties:
+        sessionId:
+          type: string
+          format: uuid
+          description: The session whose status changed.
+        qosStatus:
+          type: string
+          description: The session's new status.
+          enum:
+            - AVAILABLE
+            - UNAVAILABLE
+        statusInfo:
+          type: string
+          description: >-
+            Reason for the new `qosStatus`. Only applicable when `qosStatus` is
+            `UNAVAILABLE`. CamaraSim emits `DELETE_REQUESTED` (on delete),
+            `DURATION_EXPIRED` (when an `AVAILABLE` session reaches its
+            `expiresAt`), and `NETWORK_TERMINATED` (shortly after creation for a
+            `…001` `AVAILABLE` session — the simulated network drops it early).
+          enum:
+            - DURATION_EXPIRED
+            - NETWORK_TERMINATED
+            - DELETE_REQUESTED

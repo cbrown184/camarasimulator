@@ -1,0 +1,262 @@
+# CamaraSim — Short Message Service (SMS), API version v0alpha1 (CAMARA
+# ShortMessageService, 0.1.0-alpha.1).
+#
+# Vendored from the CAMARA Short Message Service API (SMS.yaml, version
+# 0.1.0-alpha.1 — an alpha spec whose canonical base path is `sms/v0alpha1`, so
+# CamaraSim mounts it there, honouring the version in the URL) and annotated with
+# CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed
+# by `src/apis/short_message_service/v0alpha1.rs`; spec and code must not drift.
+#
+# Serves `POST /short-message`. The subscription/delivery-notification surface of
+# the upstream API (sms-delivery-notification-subscription.yaml) is out of scope.
+openapi: 3.0.3
+info:
+  title: Short Message Service (SMS)
+  description: |
+    Send an SMS to one or more recipients. A business/application submits the
+    sender (`from`), the recipients (`to`), and the `message` text (optionally
+    tagged with a `category`), and the network sends the message and returns a
+    handle (`msgId`) plus the send `timestamp`. Real onboarding is required
+    upstream before an application may send; CamaraSim simulates the send.
+
+    This is the CamaraSim reference double for CAMARA Short Message Service
+    (`0.1.0-alpha.1`). The `/short-message` endpoint requires the
+    `send-sms:short-message` scope.
+
+    ## Two-legged, business-facing
+
+    Both the `from` sender and the `to` recipients are carried in the request
+    body. There is no line **subject** to fall back to, so — like Verified Caller
+    / Click to Dial — this API has no two-legged/three-legged identifier
+    resolution: the parties are always supplied explicitly.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    The **first recipient** (`to[0]`) is the identifier:
+
+    - **Reserved error suffix (identifier).** If `to[0]`'s trailing three digits
+      name a reserved CAMARA status, the endpoint answers with that canonical
+      CAMARA error (shared convention — see the referenced `errors.yaml`):
+      `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`.
+      The `…404` case is SMS's recipient-not-found; `…503`/`…500` are the
+      network-unavailable / internal cases the upstream API declares.
+    - **Happy path.** Otherwise the send succeeds with `200 { msgId, timestamp }`.
+      `msgId` is a deterministic, UUID-shaped token derived from `from`, all of
+      `to`, and `message` (so the same request yields the same id, and any change
+      to the parties or text changes it); `timestamp` is the send time (RFC 3339
+      UTC, `Z` offset).
+
+    A reserved suffix on `from`, or on a recipient other than `to[0]`, is **not**
+    the error plane — only `to[0]` selects the canonical error.
+
+    Validation: a malformed body, an empty `to`, a `from`/recipient not in E.164
+    form, an empty `message`, or an unknown `category` → `400 INVALID_ARGUMENT`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical SMS declares a subset (400/401/403/404/500/503,
+    with `INVALID_TOKEN_CONTEXT` on 403).
+  version: "0.1.0-alpha.1"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/sms/v0alpha1"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /short-message:
+    post:
+      operationId: send-sms
+      summary: Send an SMS to one or more recipients
+      description: |
+        Sends the `message` from `from` to every recipient in `to` and returns a
+        handle for the sent message. Returns `200 { msgId, timestamp }` on a
+        successful send — see the API description for the parameter-driven
+        functional cases (a reserved suffix on the first recipient `to[0]`
+        selects a canonical error; otherwise the send succeeds with a
+        deterministic `msgId`).
+      security:
+        - openId:
+            - send-sms:short-message
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageRequest"
+      responses:
+        "200":
+          description: The SMS was accepted for delivery; a handle is returned.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+              examples:
+                sent:
+                  summary: SMS sent
+                  value:
+                    msgId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    timestamp: "2024-01-01T14:27:08Z"
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body, an empty `to`, a `from`/recipient not in E.164 form,
+            an empty `message`, or an unknown `category`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SmsError"
+              examples:
+                invalidArgument:
+                  summary: Malformed body or recipient
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "Each `to` recipient must be in E.164 format (e.g. +123456789)."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the first recipient `to[0]` (docs/DESIGN.md §7). A
+          reserved trailing suffix on `to[0]` selects a canonical CAMARA error;
+          otherwise the send succeeds with a deterministic `msgId` and a fresh
+          `timestamp`. Reserved error suffixes come from the shared convention in
+          errors.yaml.
+        cases:
+          - input: to[0] ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status (…404 = recipient not found)
+          - input: "non-reserved to[0], valid from/to/message"
+            result: "200 { msgId (deterministic from from+to+message), timestamp }"
+          - input: reserved suffix on `from` or on a recipient other than to[0]
+            result: not the error plane — the send succeeds (only to[0] selects the error)
+          - input: empty `to`, a `from`/recipient not in E.164 form, or an empty `message`
+            result: "400 INVALID_ARGUMENT"
+          - input: unknown `category` value or unknown field
+            result: "400 INVALID_ARGUMENT"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    PhoneNumber:
+      type: string
+      description: A phone number (MSISDN) in E.164 format (starting with `+`).
+      pattern: '^\+[1-9][0-9]{4,14}$'
+      example: "+123456789012"
+
+    MessageRequest:
+      type: object
+      description: |
+        A request to send an SMS. Both parties are carried explicitly
+        (two-legged, business-facing — there is no line subject). The first
+        recipient (`to[0]`) is the control-plane identifier.
+      required:
+        - to
+        - from
+        - message
+      properties:
+        to:
+          type: array
+          description: The recipients' MSISDNs. At least one is required.
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/PhoneNumber"
+        from:
+          $ref: "#/components/schemas/PhoneNumber"
+        category:
+          type: string
+          description: The message category.
+          enum:
+            - PROMOTION
+            - SERVICE
+            - TRANSACTION
+          example: TRANSACTION
+        message:
+          type: string
+          description: The SMS message text. Must be non-empty.
+          minLength: 1
+          example: "Your verification code is 123456."
+
+    MessageResponse:
+      type: object
+      description: A handle for the sent message.
+      required:
+        - msgId
+        - timestamp
+      properties:
+        msgId:
+          type: string
+          description: >-
+            Opaque identifier of the sent message. UUID-shaped and deterministic
+            in CamaraSim (derived from `from`, all of `to`, and `message`).
+          format: uuid
+        timestamp:
+          type: string
+          format: date-time
+          description: When the SMS was sent (RFC 3339 UTC, `Z` offset).
+
+    SmsError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the SMS `code` set (the upstream API adds `INVALID_TOKEN_CONTEXT`).
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - INVALID_TOKEN_CONTEXT
+                - NOT_FOUND
+                - SERVICE_NOT_APPLICABLE
+                - CONFLICT
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

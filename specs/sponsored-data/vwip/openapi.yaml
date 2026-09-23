@@ -1,0 +1,1417 @@
+# CamaraSim — Sponsored Data, API version vwip (CAMARA Sponsored Data, wip).
+#
+# Vendored from the CAMARA Sponsored Data API (work-in-progress — no released
+# version yet, so mounted at its canonical `vwip` base path
+# `/sponsored-data/vwip`, like the other pre-1.0 wip APIs) and annotated with
+# CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed
+# by `src/apis/sponsored_data/vwip.rs`; spec and code must not drift.
+#
+# Serves `POST /sponsorship` (`startSponsorship`),
+# `GET /sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status`
+# (`getSessionStatus`),
+# `DELETE /sponsorship/{sponsorId}/{campaignId}/{sessionId}/revoke`
+# (`revokeSponsorship`),
+# `GET /campaign/{sponsorId}/{campaignId}/campaign-status` (`getCampaignStatus`),
+# `GET /campaign/{sponsorId}/{campaignId}/active-sponsorships`
+# (`getActiveSponsorships`),
+# `POST /campaign/{sponsorId}/{campaignId}/alert-subscription` (`configureAlerts`)
+# and `POST /campaign/management` (`manageCampaign`).
+#
+# Divergences from the upstream CAMARA source (documented cuts):
+#   - The sponsorship **start**, **session-status** read and **revoke**, plus the
+#     campaign **status** (`getCampaignStatus`), **active-sponsorships** list
+#     (`getActiveSponsorships`), **alert-subscription** (`configureAlerts`) and
+#     **management** (`manageCampaign`), are mounted. `configureAlerts` and
+#     `manageCampaign` are stateless acknowledgements — nothing is persisted (no
+#     campaign store, no alert worker); the natural-end alert callbacks are a cut,
+#     and `manageCampaign`'s acknowledged `status` reflects the requested `action`
+#     directly (`pause`→`paused`, `resume`→`resumed`; the upstream terminal
+#     `completed` state is unreachable without a store).
+#     `startSponsorship` persists the granted session in an in-memory store so
+#     `getSessionStatus` can read it back, `revokeSponsorship` can evict it, and
+#     `getActiveSponsorships` can scan it for a campaign's active sessions.
+#   - The end-of-session `webhookUrl` callback is delivered on **revoke**:
+#     `revokeSponsorship` POSTs a `SessionEndedNotification`
+#     (`endReason: session_revoked`) to the session's recorded `webhookUrl`,
+#     authenticated with its `callbackToken` (`Authorization: Bearer …`). Delivery
+#     is fire-and-forget over a raw TCP POST (no HTTP-client dependency) and
+#     `http://`-only — an `https://` webhook is a documented no-op cut (no TLS
+#     client), mirroring every other CamaraSim `sink`/callback leg. The
+#     natural-end webhooks (`validity_expired`/`data_exhausted`) stay deferred
+#     (no background expiry worker).
+#   - `getSessionStatus`'s `endReason` value `session_revoked` is now reachable
+#     only through the **revoke webhook**, never through a status read:
+#     `revokeSponsorship` **evicts** the session, so a revoked session's status
+#     `404`s rather than reporting `session_revoked`. `not_available` stays
+#     documented-but-unreached.
+#   - The upstream `wip` contract declares **no** `securitySchemes`; CamaraSim
+#     assigns the canonical `<api>:<resource>:<action>` scopes
+#     `sponsored-data:sponsorship:create` (start),
+#     `sponsored-data:sponsorship:read` (session-status),
+#     `sponsored-data:sponsorship:delete` (revoke),
+#     `sponsored-data:campaign:read` (campaign-status / active-sponsorships),
+#     `sponsored-data:campaign:alerts` (alert-subscription) and
+#     `sponsored-data:campaign:manage` (management), resolved against the
+#     shared auth spec.
+#   - CamaraSim inlines the request/response schemas and `$ref`s the shared error
+#     model (`../../shared/errors.yaml`) so the served spec resolves without
+#     vendoring the whole Commonalities file.
+#   - CamaraSim exposes the full shared reserved-error set (so every reserved
+#     suffix is reachable) via the `phoneNumber` identifier.
+openapi: 3.0.3
+info:
+  title: Sponsored Data
+  description: |
+    The Sponsored Data API lets a **sponsoring company** fund an end-user's
+    mobile data: the operator grants a bounded data volume for a bounded time to
+    the subscriber and bills the sponsor, not the user. `POST /sponsorship`
+    starts such a session and returns its `sessionId`.
+
+    This is the CamaraSim reference double for CAMARA Sponsored Data (wip). The
+    `/sponsorship` endpoint requires the `sponsored-data:sponsorship:create`
+    scope (CamaraSim-assigned — the upstream `wip` contract declares no security
+    schemes).
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Three independent control planes drive the answer:
+
+    - **Reserved error suffix (`phoneNumber`).** The sponsored subscriber's
+      `phoneNumber` is the identifier: if its trailing three digits name a
+      reserved CAMARA status the endpoint answers with that canonical CAMARA
+      error (shared convention — see the referenced `errors.yaml`): `…400`,
+      `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`. So `…422`
+      exercises "the subscriber is not eligible for sponsorship" and `…409` a
+      duplicate active session.
+    - **`dataVolume` (MB).** Optional; when present it must be `1..=1000` (else
+      `400 OUT_OF_RANGE`) and is echoed as `sponsoredDataVolume`. When omitted the
+      campaign's onboarding default (`50 MB`) applies.
+    - **`duration` (minutes).** Optional; when present it must be `1..=1440` (else
+      `400 OUT_OF_RANGE`) and sets `endTime = startTime + duration`. When omitted
+      the onboarding default (`10 minutes`) applies.
+
+    `startTime` is the moment the session is granted; `endTime` is
+    `startTime + duration` minutes. `sessionId` is opaque (UUID-shaped).
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+externalDocs:
+  description: Project documentation at CAMARA
+  url: https://github.com/camaraproject/SponsoredData
+
+servers:
+  - url: "{apiRoot}/sponsored-data/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /sponsorship:
+    post:
+      operationId: startSponsorship
+      summary: Start a sponsorship session
+      description: |
+        Request the sponsorship of a subscriber (`phoneNumber`) within a campaign,
+        optionally bounding it with a `dataVolume` (MB) and `duration` (minutes).
+        On success returns `201` with the granted window and a minted `sessionId`.
+
+        The subscriber's `phoneNumber` is the control-plane identifier — see the
+        API description for the parameter-driven functional cases (its trailing
+        three digits select a reserved CAMARA error; `dataVolume`/`duration`
+        bound the grant or fall back to the onboarding defaults).
+      security:
+        - openId:
+            - sponsored-data:sponsorship:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartSponsorship"
+            examples:
+              minimal:
+                summary: Required fields only (onboarding defaults apply)
+                value:
+                  sponsorId: acme@sponsor.example.com
+                  campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                  phoneNumber: "+123456789012"
+                  webhookUrl: https://sponsor.example.com/webhook
+                  callbackToken: 550e8400-e29b-41d4-a716-446655440000
+              bounded:
+                summary: Explicit volume and duration
+                value:
+                  sponsorId: acme@sponsor.example.com
+                  campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                  phoneNumber: "+123456789012"
+                  dataVolume: 250
+                  duration: 30
+                  webhookUrl: https://sponsor.example.com/webhook
+                  callbackToken: 550e8400-e29b-41d4-a716-446655440000
+      responses:
+        "201":
+          description: Successful operation. New sponsorship session created.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SponsorshipSession"
+              examples:
+                created:
+                  summary: A granted session (10-minute default window, 50 MB)
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    sessionId: 8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70
+                    startTime: "2024-06-01T00:00:00Z"
+                    endTime: "2024-06-01T00:10:00Z"
+                    sponsoredDataVolume: 50
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            missing/malformed `sponsorId`, `campaignId`, `phoneNumber`,
+            `webhookUrl`, or `callbackToken`, or a non-JSON body; and
+            `OUT_OF_RANGE` for a `dataVolume` outside `1..=1000` or a `duration`
+            outside `1..=1440`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SponsoredDataError"
+              examples:
+                invalidArgument:
+                  summary: Missing or malformed field
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`phoneNumber` must be an E.164 number (e.g. +123456789012)."
+                outOfRange:
+                  summary: dataVolume or duration out of range
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`dataVolume` must be between 1 and 1000 MB."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `phoneNumber` identifier and the optional
+          `dataVolume` / `duration` bounds (docs/DESIGN.md §7). Reserved error
+          suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: phoneNumber ending in a reserved error suffix (e.g. …404, …422, …409)
+            result: the canonical CAMARA error for that status
+          - input: "no dataVolume / duration supplied"
+            result: "201 with sponsoredDataVolume 50 MB and a 10-minute window"
+          - input: "dataVolume within 1..=1000"
+            result: "201 with sponsoredDataVolume echoing the request"
+          - input: "duration within 1..=1440"
+            result: "201 with endTime = startTime + duration minutes"
+          - input: "dataVolume outside 1..=1000, or duration outside 1..=1440"
+            result: "400 OUT_OF_RANGE"
+          - input: "missing/malformed sponsorId, campaignId, phoneNumber, webhookUrl, or callbackToken; or non-JSON body"
+            result: "400 INVALID_ARGUMENT"
+      callbacks:
+        sessionEnded:
+          "{$request.body#/webhookUrl}":
+            post:
+              summary: End-of-session notification (delivered on revoke)
+              description: >-
+                When the session ends, the operator POSTs a
+                `SessionEndedNotification` to the `webhookUrl` supplied at
+                `startSponsorship`, authenticated with the `callbackToken` as
+                `Authorization: Bearer <callbackToken>` (RFC 6750). CamaraSim fires
+                this on `revokeSponsorship` (`endReason: session_revoked`); it
+                delivers only to `http://` webhooks (an `https://` webhook is a
+                documented no-op cut — no TLS client), and the natural-end reasons
+                (`validity_expired`/`data_exhausted`) are deferred (no background
+                expiry worker).
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      $ref: "#/components/schemas/SessionEndedNotification"
+              responses:
+                "204":
+                  description: The consumer accepted the notification (body ignored, best-effort).
+
+  /sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status:
+    get:
+      operationId: getSessionStatus
+      summary: Read a sponsorship session's status
+      description: |
+        Read a started sponsorship session back by its `sponsorId`, `campaignId`
+        and minted `sessionId`, returning its **live** status: whether it is still
+        `active`, how much of the granted data volume has been consumed, and — once
+        it has ended — why.
+
+        The session is addressed by the opaque `sessionId`, so the store state is
+        the control plane: an unknown `sessionId`, or one whose stored
+        `sponsorId`/`campaignId` do not match the path, yields `404 NOT_FOUND`. The
+        derived status figures key off the stored session (see the operation's
+        `x-camarasim-scenarios`).
+      security:
+        - openId:
+            - sponsored-data:sponsorship:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sponsorId
+          in: path
+          required: true
+          description: The sponsoring company (`local@domain.tld`) from `startSponsorship`.
+          schema:
+            $ref: "#/components/schemas/SponsorId"
+        - name: campaignId
+          in: path
+          required: true
+          description: The campaign (`UUID@domain.tld`) from `startSponsorship`.
+          schema:
+            $ref: "#/components/schemas/CampaignId"
+        - name: sessionId
+          in: path
+          required: true
+          description: The opaque session identifier minted by `startSponsorship`.
+          schema:
+            $ref: "#/components/schemas/SessionId"
+      responses:
+        "200":
+          description: Successful operation. The session's current status.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SponsorshipSessionStatus"
+              examples:
+                active:
+                  summary: An active session with data remaining
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    sessionId: 8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70
+                    phoneNumber: "+123456789012"
+                    startTime: "2024-06-01T00:00:00Z"
+                    endTime: "2024-06-01T00:10:00Z"
+                    sessionStatus: active
+                    dataVolumeConsumed: 12
+                    dataVolumeAvailable: 38
+                exhausted:
+                  summary: An inactive session that used up its grant
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    sessionId: 8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70
+                    phoneNumber: "+123456789050"
+                    startTime: "2024-06-01T00:00:00Z"
+                    endTime: "2024-06-01T00:10:00Z"
+                    sessionStatus: inactive
+                    dataVolumeConsumed: 50
+                    dataVolumeAvailable: 0
+                    endReason: data_exhausted
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the stored session (docs/DESIGN.md §7). The opaque
+          `sessionId` addresses the session; the stored `phoneNumber`'s trailing
+          three digits and the granted window derive the live status figures.
+        cases:
+          - input: "unknown sessionId, or sponsorId/campaignId not matching the stored session"
+            result: "404 NOT_FOUND"
+          - input: "phoneNumber trailing three digits d, grant g"
+            result: "dataVolumeConsumed = d mod (g+1); dataVolumeAvailable = g - consumed"
+          - input: "now before endTime and data remaining"
+            result: 'sessionStatus "active" (no endReason)'
+          - input: "grant fully consumed (dataVolumeAvailable 0)"
+            result: 'sessionStatus "inactive", endReason "data_exhausted"'
+          - input: "now at or after endTime"
+            result: 'sessionStatus "inactive", endReason "validity_expired"'
+
+  /sponsorship/{sponsorId}/{campaignId}/{sessionId}/revoke:
+    delete:
+      operationId: revokeSponsorship
+      summary: Revoke a sponsorship session
+      description: |
+        Revoke an active sponsorship, preventing further use of sponsored data
+        for the subscriber. The session is addressed by its `sponsorId`,
+        `campaignId` and opaque `sessionId`; on success it is **evicted** and the
+        operation returns `200` with the revoked window and
+        `requestResult:"successful_revocation"`.
+
+        The store state is the only control plane: an unknown `sessionId`, or one
+        whose stored `sponsorId`/`campaignId` do not match the path, yields
+        `404 NOT_FOUND` (a mismatch leaves the session in place). Revoke is
+        single-use — because the session is evicted, a second revoke of the same
+        session `404`s (see the operation's `x-camarasim-scenarios`).
+      security:
+        - openId:
+            - sponsored-data:sponsorship:delete
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sponsorId
+          in: path
+          required: true
+          description: The sponsoring company (`local@domain.tld`) from `startSponsorship`.
+          schema:
+            $ref: "#/components/schemas/SponsorId"
+        - name: campaignId
+          in: path
+          required: true
+          description: The campaign (`UUID@domain.tld`) from `startSponsorship`.
+          schema:
+            $ref: "#/components/schemas/CampaignId"
+        - name: sessionId
+          in: path
+          required: true
+          description: The opaque session identifier minted by `startSponsorship`.
+          schema:
+            $ref: "#/components/schemas/SessionId"
+      responses:
+        "200":
+          description: Session revoked successfully. The revoked session is evicted.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RevokedSponsorship"
+              examples:
+                revoked:
+                  summary: A revoked session
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    sessionId: 8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70
+                    phoneNumber: "+123456789012"
+                    startTime: "2024-06-01T00:00:00Z"
+                    endTime: "2024-06-01T00:10:00Z"
+                    requestResult: successful_revocation
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the stored session (docs/DESIGN.md §7). The opaque
+          `sessionId` addresses the session; a matching revoke evicts it.
+        cases:
+          - input: "sessionId of a stored session whose sponsorId/campaignId match the path"
+            result: '200 with requestResult "successful_revocation"; the session is evicted'
+          - input: "a revoked session started with an http:// webhookUrl"
+            result: >-
+              a SessionEndedNotification (endReason session_revoked) is POSTed to
+              the webhookUrl with Authorization: Bearer <callbackToken>
+              (fire-and-forget, off the 200 response path)
+          - input: "a revoked session started with an https:// webhookUrl"
+            result: "200 as above; the webhook is not delivered (no TLS client — documented cut)"
+          - input: "unknown sessionId, or sponsorId/campaignId not matching the stored session"
+            result: "404 NOT_FOUND (a mismatch leaves the session in place; no webhook fired)"
+          - input: "sessionId of an already-revoked session (single-use)"
+            result: "404 NOT_FOUND"
+
+  /campaign/{sponsorId}/{campaignId}/campaign-status:
+    get:
+      operationId: getCampaignStatus
+      summary: Campaign Status Inquiry [active, paused, completed], data volume balance.
+      description: |
+        Report the operational state of a whole **campaign** (distinct from a
+        single sponsorship session): whether it is `active`, `paused` or
+        `completed`, its window, its prepaid/postpaid billing type, and its
+        data-volume balance.
+
+        Campaign lifecycle management (`manageCampaign`) is not modelled, so
+        CamaraSim keeps **no campaign store**: the status is derived
+        **statelessly** from the `campaignId`'s embedded UUID (see the operation's
+        `x-camarasim-scenarios`). A reserved trailing-digit suffix on that UUID
+        selects a canonical CAMARA error; otherwise the trailing three digits fix
+        the campaign's type and status. Malformed path identifiers yield
+        `400 INVALID_ARGUMENT`.
+      security:
+        - openId:
+            - sponsored-data:campaign:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sponsorId
+          in: path
+          required: true
+          description: The sponsoring company (`local@domain.tld`).
+          schema:
+            $ref: "#/components/schemas/SponsorId"
+        - name: campaignId
+          in: path
+          required: true
+          description: The campaign (`UUID@domain.tld`); its embedded UUID is the control plane.
+          schema:
+            $ref: "#/components/schemas/CampaignId"
+      responses:
+        "200":
+          description: Successful operation. The campaign's current status.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampaignStatus"
+              examples:
+                activePrepaid:
+                  summary: An active prepaid campaign with its full allotment remaining
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    status: active
+                    startTime: "2024-05-31T00:00:00Z"
+                    endTime: "2024-06-02T00:00:00Z"
+                    campaignType: prepaid
+                    contractedDataVolume: 1000
+                    usedDataVolume: 0
+                    remainingDataVolume: 1000
+                    completionReason: not_available
+                completedExhausted:
+                  summary: A completed prepaid campaign that used up its contracted data
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174010@sponsor.example.com
+                    status: completed
+                    startTime: "2024-05-31T00:00:00Z"
+                    endTime: "2024-05-31T23:00:00Z"
+                    campaignType: prepaid
+                    contractedDataVolume: 1000
+                    usedDataVolume: 1000
+                    remainingDataVolume: 0
+                    completionReason: data_exhausted
+                pausedPostpaid:
+                  summary: A paused postpaid campaign (no contracted ceiling)
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174003@sponsor.example.com
+                    status: paused
+                    startTime: "2024-05-31T00:00:00Z"
+                    endTime: "2024-06-02T00:00:00Z"
+                    campaignType: postpaid
+                    usedDataVolume: 3
+                    completionReason: not_available
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result derived statelessly from the campaignId's embedded UUID
+          (docs/DESIGN.md §7). Let d be the UUID's trailing three digits (0 when
+          none). A reserved suffix on d selects a canonical CAMARA error; else d
+          drives the campaign's type and status.
+        cases:
+          - input: "sponsorId not local@domain, or campaignId not UUID@domain"
+            result: "400 INVALID_ARGUMENT"
+          - input: "campaignId UUID trailing three digits d in {400,401,403,404,409,422,429,500,503}"
+            result: "the matching canonical CAMARA error (e.g. …404 -> 404 NOT_FOUND, campaign not found)"
+          - input: "d even"
+            result: 'campaignType "prepaid" (contractedDataVolume/remainingDataVolume present)'
+          - input: "d odd"
+            result: 'campaignType "postpaid" (usedDataVolume only)'
+          - input: "(d / 2) mod 3 = 0 / 1 / 2"
+            result: 'status "active" / "paused" / "completed"'
+          - input: 'status "completed", (d / 6) even'
+            result: 'completionReason "time_expired" (usedDataVolume = d MB)'
+          - input: 'status "completed", (d / 6) odd'
+            result: 'completionReason "data_exhausted" (usedDataVolume = contractedDataVolume; remaining 0)'
+          - input: 'status "active" or "paused"'
+            result: 'completionReason "not_available"; endTime in the future'
+
+  /campaign/{sponsorId}/{campaignId}/active-sponsorships:
+    get:
+      operationId: getActiveSponsorships
+      summary: List a campaign's currently-active sponsorship sessions
+      description: |
+        List the sponsorship sessions of a campaign that are **currently active**
+        — each as a `{ sessionId, phoneNumber }` pair — together with their
+        `totalCount`. A session is *active* when it is inside its granted window
+        and still has data remaining (the same condition `getSessionStatus`
+        reports as `active`).
+
+        Two control planes (docs/DESIGN.md §7): as with `getCampaignStatus`, a
+        reserved trailing-digit suffix on the campaignId's embedded UUID selects a
+        canonical CAMARA error (`…404` → 404 campaign-not-found); otherwise the
+        in-memory session store is scanned for this `sponsorId`/`campaignId` and
+        filtered to the active sessions. A campaign with no active sessions returns
+        `200` with an empty array and `totalCount: 0` — a CAMARA list never `404`s
+        on an empty result. Malformed path identifiers yield `400 INVALID_ARGUMENT`.
+      security:
+        - openId:
+            - sponsored-data:campaign:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sponsorId
+          in: path
+          required: true
+          description: The sponsoring company (`local@domain.tld`).
+          schema:
+            $ref: "#/components/schemas/SponsorId"
+        - name: campaignId
+          in: path
+          required: true
+          description: The campaign (`UUID@domain.tld`); its embedded UUID is the error-plane control.
+          schema:
+            $ref: "#/components/schemas/CampaignId"
+      responses:
+        "200":
+          description: Successful operation. The campaign's active sponsorship sessions.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActiveSponsorships"
+              examples:
+                twoActive:
+                  summary: A campaign with two active sponsored subscribers
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    activeSponsorships:
+                      - sessionId: 8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70
+                        phoneNumber: "+123456789012"
+                      - sessionId: 1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed
+                        phoneNumber: "+123456789013"
+                    totalCount: 2
+                none:
+                  summary: A campaign with no active sessions
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    activeSponsorships: []
+                    totalCount: 0
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the campaignId's embedded UUID and the in-memory
+          session store (docs/DESIGN.md §7). A reserved trailing-digit suffix on
+          the UUID selects a canonical CAMARA error; otherwise the store is scanned
+          and filtered to the active sessions.
+        cases:
+          - input: "sponsorId not local@domain, or campaignId not UUID@domain"
+            result: "400 INVALID_ARGUMENT"
+          - input: "campaignId UUID trailing three digits in {400,401,403,404,409,422,429,500,503}"
+            result: "the matching canonical CAMARA error (e.g. …404 -> 404 NOT_FOUND)"
+          - input: "sessions stored for this sponsorId/campaignId, some inside their window with data remaining"
+            result: "200 listing those active sessions ({sessionId, phoneNumber}) with totalCount = their number"
+          - input: "a stored session past its endTime, or with its grant fully consumed"
+            result: "excluded from activeSponsorships (it is inactive)"
+          - input: "no active sessions for the campaign"
+            result: "200 with activeSponsorships [] and totalCount 0 (a list never 404s)"
+
+  /campaign/{sponsorId}/{campaignId}/alert-subscription:
+    post:
+      operationId: configureAlerts
+      summary: Subscribe a campaign's webhook to alert notifications
+      description: |
+        Subscribe a sponsor's `webhookUrl` to a campaign's alert notifications:
+        data-volume-threshold alerts (80% of a prepaid campaign's contracted
+        amount), campaign-expiry alerts and data-exhausted alerts — each an opt-in
+        boolean flag. `callbackToken` authenticates the callbacks.
+
+        **CamaraSim behaviour.** There is no campaign store and no background worker
+        to fire the alerts, so the subscription is **not persisted**: the operation
+        is a stateless synchronous acknowledgement (like the In-Home
+        `performDeviceAction` / eSIM `profileOperation` legs) that validates the
+        request and answers `200` with `{ sponsorId, campaignId, requestResult }`.
+        The natural-end alert callbacks themselves are a documented cut, consistent
+        with the deferred `validity_expired`/`data_exhausted` session webhooks.
+
+        Two control planes (docs/DESIGN.md §7): a reserved trailing-digit suffix on
+        the campaignId's embedded UUID selects a canonical CAMARA error (`…404` →
+        404 campaign-not-found, as with `getCampaignStatus`); otherwise the request
+        body is validated (a required, non-empty `webhookUrl`; an optional non-empty
+        `callbackToken`; optional boolean alert flags) → `400 INVALID_ARGUMENT` on a
+        malformed request, else `200`. Body validation runs before the reserved-error
+        plane, so a malformed body is a `400` even on a `…404` campaign. Malformed
+        path identifiers yield `400 INVALID_ARGUMENT`.
+      security:
+        - openId:
+            - sponsored-data:campaign:alerts
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sponsorId
+          in: path
+          required: true
+          description: The sponsoring company (`local@domain.tld`).
+          schema:
+            $ref: "#/components/schemas/SponsorId"
+        - name: campaignId
+          in: path
+          required: true
+          description: The campaign (`UUID@domain.tld`); its embedded UUID is the error-plane control.
+          schema:
+            $ref: "#/components/schemas/CampaignId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AlertSubscription"
+            examples:
+              allAlerts:
+                summary: Subscribe to all three alert types
+                value:
+                  webhookUrl: https://sponsor.endpoint.example.com/webhook
+                  callbackToken: 550e8400-e29b-41d4-a716-446655440000
+                  alertDataVolumeThresholds: true
+                  campaignExpiryNotification: true
+                  dataVolumeExhausted: true
+      responses:
+        "200":
+          description: Campaign notifications subscription - SUCCESS.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertSubscriptionResult"
+              examples:
+                success:
+                  summary: Alert subscription acknowledged
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    requestResult: "Campaign notifications subscription - SUCCESS"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the request body and the campaignId's embedded UUID
+          (docs/DESIGN.md §7). The body is validated first; otherwise a reserved
+          trailing-digit suffix on the UUID selects a canonical CAMARA error, else
+          the subscription is acknowledged. Nothing is persisted (no alert worker).
+        cases:
+          - input: "sponsorId not local@domain, or campaignId not UUID@domain"
+            result: "400 INVALID_ARGUMENT"
+          - input: "malformed body, missing/empty webhookUrl, empty callbackToken, or a non-boolean alert flag"
+            result: "400 INVALID_ARGUMENT (validated before the reserved-error plane)"
+          - input: "campaignId UUID trailing three digits in {400,401,403,404,409,422,429,500,503}"
+            result: "the matching canonical CAMARA error (e.g. …404 -> 404 NOT_FOUND)"
+          - input: "a valid webhookUrl (+ optional callbackToken / boolean alert flags)"
+            result: "200 {sponsorId, campaignId, requestResult} (acknowledged, not persisted)"
+
+  /campaign/management:
+    post:
+      operationId: manageCampaign
+      summary: Pause or resume a campaign
+      description: |
+        Pause or resume a campaign. Unlike the other campaign operations the
+        `sponsorId`/`campaignId` ride in the request body (with the `action`), not
+        the path (upstream `POST /campaign/management`).
+
+        **CamaraSim behaviour.** There is no campaign store, so — like
+        `configureAlerts` — the operation is a stateless synchronous acknowledgement
+        (like the In-Home `performDeviceAction` / eSIM `profileOperation` legs):
+        nothing is persisted (a repeat is idempotent) and the acknowledged `status`
+        reflects the requested `action` directly (`pause` → `paused`, `resume` →
+        `resumed`). The upstream terminal `completed` state is unreachable without a
+        store (a documented cut).
+
+        Two control planes (docs/DESIGN.md §7): the request body is validated first
+        (well-formed `sponsorId`/`campaignId`, `action` ∈ {`pause`,`resume`}) → `400
+        INVALID_ARGUMENT` on a malformed request; then a reserved trailing-digit
+        suffix on the campaignId's embedded UUID selects a canonical CAMARA error
+        (`…404` → 404 campaign-not-found, as with `getCampaignStatus`), else `200`
+        with `{ sponsorId, campaignId, requestResult, startTime, status }`. Body
+        validation runs before the reserved-error plane, so a malformed body is a
+        `400` even on a `…404` campaign.
+      security:
+        - openId:
+            - sponsored-data:campaign:manage
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManageCampaignRequest"
+            examples:
+              pause:
+                summary: Pause a campaign
+                value:
+                  sponsorId: acme@sponsor.example.com
+                  campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                  action: pause
+      responses:
+        "200":
+          description: The campaign management action was acknowledged.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManageCampaignResult"
+              examples:
+                paused:
+                  summary: Campaign paused
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    requestResult: "CAMPAIGN PAUSED SUCCESSFULLY"
+                    startTime: "2024-06-01T00:00:00Z"
+                    status: paused
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the request body and the campaignId's embedded UUID
+          (docs/DESIGN.md §7). The body is validated first; otherwise a reserved
+          trailing-digit suffix on the UUID selects a canonical CAMARA error, else
+          the action is acknowledged. Nothing is persisted (no campaign store).
+        cases:
+          - input: "malformed body, sponsorId not local@domain, campaignId not UUID@domain, or action not in {pause,resume}"
+            result: "400 INVALID_ARGUMENT (validated before the reserved-error plane)"
+          - input: "campaignId UUID trailing three digits in {400,401,403,404,409,422,429,500,503}"
+            result: "the matching canonical CAMARA error (e.g. …404 -> 404 NOT_FOUND)"
+          - input: "action=pause on a valid campaign"
+            result: "200 {status: paused, requestResult: 'CAMPAIGN PAUSED SUCCESSFULLY', …} (acknowledged, not persisted)"
+          - input: "action=resume on a valid campaign"
+            result: "200 {status: resumed, requestResult: 'CAMPAIGN RESUMED SUCCESSFULLY', …} (acknowledged, not persisted)"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    SponsorId:
+      type: string
+      description: Unique sponsor identifier (`local@domain.tld`), assigned during onboarding.
+      pattern: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+      example: acme@sponsor.example.com
+
+    CampaignId:
+      type: string
+      description: Unique campaign identifier (`UUID@domain.tld`), assigned during onboarding.
+      pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+      example: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+
+    SessionId:
+      type: string
+      format: uuid
+      description: Opaque, unique session identifier minted by the operator.
+      pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+      example: 8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70
+
+    PhoneNumber:
+      type: string
+      description: >-
+        The sponsored subscriber's phone number in E.164 format, prefixed with
+        `+`. This is the control-plane identifier (see the API description).
+      pattern: '^\+[1-9][0-9]{4,14}$'
+      example: "+123456789012"
+
+    WebhookUrl:
+      type: string
+      format: uri
+      description: >-
+        URL the operator calls on session status changes. CamaraSim delivers the
+        **end-of-session** notification here on `revokeSponsorship` (a
+        `SessionEndedNotification` with `endReason: session_revoked`). The upstream
+        schema mandates `https://`; CamaraSim additionally accepts `http://` for
+        loopback receivers and **delivers only to `http://`** — an `https://`
+        webhook is a documented no-op cut (no TLS client). Natural-end
+        notifications (`validity_expired`/`data_exhausted`) are deferred (no
+        background expiry worker).
+      example: https://sponsor.example.com/webhook
+
+    Time:
+      type: string
+      format: date-time
+      description: An RFC 3339 / ISO 8601 date-time with timezone, e.g. `2024-06-01T00:00:00Z`.
+      example: "2024-06-01T00:00:00Z"
+
+    StartSponsorship:
+      type: object
+      description: Parameters for creating a new sponsorship session.
+      required:
+        - sponsorId
+        - campaignId
+        - phoneNumber
+        - webhookUrl
+        - callbackToken
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        phoneNumber:
+          $ref: "#/components/schemas/PhoneNumber"
+        dataVolume:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          description: >-
+            Data volume (MB) to sponsor. If omitted, the campaign's onboarding
+            default (50 MB) applies.
+          example: 250
+        duration:
+          type: integer
+          minimum: 1
+          maximum: 1440
+          description: >-
+            Duration (minutes) of the sponsorship. If omitted, the campaign's
+            onboarding default (10 minutes) applies.
+          example: 30
+        webhookUrl:
+          $ref: "#/components/schemas/WebhookUrl"
+        callbackToken:
+          type: string
+          format: uuid
+          pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+          description: >-
+            Version-4 UUID security token for authenticating webhook
+            notifications. CamaraSim applies it to the end-of-session webhook's
+            `Authorization` header as `Bearer <callbackToken>` (RFC 6750). Held in
+            memory only and never echoed in a response (it is a secret).
+          example: 550e8400-e29b-41d4-a716-446655440000
+
+    SponsorshipSession:
+      type: object
+      additionalProperties: false
+      description: A granted sponsorship session.
+      required:
+        - sponsorId
+        - campaignId
+        - sessionId
+        - startTime
+        - endTime
+        - sponsoredDataVolume
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        sessionId:
+          $ref: "#/components/schemas/SessionId"
+        startTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the sponsorship started.
+        endTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the sponsorship ends (`startTime + duration` minutes).
+        sponsoredDataVolume:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          description: The data volume (MB) granted for the user (echoes `dataVolume`, else the default).
+          example: 50
+
+    SponsorshipSessionStatus:
+      type: object
+      additionalProperties: false
+      description: The live status of a started sponsorship session.
+      required:
+        - phoneNumber
+        - startTime
+        - endTime
+        - sessionStatus
+        - dataVolumeConsumed
+        - dataVolumeAvailable
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        sessionId:
+          $ref: "#/components/schemas/SessionId"
+        phoneNumber:
+          $ref: "#/components/schemas/PhoneNumber"
+        startTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the sponsorship started.
+        endTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the sponsorship ends (`startTime + duration` minutes).
+        sessionStatus:
+          type: string
+          description: Whether the session is still serving sponsored data.
+          enum:
+            - active
+            - inactive
+          example: active
+        dataVolumeConsumed:
+          type: integer
+          minimum: 0
+          description: Volume of data consumed in the session (MBytes).
+          example: 12
+        dataVolumeAvailable:
+          type: integer
+          minimum: 0
+          description: Volume of remaining available data in the session (MBytes).
+          example: 38
+        endReason:
+          type: string
+          description: >-
+            Why the session ended — present only when `sessionStatus` is
+            `inactive`. Through a **status read** CamaraSim reaches
+            `validity_expired` (past `endTime`) and `data_exhausted` (grant fully
+            consumed). `session_revoked` is surfaced only through the
+            **revoke webhook** (`revokeSponsorship` evicts the session, so a
+            revoked session's status `404`s rather than reporting it here);
+            `not_available` stays documented-but-unreached.
+          enum:
+            - validity_expired
+            - data_exhausted
+            - session_revoked
+            - not_available
+          example: data_exhausted
+
+    RevokedSponsorship:
+      type: object
+      additionalProperties: false
+      description: The result of revoking a sponsorship session — the revoked window.
+      required:
+        - sponsorId
+        - campaignId
+        - sessionId
+        - phoneNumber
+        - startTime
+        - endTime
+        - requestResult
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        sessionId:
+          $ref: "#/components/schemas/SessionId"
+        phoneNumber:
+          $ref: "#/components/schemas/PhoneNumber"
+        startTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the sponsorship started.
+        endTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the sponsorship was scheduled to end (`startTime + duration` minutes).
+        requestResult:
+          type: string
+          description: The outcome of the revoke request.
+          enum:
+            - successful_revocation
+          example: successful_revocation
+
+    SessionEndedNotification:
+      type: object
+      additionalProperties: false
+      description: >-
+        The end-of-session notification POSTed to a session's `webhookUrl` when the
+        session ends. CamaraSim delivers it on `revokeSponsorship` with
+        `endReason: session_revoked`. `sessionStatus` is always `inactive` (the
+        session has ended).
+      required:
+        - sponsorId
+        - campaignId
+        - sessionId
+        - phoneNumber
+        - sessionStatus
+        - endReason
+        - eventTime
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        sessionId:
+          $ref: "#/components/schemas/SessionId"
+        phoneNumber:
+          $ref: "#/components/schemas/PhoneNumber"
+        sessionStatus:
+          type: string
+          description: The session's status at the time of the notification (always `inactive`).
+          enum:
+            - inactive
+          example: inactive
+        endReason:
+          type: string
+          description: >-
+            Why the session ended. CamaraSim emits `session_revoked` (the only
+            notification leg currently modelled — see the API description).
+          enum:
+            - session_revoked
+            - validity_expired
+            - data_exhausted
+            - not_available
+          example: session_revoked
+        eventTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the session ended (RFC 3339 UTC).
+
+    CampaignStatus:
+      type: object
+      additionalProperties: false
+      description: >-
+        The operational state of a campaign — its status, window, billing type
+        and data-volume balance. `contractedDataVolume` and `remainingDataVolume`
+        are present only for `prepaid` campaigns.
+      required:
+        - sponsorId
+        - campaignId
+        - status
+        - startTime
+        - endTime
+        - campaignType
+        - usedDataVolume
+        - completionReason
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        status:
+          type: string
+          description: Current operational state of the campaign.
+          enum:
+            - active
+            - paused
+            - completed
+            - not_available
+          example: active
+        startTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the campaign started.
+        endTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the campaign ends (future while ongoing; past once completed).
+        campaignType:
+          type: string
+          description: Whether the campaign is prepaid (has a contracted allotment) or postpaid.
+          enum:
+            - prepaid
+            - postpaid
+          example: prepaid
+        contractedDataVolume:
+          type: integer
+          minimum: 0
+          description: >-
+            Total data volume (MB) contracted for the campaign. Present only for
+            `prepaid` campaigns.
+          example: 1000
+        usedDataVolume:
+          type: integer
+          minimum: 0
+          description: Total data volume (MB) consumed by the campaign's sponsorships.
+          example: 0
+        remainingDataVolume:
+          type: integer
+          minimum: 0
+          description: >-
+            Remaining data volume (MB) available for the campaign. Present only
+            for `prepaid` campaigns.
+          example: 1000
+        completionReason:
+          type: string
+          description: >-
+            Why the campaign completed. `not_available` while it is still `active`
+            or `paused`; `time_expired` / `data_exhausted` once `completed`.
+          enum:
+            - time_expired
+            - data_exhausted
+            - not_available
+          example: not_available
+
+    ActiveSponsorships:
+      type: object
+      additionalProperties: false
+      description: >-
+        A campaign's currently-active sponsorship sessions — each a
+        `{ sessionId, phoneNumber }` pair — with their total count.
+      required:
+        - sponsorId
+        - campaignId
+        - activeSponsorships
+        - totalCount
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        activeSponsorships:
+          type: array
+          description: The active sessions of the campaign.
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - sessionId
+              - phoneNumber
+            properties:
+              sessionId:
+                $ref: "#/components/schemas/SessionId"
+              phoneNumber:
+                $ref: "#/components/schemas/PhoneNumber"
+        totalCount:
+          type: integer
+          minimum: 0
+          description: Total number of sponsored subscribers currently active for the campaign.
+          example: 2
+
+    AlertSubscription:
+      type: object
+      description: >-
+        A subscription of a campaign's webhook to alert notifications. The upstream
+        `wip` schema marks the request body required but lists no per-field
+        `required` array; CamaraSim tightens `webhookUrl` to required (a subscription
+        needs a destination, mirroring `startSponsorship`) and leaves the rest
+        optional. Nothing is persisted (no alert worker), so the flags drive no
+        stored state — they are validated for type only.
+      required:
+        - webhookUrl
+      properties:
+        webhookUrl:
+          $ref: "#/components/schemas/WebhookUrl"
+        callbackToken:
+          type: string
+          description: >-
+            Security token used to authenticate notifications sent to the webhook.
+            Optional; when present it must be non-empty. Looser than
+            `startSponsorship`'s v4-UUID `callbackToken`, matching this operation's
+            looser upstream schema.
+          example: 550e8400-e29b-41d4-a716-446655440000
+        alertDataVolumeThresholds:
+          type: boolean
+          description: >-
+            Send a notification when data consumption exceeds 80% of the contracted
+            amount (prepaid campaigns).
+          example: true
+        campaignExpiryNotification:
+          type: boolean
+          description: Send a notification when the campaign expires.
+          example: true
+        dataVolumeExhausted:
+          type: boolean
+          description: Send a notification when the campaign data volume is exhausted.
+          example: true
+
+    AlertSubscriptionResult:
+      type: object
+      additionalProperties: false
+      description: The acknowledgement of a campaign alert-notification subscription.
+      required:
+        - sponsorId
+        - campaignId
+        - requestResult
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        requestResult:
+          type: string
+          description: Human-readable outcome of the subscription request.
+          example: "Campaign notifications subscription - SUCCESS"
+
+    ManageCampaignRequest:
+      type: object
+      description: >-
+        Parameters to manage (pause/resume) a campaign. The `sponsorId`/`campaignId`
+        ride in the body here (not the path). CamaraSim requires all three fields.
+      required:
+        - sponsorId
+        - campaignId
+        - action
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        action:
+          type: string
+          description: The action to perform on the campaign.
+          enum:
+            - pause
+            - resume
+          example: pause
+
+    ManageCampaignResult:
+      type: object
+      additionalProperties: false
+      description: The acknowledgement of a campaign management action.
+      required:
+        - sponsorId
+        - campaignId
+        - requestResult
+        - startTime
+        - status
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        requestResult:
+          type: string
+          description: Human-readable outcome of the management request.
+          example: "CAMPAIGN PAUSED SUCCESSFULLY"
+        startTime:
+          $ref: "#/components/schemas/Time"
+        status:
+          type: string
+          description: >-
+            The campaign's status after the action. CamaraSim reflects the requested
+            action directly (`pause`→`paused`, `resume`→`resumed`); the upstream
+            terminal `completed` state is unreachable without a campaign store.
+          enum:
+            - paused
+            - resumed
+            - completed
+          example: paused
+
+    SponsoredDataError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Sponsored Data `code` set.
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - OUT_OF_RANGE
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - CONFLICT
+                - SERVICE_NOT_APPLICABLE
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

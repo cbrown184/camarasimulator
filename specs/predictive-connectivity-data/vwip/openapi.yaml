@@ -1,0 +1,558 @@
+# CamaraSim — Predictive Connectivity Data, API version vwip (CAMARA
+# work-in-progress).
+#
+# Vendored from the CAMARA Predictive Connectivity Data API
+# (predictive-connectivity-data) and annotated with CamaraSim's parameter-driven
+# functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/predictive_connectivity_data/vwip.rs`; spec and code must not drift.
+#
+# Predictive Connectivity Data has no released version yet — its upstream `main`
+# spec is versioned `wip` — so, like Population Density Data, its canonical base
+# path is literally `vwip`. A numbered version will be added when CAMARA cuts a
+# release.
+#
+# Serves `POST /retrieve`.
+#
+# ## Simulator scope (documented cuts)
+#
+# CamaraSim implements the **synchronous GEOHASHLIST** path with a single time
+# slice. Accepted for schema fidelity but deliberately not implemented (answered
+# with the CAMARA-canonical "unsupported" codes rather than silently degrading):
+#   - `POLYGON` areaType → 422 PREDICTIVE_CONNECTIVITY_DATA.UNSUPPORTED_AREA_TYPE
+#     (and, since `precision` is POLYGON-only, `precision` with a GEOHASHLIST →
+#     400 INVALID_ARGUMENT).
+#   - Asynchronous delivery (`sink`/`sinkCredential`, the 202 + CloudEvents
+#     callback flow) — accepted but not acted on; a request too large to answer
+#     synchronously (> 100 geohashes) → 422
+#     PREDICTIVE_CONNECTIVITY_DATA.UNSUPPORTED_SYNC_RESPONSE.
+#   - Hourly time-slicing — a single TimedConnectivityData covers the whole
+#     window rather than one slice per hour.
+#   - The absolute start-time window checks (MIN_/MAX_STARTTIME_EXCEEDED,
+#     INVALID_TIME_PERIOD) — omitted so behaviour stays independent of the wall
+#     clock; the deterministic INVALID_END_TIME / MAX_TIME_PERIOD_EXCEEDED checks
+#     are enforced.
+#   - All three serviceLevels (C2 / STREAM_4K / BEST_EFFORT) are supported, so
+#     UNSUPPORTED_SERVICE_LEVEL is documented but never returned.
+openapi: 3.0.3
+info:
+  title: Predictive Connectivity Data
+  description: |
+    Forecasts the network connectivity an operator expects to sustain across a
+    geographic area over a time window, returned per grid cell as a stack of
+    vertical **layers** (altitude bands), each rated good / marginal / none /
+    no-data — an aggregate, privacy-preserving planning signal (drone-BVLOS
+    flight planning, connected-car routing, fixed-wireless siting). It never
+    reveals an individual device's location.
+
+    This is the CamaraSim reference double for CAMARA Predictive Connectivity
+    Data (work-in-progress). The API is **area-keyed** (no phone/device
+    identifier): the caller supplies the area to forecast — a `GEOHASHLIST` of
+    geohash cells (implemented) or a `POLYGON` boundary (a documented cut here) —
+    a target `serviceLevel`, and the `startTime`/`endTime` window. The endpoint
+    requires the `predictive-connectivity-data:read` scope.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    There is no device identifier; the **geometry drives the answer** (mirrors
+    Population Density Data). The request's **first geohash** is the area's
+    control identifier for the shared reserved-error convention, and each
+    geohash's own characters — together with the target `serviceLevel` and
+    requested `height` — drive its cell:
+
+    1. **The first geohash** — if its trailing three digits name a reserved
+       CAMARA status, the endpoint answers with that canonical CAMARA error
+       instead of a result (shared convention — see the referenced
+       `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+       `…500`, `…503`. Geohash characters include the digits `0-9`, so this
+       applies unchanged. Checked after structural validation but before the time
+       window, so it dominates the window and data planes.
+
+    2. **Each geohash** deterministically fixes its cell (a stable hash of the
+       geohash string): `h % 7 == 0` → a `NO_DATA` cell (every layer `ND`);
+       otherwise the ground-level signal score `s = h % 100` degrades with
+       altitude (each layer up loses 15 points), and the target `serviceLevel`'s
+       thresholds map each layer's score to `GC`/`MC`/`NC`. The overall `status`
+       is a function of the cells: all `NO_DATA` → `AREA_NOT_SUPPORTED`; some
+       `NO_DATA` → `PART_OF_AREA_NOT_SUPPORTED`; otherwise `SUPPORTED_AREA`.
+
+    3. **The target `serviceLevel`** is a genuine second control plane: a
+       stricter level (`C2`) needs a higher score for the same rating than a lax
+       one (`BEST_EFFORT`), so the same geohash yields fewer good / more marginal
+       layers under `C2`.
+
+    4. **The requested `height`** shapes the vertical stack: the number of layers
+       returned is `height / layerThickness + 1` (default 4 layers when `height`
+       is omitted; `layerThickness` = 30 m). `includeSignalStrength` toggles the
+       per-layer `layerSignalStrengths` (dBm) band.
+
+    5. **Structural / capability planes:** an unknown `areaType`, `serviceLevel`,
+       or `networkType` → `400 INVALID_ARGUMENT`; a geohash violating
+       `^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$`, an empty list, or a list over the
+       schema's 1000-item max → `400 INVALID_ARGUMENT`; `height` outside `0..=250`
+       or `precision` set with a `GEOHASHLIST` → `400 INVALID_ARGUMENT`; a geohash
+       more precise than the sim supports (length > 9) → `422
+       UNSUPPORTED_PRECISION`; a list over 100 geohashes → `422
+       UNSUPPORTED_SYNC_RESPONSE`; a `POLYGON` area → `422 UNSUPPORTED_AREA_TYPE`.
+
+    6. **The time window** (`startTime`/`endTime`, both required, RFC 3339): a
+       malformed timestamp → `400 INVALID_ARGUMENT`; `endTime` before `startTime`
+       → `400 PREDICTIVE_CONNECTIVITY_DATA.INVALID_END_TIME`; a window longer than
+       7 days (168 hours) → `400
+       PREDICTIVE_CONNECTIVITY_DATA.MAX_TIME_PERIOD_EXCEEDED`.
+
+    Examples: a `GEOHASHLIST` of ordinary geohashes with a valid ≤7-day window →
+    `200` with one cell per geohash; a first geohash `"u4pruy429"` → `429
+    TOO_MANY_REQUESTS`; a `POLYGON` area → `422 UNSUPPORTED_AREA_TYPE`; a 10-char
+    geohash → `422 UNSUPPORTED_PRECISION`; `endTime < startTime` → `400
+    PREDICTIVE_CONNECTIVITY_DATA.INVALID_END_TIME`.
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/predictive-connectivity-data/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /retrieve:
+    post:
+      operationId: retrieveConnectivity
+      summary: Retrieve predicted connectivity for an area over a time window
+      description: |
+        Returns, per grid cell, a stack of vertical layers (altitude bands
+        `layerThickness` metres tall), each rated `GC` (good) / `MC` (marginal) /
+        `NC` (none) / `ND` (no data), plus an overall area-support `status`.
+
+        CamaraSim implements the synchronous `GEOHASHLIST` path with a single
+        time slice. See the API description for the parameter-driven functional
+        cases and the documented cuts (`POLYGON`, async `sink`, hourly slicing,
+        absolute start-time checks).
+      security:
+        - openId:
+            - predictive-connectivity-data:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetrieveConnectivityRequest"
+      responses:
+        "200":
+          description: The predicted connectivity for the requested area.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectivityDataResponse"
+              examples:
+                partlySupported:
+                  summary: A two-geohash area with one data cell and one NO_DATA cell
+                  value:
+                    layerThickness: 30
+                    timedConnectivityData:
+                      - startTime: "2024-01-01T00:00:00Z"
+                        endTime: "2024-01-08T00:00:00Z"
+                        cellConnectivityData:
+                          - geohash: "u4pruy"
+                            layerConnectivities: [GC, MC, NC, NC]
+                          - geohash: "gbsuv"
+                            layerConnectivities: [ND, ND, ND, ND]
+                    status: PART_OF_AREA_NOT_SUPPORTED
+        "400":
+          description: |
+            400 — bad request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body, an unknown `serviceLevel`/`networkType`/`areaType`,
+            `precision` set with a `GEOHASHLIST`, a `height` outside 0..=250, an
+            empty or over-1000 geohash list, a malformed geohash, or a malformed
+            `startTime`/`endTime`; `PREDICTIVE_CONNECTIVITY_DATA.INVALID_END_TIME`
+            when `endTime` is earlier than `startTime`; and
+            `PREDICTIVE_CONNECTIVITY_DATA.MAX_TIME_PERIOD_EXCEEDED` for a window
+            longer than 7 days.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                invalidArgument:
+                  summary: Malformed request
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`serviceLevel` must be one of `C2`, `STREAM_4K`, `BEST_EFFORT`."
+                invalidEndTime:
+                  summary: endTime earlier than startTime
+                  value:
+                    status: 400
+                    code: PREDICTIVE_CONNECTIVITY_DATA.INVALID_END_TIME
+                    message: "`endTime` must not be earlier than `startTime`."
+                maxTimePeriodExceeded:
+                  summary: Window longer than 7 days
+                  value:
+                    status: 400
+                    code: PREDICTIVE_CONNECTIVITY_DATA.MAX_TIME_PERIOD_EXCEEDED
+                    message: The requested time window must not exceed 7 days.
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns
+            `PREDICTIVE_CONNECTIVITY_DATA.UNSUPPORTED_AREA_TYPE` for a `POLYGON`
+            area (only `GEOHASHLIST` is implemented),
+            `PREDICTIVE_CONNECTIVITY_DATA.UNSUPPORTED_PRECISION` for a geohash
+            longer than the supported precision (length > 9),
+            `PREDICTIVE_CONNECTIVITY_DATA.UNSUPPORTED_SYNC_RESPONSE` for a list
+            too large to answer synchronously (> 100 geohashes), or the reserved
+            shared `SERVICE_NOT_APPLICABLE` for a `…422` first-geohash suffix.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                unsupportedAreaType:
+                  summary: POLYGON area (not implemented by this sim)
+                  value:
+                    status: 422
+                    code: PREDICTIVE_CONNECTIVITY_DATA.UNSUPPORTED_AREA_TYPE
+                    message: "This simulator supports only `GEOHASHLIST` areas; `POLYGON` is not supported."
+                unsupportedPrecision:
+                  summary: Geohash more precise than supported
+                  value:
+                    status: 422
+                    code: PREDICTIVE_CONNECTIVITY_DATA.UNSUPPORTED_PRECISION
+                    message: The requested geohash precision (length) is not supported.
+                unsupportedSyncResponse:
+                  summary: Too many geohashes for a synchronous answer
+                  value:
+                    status: 422
+                    code: PREDICTIVE_CONNECTIVITY_DATA.UNSUPPORTED_SYNC_RESPONSE
+                    message: The request is too large for a synchronous response; a `sink` (async) request is required, which is not supported.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Predictive Connectivity Data is area-keyed with no device identifier,
+          so the geometry is the control plane (docs/DESIGN.md §7). The first
+          geohash selects reserved errors via the shared convention in
+          errors.yaml; each geohash's characters fix its cell; the target
+          serviceLevel sets how strict the per-layer rating is; the requested
+          height sets the number of layers. Canonical Predictive Connectivity
+          Data (wip) also supports POLYGON areas, hourly time-sliced results, the
+          async sink flow, and the absolute start-time checks; CamaraSim
+          implements the synchronous GEOHASHLIST path with a single time slice
+          and exposes the "unsupported" codes for the rest (documented cuts).
+        cases:
+          - input: "first geohash ending in a reserved error suffix (e.g. …404)"
+            result: the canonical CAMARA error for that status
+          - input: "a GEOHASHLIST of valid geohashes, a serviceLevel, a valid ≤7-day window"
+            result: "200 — one cell per geohash; per-layer GC/MC/NC/ND from each geohash and the serviceLevel; status from the cell mix"
+          - input: "the same geohash with serviceLevel C2 vs BEST_EFFORT"
+            result: "200 — C2 rates the layers no better than BEST_EFFORT (stricter threshold)"
+          - input: "a height in 0..=250"
+            result: "200 — layerThickness=30 and (height/30 + 1) layers; requestedHeight echoed"
+          - input: "includeSignalStrength true"
+            result: "200 — each cell also carries a layerSignalStrengths (dBm) band"
+          - input: "areaType POLYGON"
+            result: "422 PREDICTIVE_CONNECTIVITY_DATA.UNSUPPORTED_AREA_TYPE"
+          - input: "precision set with a GEOHASHLIST, or height outside 0..=250"
+            result: "400 INVALID_ARGUMENT"
+          - input: "a geohash longer than 9 characters"
+            result: "422 PREDICTIVE_CONNECTIVITY_DATA.UNSUPPORTED_PRECISION"
+          - input: "more than 100 geohashes"
+            result: "422 PREDICTIVE_CONNECTIVITY_DATA.UNSUPPORTED_SYNC_RESPONSE"
+          - input: "unknown serviceLevel/networkType, malformed geohash, empty or over-1000 list"
+            result: "400 INVALID_ARGUMENT"
+          - input: "endTime earlier than startTime"
+            result: "400 PREDICTIVE_CONNECTIVITY_DATA.INVALID_END_TIME"
+          - input: "window longer than 7 days"
+            result: "400 PREDICTIVE_CONNECTIVITY_DATA.MAX_TIME_PERIOD_EXCEEDED"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    RetrieveConnectivityRequest:
+      type: object
+      description: Request a connectivity forecast for an area over a time window.
+      required:
+        - serviceLevel
+        - area
+        - startTime
+        - endTime
+      additionalProperties: false
+      properties:
+        serviceLevel:
+          $ref: "#/components/schemas/ServiceLevel"
+        area:
+          $ref: "#/components/schemas/Area"
+        startTime:
+          type: string
+          format: date-time
+          description: Start of the time window (RFC 3339, UTC).
+          example: "2024-01-01T00:00:00Z"
+        endTime:
+          type: string
+          format: date-time
+          description: |
+            End of the time window (RFC 3339, UTC). Must not be earlier than
+            `startTime`, and the window must not exceed 7 days.
+          example: "2024-01-08T00:00:00Z"
+        networkType:
+          $ref: "#/components/schemas/NetworkType"
+        precision:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 12
+          description: |
+            Geohash precision for a `POLYGON` area's returned cells. Applies only
+            to `POLYGON`; supplying it with a `GEOHASHLIST` is a `400`. (POLYGON
+            is not implemented by CamaraSim.)
+        height:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 250
+          description: |
+            Height above ground level (metres) to forecast. Shapes the number of
+            vertical layers returned (`height / layerThickness + 1`).
+        includeSignalStrength:
+          type: boolean
+          default: false
+          description: |
+            Whether to include the per-layer `layerSignalStrengths` (dBm) band in
+            each returned cell.
+        sink:
+          type: string
+          format: uri
+          description: |
+            Async callback URL. Accepted for schema fidelity; CamaraSim answers
+            synchronously and does not deliver to a sink (a documented cut).
+        sinkCredential:
+          type: object
+          description: |
+            Async callback credential. Accepted for schema fidelity; not applied
+            (async delivery is a documented cut).
+
+    ServiceLevel:
+      type: string
+      enum: [C2, STREAM_4K, BEST_EFFORT]
+      description: |
+        The target connectivity service level to forecast against. `C2`
+        (command-and-control, e.g. drone BVLOS) is the strictest; `STREAM_4K`
+        (4K video) is moderate; `BEST_EFFORT` is the most lenient. A stricter
+        level demands a higher signal score for the same per-layer rating.
+
+    NetworkType:
+      type: string
+      enum: ["4G", "5G"]
+      description: |
+        The radio access to forecast. Omit to forecast over both. Validated by
+        CamaraSim; it does not alter the deterministic output (a documented cut).
+
+    Area:
+      type: object
+      description: |
+        The area to forecast. A `GEOHASHLIST` carries `geohashes`; a `POLYGON`
+        carries a `boundary`. CamaraSim implements `GEOHASHLIST`; a `POLYGON`
+        request is answered `422 UNSUPPORTED_AREA_TYPE`.
+      required:
+        - areaType
+      additionalProperties: false
+      properties:
+        areaType:
+          type: string
+          enum: [POLYGON, GEOHASHLIST]
+          description: The kind of area supplied.
+        geohashes:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          description: The geohash cells to forecast (required for `GEOHASHLIST`).
+          items:
+            $ref: "#/components/schemas/Geohash"
+        boundary:
+          type: array
+          minItems: 3
+          maxItems: 15
+          description: |
+            The polygon boundary vertices (for `POLYGON`). Accepted for fidelity;
+            `POLYGON` is not implemented by CamaraSim.
+          items:
+            $ref: "#/components/schemas/Point"
+
+    Geohash:
+      type: string
+      minLength: 1
+      maxLength: 12
+      pattern: '^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$'
+      description: A geohash string (base32; excludes a, i, l, o).
+      example: "u4pruy"
+
+    Point:
+      type: object
+      description: A boundary vertex (WGS84).
+      required:
+        - latitude
+        - longitude
+      additionalProperties: false
+      properties:
+        latitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+        longitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+
+    ConnectivityDataResponse:
+      type: object
+      description: The predicted connectivity for the requested area.
+      required:
+        - layerThickness
+        - timedConnectivityData
+        - status
+      properties:
+        layerThickness:
+          type: number
+          description: |
+            The vertical thickness (metres) of one connectivity layer. CamaraSim
+            uses a fixed 30 m.
+        timedConnectivityData:
+          type: array
+          maxItems: 168
+          description: |
+            Per-time-slice connectivity data. CamaraSim returns a single slice
+            covering the whole requested window (it does not subdivide into
+            hourly slices).
+          items:
+            $ref: "#/components/schemas/TimedConnectivityData"
+        status:
+          type: string
+          enum:
+            - SUPPORTED_AREA
+            - PART_OF_AREA_NOT_SUPPORTED
+            - AREA_NOT_SUPPORTED
+            - OPERATION_NOT_COMPLETED
+          description: |
+            Overall support status for the area. CamaraSim derives it from the
+            cells: all `NO_DATA` → `AREA_NOT_SUPPORTED`; some `NO_DATA` →
+            `PART_OF_AREA_NOT_SUPPORTED`; otherwise `SUPPORTED_AREA`.
+            `OPERATION_NOT_COMPLETED` (the async-timeout case) is not produced by
+            the synchronous sim.
+        statusInfo:
+          type: string
+          maxLength: 512
+          description: Present when `status` is `OPERATION_NOT_COMPLETED` (unused here).
+        requestedHeight:
+          type: integer
+          format: int32
+          description: Echo of the requested `height`, when one was supplied.
+
+    TimedConnectivityData:
+      type: object
+      description: Connectivity data for one time slice of the requested window.
+      required:
+        - startTime
+        - endTime
+        - cellConnectivityData
+      properties:
+        startTime:
+          type: string
+          format: date-time
+          maxLength: 64
+        endTime:
+          type: string
+          format: date-time
+          maxLength: 64
+        cellConnectivityData:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          description: One entry per grid cell (here, per input geohash).
+          items:
+            $ref: "#/components/schemas/CellConnectivityData"
+
+    CellConnectivityData:
+      type: object
+      description: |
+        Predicted connectivity for one cell as a stack of vertical layers
+        (ground up). `layerConnectivities[i]` rates layer `i`; the optional
+        `layerSignalStrengths[i]` is that layer's expected signal (dBm, or `null`
+        when unknown / no data).
+      required:
+        - geohash
+        - layerConnectivities
+      properties:
+        geohash:
+          $ref: "#/components/schemas/Geohash"
+        layerConnectivities:
+          type: array
+          minItems: 1
+          maxItems: 100
+          description: One connectivity rating per vertical layer, ground up.
+          items:
+            $ref: "#/components/schemas/LayerConnectivity"
+        layerSignalStrengths:
+          type: array
+          minItems: 1
+          maxItems: 100
+          description: |
+            Expected signal strength (dBm) per layer, aligned to
+            `layerConnectivities`. Present only when `includeSignalStrength` was
+            requested; an entry is `null` for a `ND` (no-data) layer.
+          items:
+            type: integer
+            format: int32
+            nullable: true
+
+    LayerConnectivity:
+      type: string
+      enum: [GC, MC, NC, ND]
+      description: |
+        A layer's predicted connectivity: `GC` (good connectivity), `MC`
+        (marginal connectivity), `NC` (no connectivity), `ND` (no data).

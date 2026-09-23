@@ -1,0 +1,1235 @@
+# CamaraSim — In-Home Device Management, API version v1 (CAMARA InHomeDeviceManagement 1.0.0).
+#
+# Vendored from the CAMARA InHomeDeviceManagement API (sandbox; the definition
+# self-declares version 1.0.0, so mounted at its canonical `v1` base path
+# `/in-home-device-management/v1`) and annotated with CamaraSim's parameter-driven
+# functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/in_home_device_management/v1.rs`; spec and code must not drift.
+#
+# CamaraSim implements the read inventory legs `GET /devices` (listDevices),
+# `GET /devices/{deviceId}` (getDevice — single-device read, stateless: the
+# household roster is regenerated from the `ssid` and the matching device
+# returned) and `GET /devices/{deviceId}/network-health`
+# (getDeviceNetworkHealth — the matched device's network-health telemetry, derived
+# deterministically from it, also stateless), the action leg
+# `POST /devices/{deviceId}/actions/{actionId}` (performDeviceAction — a stateless
+# synchronous acknowledgement of a `schedule-access` action; nothing persisted),
+# and the delete leg `DELETE /devices/{deviceId}` (deleteDevice — the API's first
+# mutation: it tombstones the device in an in-memory store and the read legs honour
+# the tombstone, so a deleted device stops appearing; a repeat delete → 404). The
+# remaining mutation leg (updateDevice) is a later slice.
+openapi: 3.0.3
+info:
+  title: In-Home Device Management
+  description: |
+    Lets a consumer (or an application acting for the household) discover the
+    devices attached to a home fixed-line network — the laptops, phones, TVs and
+    IoT gadgets behind the router, plus the infrastructure devices (modem, Wi-Fi
+    boosters, mesh pods) that carry them. The household network is named by its
+    `ssid`.
+
+    This is the CamaraSim reference double for CAMARA In-Home Device Management
+    (sandbox). The `/devices` endpoint requires the `inhome.device.read` scope.
+
+    ## Two-legged query
+
+    A household is named by its `ssid`, not by a subscriber identity, so this is
+    a two-legged (`client_credentials`) service-to-service query: no end-user
+    personal data is processed and no three-legged token is required.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    There is no real home network behind CamaraSim, so the household roster is
+    **derived deterministically from the `ssid`**. Two independent control planes
+    drive the answer:
+
+    - **Reserved error suffix (`ssid`).** The `ssid` is the identifier: if its
+      trailing three digits name a reserved CAMARA status, the endpoint answers
+      with that canonical CAMARA error (shared convention — see the referenced
+      `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+      `…500`, `…503`. An `ssid` need not contain digits — one with fewer than
+      three is simply a happy-path input.
+    - **Roster shape (`ssid` digits) + `connectionStatus` filter.** Otherwise the
+      `ssid`'s trailing three digits `d` (`000`–`999`) fix the number of *client*
+      devices (`d % 6`; every household also always carries one infrastructure
+      gateway/`modem`, so `…000`/no-digits → the gateway alone) and their
+      types/connection states, and the optional `connectionStatus` query
+      parameter narrows the returned list to devices in that state, so both are
+      genuine planes (`total` reflects the filtered count).
+
+    Example: `ssid=Home` → gateway only; `ssid=Home-005` → gateway + 5 client
+    devices; `ssid=Home-005&connectionStatus=blocked` → only that household's
+    blocked devices; `ssid=Home-404` → `404 NOT_FOUND`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical In-Home Device Management (sandbox) declares a
+    subset (400/401/403/503).
+  version: "1.0.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/in-home-device-management/v1"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /devices:
+    get:
+      operationId: listDevices
+      summary: List the devices attached to a household network
+      description: |
+        Lists the devices attached to the household fixed-line network named by
+        the required `ssid`, optionally narrowed by `connectionStatus`.
+
+        The `ssid` is the control-plane identifier — see the API description for
+        the parameter-driven functional cases (its trailing three digits set the
+        roster size/shape or a reserved CAMARA error). Every household always
+        carries the infrastructure gateway (`infraDevice: modem`); the number and
+        composition of the client devices behind it are fixed by the `ssid`. The
+        optional `connectionStatus` filter narrows the returned list.
+      security:
+        - openId:
+            - inhome.device.read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: ssid
+          in: query
+          required: true
+          description: SSID of the household fixed-line network to inventory.
+          schema:
+            type: string
+            minLength: 1
+          example: Home-005
+        - name: connectionStatus
+          in: query
+          required: false
+          description: Return only devices currently in this connection state.
+          schema:
+            $ref: "#/components/schemas/ConnectionStatus"
+      responses:
+        "200":
+          description: The household's attached devices (optionally filtered).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceList"
+              examples:
+                gatewayPlusClients:
+                  summary: Gateway + 5 client devices (`…005` tail)
+                  value:
+                    total: 6
+                    devices:
+                      - deviceId: dev-a1b2c3d4e5f60718
+                        ssid: Home-005
+                        deviceName: Home Gateway
+                        deviceType: other
+                        macAddress: "02:11:22:33:44:55"
+                        ipAddress: "192.168.1.1"
+                        connectionStatus: connected
+                        blocked: false
+                        paused: false
+                        infraDevice: modem
+                        interfaceType: ethernet
+                      - deviceId: dev-0f1e2d3c4b5a6978
+                        ssid: Home-005
+                        deviceName: Mobile-1
+                        deviceType: mobile
+                        macAddress: "02:aa:bb:cc:dd:ee"
+                        ipAddress: "192.168.1.20"
+                        connectionStatus: connected
+                        blocked: false
+                        paused: false
+                        interfaceType: wifi
+                gatewayOnly:
+                  summary: Gateway only (no-digit / `…000` ssid)
+                  value:
+                    total: 1
+                    devices:
+                      - deviceId: dev-1122334455667788
+                        ssid: QuietHouse
+                        deviceName: Home Gateway
+                        deviceType: other
+                        macAddress: "02:99:88:77:66:55"
+                        ipAddress: "192.168.1.1"
+                        connectionStatus: connected
+                        blocked: false
+                        paused: false
+                        infraDevice: modem
+                        interfaceType: ethernet
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            missing or empty `ssid`, or an unknown `connectionStatus` value.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InHomeError"
+              examples:
+                invalidArgument:
+                  summary: Missing or malformed query parameter
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`ssid` is required and must be a non-empty string."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `ssid` identifier and the optional
+          `connectionStatus` filter (docs/DESIGN.md §7). The `ssid`'s trailing
+          three digits set the roster size/shape or a reserved error; the filter
+          narrows which devices are returned. Reserved error suffixes come from
+          the shared convention in errors.yaml.
+        cases:
+          - input: ssid ending in a reserved error suffix (e.g. …404, …429)
+            result: the canonical CAMARA error for that status
+          - input: "ssid trailing digits …000 (or fewer than three digits)"
+            result: "200 — gateway only (1 device, infraDevice: modem)"
+          - input: "ssid trailing digits d (non-reserved)"
+            result: "200 — gateway + (d % 6) client devices, types/status fixed by d"
+          - input: "&connectionStatus=<state>"
+            result: "200 — the roster narrowed to devices in that state (total reflects it)"
+          - input: missing or empty ssid, or unknown connectionStatus value
+            result: "400 INVALID_ARGUMENT"
+
+  /devices/{deviceId}:
+    get:
+      operationId: getDevice
+      summary: Read a single device of a household network
+      description: |
+        Reads a single device of the household named by the required `ssid`, by
+        its `deviceId`.
+
+        CamaraSim implements this **statelessly**, mirroring the sibling
+        `listDevices`: a household's roster is fully deterministic from its
+        `ssid`, so the endpoint regenerates that roster and returns the device
+        whose `deviceId` matches the path parameter. Two control planes
+        (docs/DESIGN.md §7): the `ssid`'s trailing three digits select a reserved
+        CAMARA error (household-level, checked first, exactly as `listDevices`);
+        otherwise the `deviceId` is matched against the household's roster — a
+        member id → `200` with that `Device`, any other id (unknown, from another
+        household, or malformed) → `404 NOT_FOUND`. The `deviceId` is opaque
+        (`dev-…`), so it is not itself a scenario plane.
+      security:
+        - openId:
+            - inhome.device.read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: deviceId
+          in: path
+          required: true
+          description: The `deviceId` of the device to read (from `listDevices`).
+          schema:
+            type: string
+          example: dev-a1b2c3d4e5f60718
+        - name: ssid
+          in: query
+          required: true
+          description: SSID of the household fixed-line network the device is on.
+          schema:
+            type: string
+            minLength: 1
+          example: Home-005
+      responses:
+        "200":
+          description: The requested device.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Device"
+              examples:
+                clientDevice:
+                  summary: A client device of the household
+                  value:
+                    deviceId: dev-0f1e2d3c4b5a6978
+                    ssid: Home-005
+                    deviceName: Mobile-1
+                    deviceType: mobile
+                    macAddress: "02:aa:bb:cc:dd:ee"
+                    ipAddress: "192.168.1.20"
+                    connectionStatus: connected
+                    blocked: false
+                    paused: false
+                    interfaceType: wifi
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            missing or empty `ssid`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InHomeError"
+              examples:
+                invalidArgument:
+                  summary: Missing `ssid` query parameter
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`ssid` is required and must be a non-empty string."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `ssid` identifier and the `deviceId` path
+          parameter (docs/DESIGN.md §7). The `ssid`'s trailing three digits select
+          a reserved CAMARA error (checked first, as `listDevices`); otherwise the
+          `deviceId` is matched against the household's deterministically-generated
+          roster.
+        cases:
+          - input: ssid ending in a reserved error suffix (e.g. …404, …429)
+            result: the canonical CAMARA error for that status
+          - input: "deviceId that is a member of the ssid's roster"
+            result: "200 — that Device object"
+          - input: "deviceId not in the ssid's roster (unknown / other household / malformed)"
+            result: "404 NOT_FOUND"
+          - input: missing or empty ssid
+            result: "400 INVALID_ARGUMENT"
+    delete:
+      operationId: deleteDevice
+      summary: Delete a device record from a household network
+      description: |
+        Deletes the device named by the `deviceId` path parameter from the
+        household named by the required `ssid`.
+
+        This is the API's first **mutation**. The inventory is otherwise derived
+        statelessly from the `ssid`, so a delete cannot remove a row from a table
+        (there is none) — instead CamaraSim records a *tombstone* in an in-memory
+        store, and the read legs (`listDevices` / `getDevice` /
+        `getDeviceNetworkHealth`) and the action leg (`performDeviceAction`)
+        filter tombstoned devices out of the regenerated roster. So after a
+        successful delete the device stops appearing, and a repeat delete answers
+        `404`. The tombstone is in-memory and single-node (docs/DESIGN.md §4);
+        there is no un-delete.
+
+        Two control planes (docs/DESIGN.md §7): the `ssid`'s trailing three digits
+        select a reserved CAMARA error (household-level, checked first, exactly as
+        `getDevice` — an `ssid=…409` reaches the `409 CONFLICT` case in this
+        operation's error set); otherwise the `deviceId` is matched against the
+        household's live roster — a member id that has not already been deleted →
+        `200` with a `DeleteDeviceResponse`, any other id (unknown, from another
+        household, malformed, or already deleted) → `404 NOT_FOUND`.
+      security:
+        - openId:
+            - inhome.device.write
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: deviceId
+          in: path
+          required: true
+          description: The `deviceId` of the device to delete (from `listDevices`).
+          schema:
+            type: string
+          example: dev-a1b2c3d4e5f60718
+        - name: ssid
+          in: query
+          required: true
+          description: SSID of the household fixed-line network the device is on.
+          schema:
+            type: string
+            minLength: 1
+          example: Home-005
+      responses:
+        "200":
+          description: The device record was deleted.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteDeviceResponse"
+              example:
+                deviceId: dev-0f1e2d3c4b5a6978
+                status: deleted
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            missing or empty `ssid`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InHomeError"
+              examples:
+                invalidArgument:
+                  summary: Missing `ssid` query parameter
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`ssid` is required and must be a non-empty string."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `ssid` identifier and the `deviceId` path
+          parameter (docs/DESIGN.md §7). The `ssid`'s trailing three digits select
+          a reserved CAMARA error (checked first, as `getDevice`); otherwise the
+          `deviceId` is matched against the household's live (non-deleted) roster.
+          A successful delete tombstones the device (single-use).
+        cases:
+          - input: ssid ending in a reserved error suffix (e.g. …409, …404)
+            result: the canonical CAMARA error for that status (…409 → 409 CONFLICT)
+          - input: "deviceId that is a live member of the ssid's roster"
+            result: "200 — DeleteDeviceResponse {deviceId, status: deleted}; the device is tombstoned"
+          - input: "deviceId already deleted, or not in the ssid's roster (unknown / other household / malformed)"
+            result: "404 NOT_FOUND"
+          - input: missing or empty ssid
+            result: "400 INVALID_ARGUMENT"
+    patch:
+      operationId: updateDevice
+      summary: Update the mutable settings of a household device
+      description: |
+        Updates the mutable settings of the device named by the `deviceId` path
+        parameter on the household named by the required `ssid`. Only three fields
+        are mutable: `deviceName`, `blocked` and `paused`. The body is a partial
+        update — every field is optional, and an empty body (or `{}`) is a no-op
+        that returns the device unchanged.
+
+        This is the API's second **mutation**. The inventory is otherwise derived
+        statelessly from the `ssid`, so a PATCH cannot rewrite a stored row (there
+        is none) — instead CamaraSim records a small **overlay** of the mutable
+        fields in an in-memory store, and the read legs (`listDevices` /
+        `getDevice` / `getDeviceNetworkHealth`) apply it on top of the regenerated
+        device. So after a successful update the new values show up on the read
+        legs; the overlay merges on each PATCH (an absent field keeps its prior
+        value) and is in-memory and single-node (docs/DESIGN.md §4).
+
+        To keep the returned `Device` internally consistent, the effective
+        `blocked`/`paused` are folded back into `connectionStatus`: blocking wins
+        over pausing (a blocked device is off the network → `connectionStatus:
+        blocked`), pausing yields `connectionStatus: paused`, and *clearing* an
+        admin state (`blocked`/`paused` → `false`) returns a device that was in
+        that state to `connected`. The underlying link state
+        (`connected`/`disconnected`) is otherwise preserved.
+
+        Two control planes (docs/DESIGN.md §7): the `ssid`'s trailing three digits
+        select a reserved CAMARA error (household-level, checked first, exactly as
+        `getDevice`/`deleteDevice` — an `ssid=…409` reaches the `409 CONFLICT`
+        case); otherwise the `deviceId` is matched against the household's live
+        roster — a member id that has not been deleted → `200` with the updated
+        `Device`, any other id (unknown, from another household, malformed, or
+        deleted) → `404 NOT_FOUND`.
+      security:
+        - openId:
+            - inhome.device.write
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: deviceId
+          in: path
+          required: true
+          description: The `deviceId` of the device to update (from `listDevices`).
+          schema:
+            type: string
+          example: dev-a1b2c3d4e5f60718
+        - name: ssid
+          in: query
+          required: true
+          description: SSID of the household fixed-line network the device is on.
+          schema:
+            type: string
+            minLength: 1
+          example: Home-005
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateDeviceRequest"
+            examples:
+              rename:
+                summary: Rename a device
+                value:
+                  deviceName: Living Room TV
+              block:
+                summary: Block a device from the network
+                value:
+                  blocked: true
+      responses:
+        "200":
+          description: The updated device.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Device"
+              example:
+                deviceId: dev-0f1e2d3c4b5a6978
+                ssid: Home-005
+                deviceName: Living Room TV
+                deviceType: tv
+                macAddress: "02:aa:bb:cc:dd:ee"
+                ipAddress: "192.168.1.20"
+                connectionStatus: blocked
+                blocked: true
+                paused: false
+                interfaceType: wifi
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            missing or empty `ssid`, an unknown body field, an empty `deviceName`,
+            or a wrong-typed field.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InHomeError"
+              examples:
+                invalidArgument:
+                  summary: Missing `ssid` query parameter
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`ssid` is required and must be a non-empty string."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `ssid` identifier and the `deviceId` path
+          parameter (docs/DESIGN.md §7). The `ssid`'s trailing three digits select
+          a reserved CAMARA error (checked first, as `getDevice`); otherwise the
+          `deviceId` is matched against the household's live (non-deleted) roster.
+          A successful update records/merges an overlay of the mutable fields, and
+          the effective blocked/paused fold into connectionStatus (blocking wins;
+          clearing an admin state returns the device to connected).
+        cases:
+          - input: ssid ending in a reserved error suffix (e.g. …409, …404)
+            result: the canonical CAMARA error for that status (…409 → 409 CONFLICT)
+          - input: "deviceId a live member, body {deviceName: X}"
+            result: "200 — the Device with its new name (connection untouched)"
+          - input: "deviceId a live member, body {blocked: true}"
+            result: "200 — the Device with blocked=true, connectionStatus=blocked, paused=false"
+          - input: "deviceId a live member, body {paused: false} on a paused device"
+            result: "200 — the Device back to connectionStatus=connected"
+          - input: "deviceId a live member, empty body or {}"
+            result: "200 — the Device unchanged (no-op)"
+          - input: "deviceId already deleted, or not in the ssid's roster (unknown / other household / malformed)"
+            result: "404 NOT_FOUND"
+          - input: "missing/empty ssid, unknown field, empty deviceName, or a wrong-typed field"
+            result: "400 INVALID_ARGUMENT"
+
+  /devices/{deviceId}/network-health:
+    get:
+      operationId: getDeviceNetworkHealth
+      summary: Read a household device's network-health telemetry
+      description: |
+        Reads the network-health telemetry of a single household device — its
+        link type, radio band/signal, physical rate, last measured speed and an
+        overall `networkCongestion` verdict — for the device named by the
+        `deviceId` path parameter on the household named by the required `ssid`.
+
+        CamaraSim implements this **statelessly**, exactly like the sibling
+        `getDevice`: a household's roster is fully deterministic from its `ssid`,
+        so the endpoint regenerates that roster, finds the matching device, and
+        derives a deterministic `DeviceNetworkHealth` from it. Two control planes
+        (docs/DESIGN.md §7): the `ssid`'s trailing three digits select a reserved
+        CAMARA error (household-level, checked first, as `getDevice`); otherwise
+        the `deviceId` is matched against the roster — a member id → `200` with
+        that device's `DeviceNetworkHealth`, any other id (unknown, from another
+        household, or malformed) → `404 NOT_FOUND`.
+
+        The telemetry is a pure function of the matched device: a wired gateway
+        reports an Ethernet link with no radio metrics; a Wi-Fi client reports a
+        band (`radioFrequency`), `rssiDbm`, a `wifiCompatibility` generation and a
+        band-dependent `maxPhyRateMbps`; and a blocked/disconnected device — or a
+        weak Wi-Fi signal (< −75 dBm) — reports `red` congestion. `measuredAt` is
+        the current instant (telemetry is always treated as fresh).
+      security:
+        - openId:
+            - inhome.device.read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: deviceId
+          in: path
+          required: true
+          description: The `deviceId` of the device to read health for (from `listDevices`).
+          schema:
+            type: string
+          example: dev-0f1e2d3c4b5a6978
+        - name: ssid
+          in: query
+          required: true
+          description: SSID of the household fixed-line network the device is on.
+          schema:
+            type: string
+            minLength: 1
+          example: Home-005
+      responses:
+        "200":
+          description: The device's network-health telemetry.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceNetworkHealth"
+              examples:
+                wifiClient:
+                  summary: A Wi-Fi client device
+                  value:
+                    deviceId: dev-0f1e2d3c4b5a6978
+                    ssid: Home-005
+                    interfaceType: wifi
+                    radioFrequency: "5"
+                    rssiDbm: -52
+                    wifiCompatibility: wifi6
+                    maxPhyRateMbps: 1200
+                    lastNetworkSpeedMbps: 780
+                    networkCongestion: green
+                    measuredAt: "2024-01-01T14:27:08Z"
+                wiredGateway:
+                  summary: The household gateway (wired, no radio metrics)
+                  value:
+                    deviceId: dev-a1b2c3d4e5f60718
+                    ssid: Home-005
+                    interfaceType: ethernet
+                    infraDevice: modem
+                    maxPhyRateMbps: 1000
+                    lastNetworkSpeedMbps: 940
+                    networkCongestion: green
+                    measuredAt: "2024-01-01T14:27:08Z"
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            missing or empty `ssid`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InHomeError"
+              examples:
+                invalidArgument:
+                  summary: Missing `ssid` query parameter
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`ssid` is required and must be a non-empty string."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `ssid` identifier and the `deviceId` path
+          parameter (docs/DESIGN.md §7), exactly as `getDevice`. The `ssid`'s
+          trailing three digits select a reserved CAMARA error (checked first);
+          otherwise the `deviceId` is matched against the household's
+          deterministically-generated roster and its health telemetry derived from
+          the matched device.
+        cases:
+          - input: ssid ending in a reserved error suffix (e.g. …404, …429)
+            result: the canonical CAMARA error for that status
+          - input: "deviceId that is a member of the ssid's roster (wired gateway)"
+            result: "200 — Ethernet link, no radio metrics, infraDevice echoed"
+          - input: "deviceId that is a member of the ssid's roster (Wi-Fi client)"
+            result: "200 — radioFrequency/rssiDbm/wifiCompatibility/maxPhyRateMbps present"
+          - input: "a blocked/disconnected device, or a weak Wi-Fi signal (< −75 dBm)"
+            result: "200 — networkCongestion: red"
+          - input: "deviceId not in the ssid's roster (unknown / other household / malformed)"
+            result: "404 NOT_FOUND"
+          - input: missing or empty ssid
+            result: "400 INVALID_ARGUMENT"
+
+  /devices/{deviceId}/actions/{actionId}:
+    post:
+      operationId: performDeviceAction
+      summary: Perform a network-access action on a household device
+      description: |
+        Executes a network-access action on a household device. The only action
+        CAMARA defines today is `schedule-access` — schedule an internet access
+        window on a device (e.g. parental controls), optionally recurring.
+
+        CamaraSim has no live home network, so — like the eSIM `profileOperation`
+        legs — the action is a **stateless synchronous acknowledgement**: nothing
+        is persisted (there is no schedule store), so a repeated call is
+        idempotent. The household roster is regenerated from the body's `ssid`, the
+        `deviceId` looked up, and a `DeviceActionResponse` returned.
+
+        Three control planes (docs/DESIGN.md §7): the `ssid`'s trailing three
+        digits select a reserved CAMARA error (household-level, checked first — this
+        is how the `409 CONFLICT` case is reached, `ssid=…409`); otherwise the
+        `deviceId` is matched against the roster (member → `201`, any other id →
+        `404 NOT_FOUND`); and the matched device's `connectionStatus` decides the
+        outcome — a `connected` device applies the schedule immediately (`status:
+        applied`, with `appliedAt`), an offline/paused/blocked one can only queue it
+        (`status: accepted`, no `appliedAt`). The returned `actionId` is a stable,
+        opaque token derived from the device and the action.
+      security:
+        - openId:
+            - inhome.device.write
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: deviceId
+          in: path
+          required: true
+          description: The `deviceId` of the target device (from `listDevices`).
+          schema:
+            type: string
+          example: dev-0f1e2d3c4b5a6978
+        - name: actionId
+          in: path
+          required: true
+          description: The action to perform on the device.
+          schema:
+            type: string
+            enum:
+              - schedule-access
+          example: schedule-access
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeviceActionRequest"
+            examples:
+              scheduleAccess:
+                summary: Schedule a nightly access window
+                value:
+                  ssid: Home-005
+                  scheduleAccess:
+                    from: "2026-06-13T22:00:00Z"
+                    to: "2026-06-14T07:00:00Z"
+                    frequency: daily
+              bare:
+                summary: Just the required household ssid
+                value:
+                  ssid: Home-005
+      responses:
+        "201":
+          description: The action was accepted (queued) or applied.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceActionResponse"
+              examples:
+                applied:
+                  summary: A connected device — applied immediately
+                  value:
+                    actionId: act-3f9a1c0b2d4e5f60
+                    deviceId: dev-0f1e2d3c4b5a6978
+                    actionType: schedule-access
+                    status: applied
+                    appliedAt: "2026-06-13T22:00:00Z"
+                accepted:
+                  summary: An offline device — queued for later
+                  value:
+                    actionId: act-77aa11bb22cc33dd
+                    deviceId: dev-a1b2c3d4e5f60718
+                    actionType: schedule-access
+                    status: accepted
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            missing/empty `ssid`, an unknown field, an unsupported `actionId`, or a
+            `scheduleAccess` that is present but missing `from`/`to` or carries a
+            `frequency` outside the enum.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InHomeError"
+              examples:
+                invalidArgument:
+                  summary: Missing `ssid`
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`ssid` is required and must be a non-empty string."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `ssid` identifier, the `deviceId` path parameter
+          and the matched device's `connectionStatus` (docs/DESIGN.md §7). The
+          action is a stateless acknowledgement — nothing is persisted.
+        cases:
+          - input: ssid ending in a reserved error suffix (e.g. …404, …409, …429)
+            result: the canonical CAMARA error for that status (…409 → 409 CONFLICT)
+          - input: "deviceId member of the roster, device connectionStatus = connected"
+            result: "201 — status: applied, with an appliedAt timestamp"
+          - input: "deviceId member of the roster, device offline/paused/blocked"
+            result: "201 — status: accepted, no appliedAt"
+          - input: "deviceId not in the ssid's roster (unknown / other household / malformed)"
+            result: "404 NOT_FOUND"
+          - input: "actionId other than schedule-access"
+            result: "400 INVALID_ARGUMENT"
+          - input: "missing/empty ssid, unknown field, or a malformed scheduleAccess window"
+            result: "400 INVALID_ARGUMENT"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    ConnectionStatus:
+      type: string
+      description: The current connection state of a device on the household network.
+      enum:
+        - connected
+        - disconnected
+        - blocked
+        - paused
+      example: connected
+
+    DeviceType:
+      type: string
+      description: The kind of device attached to the household network.
+      enum:
+        - laptop
+        - mobile
+        - printer
+        - tv
+        - iot
+        - desktop
+        - other
+      example: mobile
+
+    InfraDevice:
+      type: string
+      description: >-
+        Present on infrastructure devices only — the class of network gear
+        (the gateway modem, a Wi-Fi booster, or a mesh pod).
+      enum:
+        - modem
+        - booster
+        - pod
+      example: modem
+
+    InterfaceType:
+      type: string
+      description: The physical interface the device is attached over.
+      enum:
+        - wifi
+        - ethernet
+      example: wifi
+
+    Device:
+      type: object
+      additionalProperties: false
+      description: A single device attached to the household network.
+      required:
+        - deviceId
+        - ssid
+        - deviceName
+        - deviceType
+        - macAddress
+        - ipAddress
+        - connectionStatus
+        - blocked
+        - paused
+        - interfaceType
+      properties:
+        deviceId:
+          type: string
+          description: Stable, opaque identifier of the device within the household.
+          example: dev-a1b2c3d4e5f60718
+        ssid:
+          type: string
+          description: The SSID of the household network the device is attached to.
+          example: Home-005
+        deviceName:
+          type: string
+          description: Human-friendly name of the device.
+          example: Mobile-1
+        deviceType:
+          $ref: "#/components/schemas/DeviceType"
+        macAddress:
+          type: string
+          description: The device's MAC address (locally-administered in the simulator).
+          example: "02:aa:bb:cc:dd:ee"
+        ipAddress:
+          type: string
+          description: The device's current LAN IP address.
+          example: "192.168.1.20"
+        connectionStatus:
+          $ref: "#/components/schemas/ConnectionStatus"
+        blocked:
+          type: boolean
+          description: Whether the device is currently blocked from the network.
+        paused:
+          type: boolean
+          description: Whether the device's internet access is currently paused.
+        infraDevice:
+          $ref: "#/components/schemas/InfraDevice"
+        interfaceType:
+          $ref: "#/components/schemas/InterfaceType"
+
+    UpdateDeviceRequest:
+      type: object
+      additionalProperties: false
+      description: >-
+        A partial update of a device's mutable settings (`updateDevice`). Every
+        field is optional; only the fields present are changed, and an empty body
+        (or `{}`) is a no-op. Setting `blocked` or `paused` folds into the returned
+        device's `connectionStatus` (blocking wins over pausing; clearing an admin
+        state returns the device to `connected`).
+      properties:
+        deviceName:
+          type: string
+          minLength: 1
+          description: A new human-friendly name for the device.
+          example: Living Room TV
+        blocked:
+          type: boolean
+          description: Whether the device is blocked from the network.
+          example: true
+        paused:
+          type: boolean
+          description: Whether the device's internet access is paused.
+          example: false
+
+    DeviceList:
+      type: object
+      additionalProperties: false
+      description: The list of devices attached to the household network.
+      required:
+        - devices
+        - total
+      properties:
+        devices:
+          type: array
+          items:
+            $ref: "#/components/schemas/Device"
+        total:
+          type: integer
+          format: int32
+          minimum: 0
+          description: The number of devices returned (after any `connectionStatus` filter).
+          example: 6
+
+    RadioFrequency:
+      type: string
+      description: The Wi-Fi radio band the device is attached over (GHz).
+      enum:
+        - "2.4"
+        - "5"
+        - "6"
+      example: "5"
+
+    WifiCompatibility:
+      type: string
+      description: The highest Wi-Fi generation the device negotiates.
+      enum:
+        - wifi4
+        - wifi5
+        - wifi6
+        - wifi7
+      example: wifi6
+
+    NetworkCongestion:
+      type: string
+      description: >-
+        Overall congestion verdict for the device's link — `green` (healthy) or
+        `red` (congested / off the network).
+      enum:
+        - green
+        - red
+      example: green
+
+    DeviceNetworkHealth:
+      type: object
+      additionalProperties: false
+      description: |
+        Network-health telemetry for a single household device. Only
+        `networkCongestion` is required; the radio fields (`radioFrequency`,
+        `rssiDbm`, `wifiCompatibility`) are present for Wi-Fi devices and omitted
+        for wired ones, and `infraDevice` is present for infrastructure devices
+        (the gateway) only.
+      required:
+        - networkCongestion
+      properties:
+        deviceId:
+          type: string
+          description: The device the telemetry is for.
+          example: dev-0f1e2d3c4b5a6978
+        ssid:
+          type: string
+          description: The SSID of the household network the device is attached to.
+          example: Home-005
+        networkCongestion:
+          $ref: "#/components/schemas/NetworkCongestion"
+        rssiDbm:
+          type: number
+          format: double
+          description: Received Signal Strength Indicator, in dBm (Wi-Fi devices).
+          example: -52
+        maxPhyRateMbps:
+          type: number
+          format: double
+          description: Maximum physical-layer data rate, in Mbps.
+          example: 1200
+        radioFrequency:
+          $ref: "#/components/schemas/RadioFrequency"
+        interfaceType:
+          $ref: "#/components/schemas/InterfaceType"
+        infraDevice:
+          $ref: "#/components/schemas/InfraDevice"
+        lastNetworkSpeedMbps:
+          type: number
+          format: double
+          description: Last measured download speed, in Mbps.
+          example: 780
+        wifiCompatibility:
+          $ref: "#/components/schemas/WifiCompatibility"
+        measuredAt:
+          type: string
+          format: date-time
+          description: When the health metrics were last collected (RFC 3339 UTC).
+          example: "2024-01-01T14:27:08Z"
+
+    ScheduleAccess:
+      type: object
+      additionalProperties: false
+      description: >-
+        An internet access window to schedule on the device. When present, all
+        three fields are required.
+      required:
+        - from
+        - to
+        - frequency
+      properties:
+        from:
+          type: string
+          format: date-time
+          description: Start of the restricted or allowed access window (RFC 3339).
+          example: "2026-06-13T22:00:00Z"
+        to:
+          type: string
+          format: date-time
+          description: End of the access window (RFC 3339).
+          example: "2026-06-14T07:00:00Z"
+        frequency:
+          type: string
+          description: Recurrence of the access schedule.
+          enum:
+            - once
+            - daily
+            - weekdays
+            - weekends
+          example: daily
+
+    DeviceActionRequest:
+      type: object
+      additionalProperties: false
+      description: The body of a `performDeviceAction` request.
+      required:
+        - ssid
+      properties:
+        ssid:
+          type: string
+          minLength: 1
+          description: SSID of the household network the device is on.
+          example: Home-005
+        scheduleAccess:
+          $ref: "#/components/schemas/ScheduleAccess"
+
+    DeviceActionResponse:
+      type: object
+      additionalProperties: false
+      description: The acknowledgement of a performed device action.
+      required:
+        - actionId
+        - deviceId
+        - actionType
+        - status
+      properties:
+        actionId:
+          type: string
+          description: >-
+            Stable, opaque identifier for the performed action (derived from the
+            device and the action; deterministic).
+          example: act-3f9a1c0b2d4e5f60
+        deviceId:
+          type: string
+          description: The device the action was performed on.
+          example: dev-0f1e2d3c4b5a6978
+        actionType:
+          type: string
+          description: The kind of action that was performed.
+          enum:
+            - schedule-access
+          example: schedule-access
+        status:
+          type: string
+          description: >-
+            `applied` when the action took effect immediately (a connected
+            device); `accepted` when it was only queued (an offline device).
+          enum:
+            - accepted
+            - applied
+          example: applied
+        appliedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the action took effect. Present only for `applied` actions (an
+            `accepted` action has not yet been applied).
+          example: "2026-06-13T22:00:00Z"
+
+    DeleteDeviceResponse:
+      type: object
+      additionalProperties: false
+      description: The acknowledgement of a deleted device record (`deleteDevice`).
+      required:
+        - deviceId
+        - status
+      properties:
+        deviceId:
+          type: string
+          description: The device whose record was deleted.
+          example: dev-0f1e2d3c4b5a6978
+        status:
+          type: string
+          description: The outcome of the delete.
+          enum:
+            - deleted
+          example: deleted
+
+    InHomeError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the In-Home Device Management `code` set.
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - CONFLICT
+                - SERVICE_NOT_APPLICABLE
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

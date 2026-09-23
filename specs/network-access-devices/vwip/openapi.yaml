@@ -1,0 +1,886 @@
+# CamaraSim — Network Access Devices, API version vwip
+# (CAMARA NetworkAccessManagement / Network Access Devices, wip).
+#
+# Vendored from the CAMARA NetworkAccessManagement "Network Access Devices" API
+# (work-in-progress — no released version yet, so mounted at its canonical `vwip`
+# base path `/network-access-devices/vwip`, like the other pre-1.0 wip APIs) and
+# annotated with CamaraSim's parameter-driven functional cases (docs/DESIGN.md
+# §7, §9). Backed by `src/apis/network_access_devices/vwip.rs`; spec and code must
+# not drift.
+#
+# Serves `GET /network-access-devices` (list the operator-supplied network access
+# devices associated with the subscriber) and
+# `GET /network-access-devices/{networkAccessDeviceId}` (read one of those devices
+# by id). CamaraSim's device set is deterministic from the token subject, so the
+# by-id read regenerates the set and looks the id up — it needs no store (a
+# simplification of CAMARA's stateful resource read). It also serves
+# `POST /reboot-requests` (create a **stateful** reboot request for the
+# subscriber's devices, persisted in an in-memory store),
+# `GET /reboot-requests/{rebootRequestId}` (read one back by its minted id),
+# `PATCH /reboot-requests/{rebootRequestId}` (update a still-pending scheduled
+# reboot; an immediate one that has already fired → `409 INCOMPATIBLE_STATE`), and
+# `DELETE /reboot-requests/{rebootRequestId}` (cancel/delete it, evicting it from
+# the store) — the full reboot-request lifecycle.
+openapi: 3.0.3
+info:
+  title: Network Access Devices
+  description: |
+    Service for managing network-operator-supplied **Network Access Devices**
+    (gateways, routers, and access points) — operator-managed infrastructure, not
+    end-user equipment. This endpoint lets an authorised consumer enumerate the
+    equipment associated with the subscriber; each device reports a
+    `deviceStatus` (`connected` / `disconnected` / `unavailable`) alongside
+    identifying detail (name, description, and hardware address).
+
+    This is the CamaraSim reference double for the CAMARA NetworkAccessManagement
+    "Network Access Devices" API (wip). `GET /network-access-devices` requires the
+    `network-access-devices:reboot` scope.
+
+    ## Identifier resolution — the token subject
+
+    The listing has no request body: the devices returned are those associated
+    with the subscriber the access token was issued for, so the token **subject**
+    (`sub`) is the sole identifier and the sole control plane (mirrors Number
+    Verification's `GET /device-phone-number`). A two-legged `client_credentials`
+    token's subject is its `client_id`; a three-legged token's subject is the
+    authenticated line.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    The response is chosen deterministically from the token subject:
+
+    - **Reserved error suffix (subject).** If the subject's trailing three digits
+      name a reserved CAMARA status, the endpoint answers with that canonical
+      CAMARA error (shared convention — see the referenced `errors.yaml`):
+      `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`.
+    - **Device set (subject digits).** Otherwise the subject's trailing three
+      digits `d` (`000`–`999`; every reserved suffix is `≥ 400`, so all small `d`
+      are free), or `0` when the subject has no digits, drive **two** facets of
+      the returned list:
+        - **count** — `d == 0` → a single device; otherwise `((d - 1) % 3) + 1`
+          devices (1–3).
+        - **per-device status** — device `i` (0-based) reports
+          `["connected", "disconnected", "unavailable"][(d + i) % 3]`.
+      So `…000` (or a no-digit subject) is one healthy `connected` gateway,
+      `…002` gives two devices starting `unavailable`, and `…003` gives three.
+      Each device's `id` (UUID-shaped) and `hardwareAddress` (EUI-48) are
+      deterministic from the subject and the device index (SHA-256).
+
+    Example: a subject ending `000` → `[{ deviceStatus: connected, … }]`; ending
+    `002` → two devices `[unavailable, connected]`; ending `404` → `404
+    NOT_FOUND`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical Network Access Devices (wip) declares a subset
+    (400/401/403/404/500/503).
+
+    ## Documented cuts
+
+    - **`serviceSite`** and the inherited Commonalities `Device` end-user
+      identifier fields (`phoneNumber`/`networkAccessIdentifier`/`ipv4Address`/
+      `ipv6Address`) are omitted: these are operator-managed devices, and the
+      simulator reports only their operator-facing detail. Only `id` is required
+      by the schema, so this is a schema-valid trim (DESIGN §9).
+    - The per-device `GET /network-access-devices/{networkAccessDeviceId}` read is
+      implemented **statelessly**: the subscriber's device set is deterministic
+      from the token subject, so the read regenerates that set and returns the
+      device whose `id` matches. An id that is not in the subject's set — unknown,
+      belonging to another subscriber, or malformed — is a `404 NOT_FOUND` (there
+      is no store to tell those cases apart). This is a documented simplification
+      of CAMARA's stateful resource read.
+    - The **reboot-request** resource lifecycle is **stateful**. `POST
+      /reboot-requests` is implemented: it creates a reboot request for one or
+      more of the subscriber's devices and persists it in an in-memory store, so
+      the created representation reads back in later slices. Its target devices
+      are matched against the subscriber's deterministic device set (an explicit
+      `devices` list must hold UUIDs the subscriber owns; an omitted/empty list
+      reboots all of them). `GET /reboot-requests/{rebootRequestId}` reads a
+      created request back by its opaque, server-minted id (store state is the sole
+      control plane — a stored id → `200`, any other → `404`), and `DELETE
+      /reboot-requests/{rebootRequestId}` cancels/deletes it by evicting it from the
+      store (single-use — a stored id → `204`, any other → `404`), and `PATCH
+      /reboot-requests/{rebootRequestId}` updates a still-pending **scheduled**
+      reboot (`merge-patch+json` over the mutable `atTime`/`message`; a stored id
+      whose request carries an `atTime` → `200`, an **immediate** reboot with no
+      `atTime` — already fired — → `409 INCOMPATIBLE_STATE`, an unknown id →
+      `404`). Reboot requests are not scoped per subscriber, so CAMARA's
+      `sub`-ownership check on the read/patch/delete is not enforced. The **audit**
+      fields `createdBy`/`modifiedBy` (`format: uuid`) are omitted — the simulator's
+      subject is not a UUID (documented cuts). CamaraSim runs no reboot engine, so
+      "already fired" is modelled by the absence of a future `atTime` rather than a
+      live status transition, and the reboot targets (`devices`) are fixed at
+      creation — a PATCH does not re-target (documented simplifications).
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/network-access-devices/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /network-access-devices:
+    get:
+      operationId: getNetworkAccessDevices
+      summary: Get all Network Access Devices associated with the subscriber
+      description: |
+        Lists the operator-supplied Network Access Devices associated with the
+        subscriber the access token authenticated.
+
+        The subscriber is identified by the access-token subject (`sub`) — there
+        is no request body. See the API description for the parameter-driven
+        functional cases (the subject's trailing three digits drive the device
+        count and each device's status; a reserved suffix selects a canonical
+        CAMARA error).
+      security:
+        - openId:
+            - network-access-devices:reboot
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The list of network access devices for the subscriber.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkAccessDeviceList"
+              examples:
+                singleConnected:
+                  summary: One connected gateway (happy-path default, `…000` tail)
+                  value:
+                    - id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                      deviceStatus: connected
+                      name: Gateway-1
+                      description: Operator-supplied network access gateway
+                      hardwareAddress:
+                        hardwareAddressType: EUI-48
+                        value: "12:34:56:78:9A:BC"
+                twoDevices:
+                  summary: Two devices (`…002` tail)
+                  value:
+                    - id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                      deviceStatus: unavailable
+                      name: Gateway-1
+                      description: Operator-supplied network access gateway
+                      hardwareAddress:
+                        hardwareAddressType: EUI-48
+                        value: "AB:CD:EF:12:34:56"
+                    - id: 123e4567-e89b-12d3-a456-426614174000
+                      deviceStatus: connected
+                      name: Gateway-2
+                      description: Operator-supplied network access gateway
+                      hardwareAddress:
+                        hardwareAddressType: EUI-48
+                        value: "0A:1B:2C:3D:4E:5F"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the token subject (docs/DESIGN.md §7). The
+          subject's trailing three digits drive the device count and each
+          device's status; reserved error suffixes come from the shared
+          convention in errors.yaml.
+        cases:
+          - input: subject ending in a reserved error suffix (e.g. …404, …429)
+            result: the canonical CAMARA error for that status
+          - input: "subject trailing digits …000 (or a subject with no digits)"
+            result: "200 — one connected device"
+          - input: "subject trailing digits …001"
+            result: "200 — one disconnected device"
+          - input: "subject trailing digits …002"
+            result: "200 — two devices [unavailable, connected]"
+          - input: "subject trailing digits …003"
+            result: "200 — three devices [connected, disconnected, unavailable]"
+
+  /network-access-devices/{networkAccessDeviceId}:
+    get:
+      operationId: getNetworkAccessDevice
+      summary: Get a single Network Access Device by id
+      description: |
+        Reads one of the subscriber's Network Access Devices by its id.
+
+        CamaraSim's device set is deterministic from the access-token subject
+        (`sub`); this read regenerates that set and returns the device whose `id`
+        matches the path parameter, so — unlike CAMARA's stateful resource read —
+        it needs no store. See the API description for the parameter-driven
+        functional cases.
+
+        Two control planes (docs/DESIGN.md §7):
+
+        - **Reserved error suffix (subject).** As for the listing, a subject whose
+          trailing three digits name a reserved CAMARA status answers that
+          canonical error, regardless of the id (an account-level plane).
+        - **The id vs the subject's set.** An id that belongs to the subject's
+          deterministic set → `200` with that device; any other id (unknown,
+          another subscriber's, or malformed) → `404 NOT_FOUND`.
+      security:
+        - openId:
+            - network-access-devices:reboot
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: networkAccessDeviceId
+          in: path
+          required: true
+          description: The unique identifier (UUID) of the Network Access Device.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The requested network access device.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkAccessDevice"
+              examples:
+                connectedGateway:
+                  summary: One connected gateway
+                  value:
+                    id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    deviceStatus: connected
+                    name: Gateway-1
+                    description: Operator-supplied network access gateway
+                    hardwareAddress:
+                      hardwareAddressType: EUI-48
+                      value: "12:34:56:78:9A:BC"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the token subject and the path id (docs/DESIGN.md
+          §7). A reserved subject suffix answers a canonical CAMARA error
+          (account-level); otherwise the id is matched against the subject's
+          deterministic device set.
+        cases:
+          - input: subject ending in a reserved error suffix (e.g. …404, …503)
+            result: the canonical CAMARA error for that status (id ignored)
+          - input: an id that belongs to the subject's device set
+            result: "200 — that NetworkAccessDevice"
+          - input: an unknown / another subscriber's / malformed id
+            result: "404 NOT_FOUND"
+
+  /reboot-requests:
+    post:
+      operationId: createRebootRequest
+      summary: Create a reboot request for the subscriber's Network Access Devices
+      description: |
+        Creates a **reboot request** targeting one or more of the subscriber's
+        Network Access Devices. This is a stateful resource: the created
+        `RebootRequest` is persisted (in CamaraSim, in an in-memory store) and
+        addressed in later operations by its minted `id`.
+
+        The request body (`RebootRequestCreate`) is entirely optional:
+
+        - `devices` — the target device ids. Omit (or send an empty array) to
+          reboot **all** of the subscriber's devices; the schema requires
+          `devices` on the created resource, so the inferred set is materialised.
+        - `atTime` — schedule the reboot (RFC 3339); omit for an immediate reboot.
+        - `message` — a free-text note (≤ 255 characters).
+
+        Two control planes (docs/DESIGN.md §7):
+
+        - **Reserved error suffix (subject).** As for the listing / by-id read, a
+          subject whose trailing three digits name a reserved CAMARA status
+          answers that canonical error before anything is created.
+        - **`devices` vs the subject's set.** An explicit `devices` list must hold
+          well-formed UUIDs (else `400 INVALID_ARGUMENT`), each belonging to the
+          subscriber's deterministic device set (else `404 NOT_FOUND`).
+      security:
+        - openId:
+            - network-access-devices:reboot
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RebootRequestCreate"
+            examples:
+              rebootAll:
+                summary: Immediate reboot of all the subscriber's devices
+                value: {}
+              scheduledTargeted:
+                summary: A scheduled reboot of two specific devices
+                value:
+                  devices:
+                    - 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    - 123e4567-e89b-12d3-a456-426614174000
+                  atTime: "2024-06-01T02:00:00Z"
+                  message: nightly maintenance window
+      responses:
+        "201":
+          description: Reboot request created successfully.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+            Location:
+              description: The URL of the created reboot request.
+              required: false
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RebootRequest"
+              examples:
+                created:
+                  summary: A reboot request targeting all the subscriber's devices
+                  value:
+                    id: 8f14e45f-ceea-467d-9a3e-2c9f2b0f0a01
+                    devices:
+                      - 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    createdAt: "2024-06-01T14:27:08Z"
+                    modifiedAt: "2024-06-01T14:27:08Z"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the token subject and the request body
+          (docs/DESIGN.md §7). A reserved subject suffix answers a canonical
+          CAMARA error (account-level); otherwise the reboot targets are matched
+          against the subject's deterministic device set.
+        cases:
+          - input: subject ending in a reserved error suffix (e.g. …404, …503)
+            result: the canonical CAMARA error for that status (nothing created)
+          - input: "no body / empty `devices`"
+            result: "201 — a reboot request targeting all the subscriber's devices"
+          - input: "`devices` holding an id from the subscriber's set"
+            result: "201 — a reboot request targeting just that device"
+          - input: "`devices` holding a well-formed UUID the subscriber does not own"
+            result: "404 NOT_FOUND"
+          - input: "`devices` holding a value that is not a UUID (or an unknown field / non-JSON body / `message` > 255 chars / malformed `atTime`)"
+            result: "400 INVALID_ARGUMENT"
+
+  /reboot-requests/{rebootRequestId}:
+    get:
+      operationId: getRebootRequest
+      summary: Get a reboot request by id
+      description: |
+        Reads a previously created reboot request by its server-minted `id`,
+        returning the persisted `RebootRequest` verbatim. This is the read leg of
+        the stateful reboot-request lifecycle.
+
+        The `rebootRequestId` is server-minted and opaque to the caller, so —
+        unlike the subject-keyed device operations — it is **not** a reserved-error
+        scenario plane. The **store state** is the sole control plane
+        (docs/DESIGN.md §7):
+
+        - A stored id → `200` with that `RebootRequest`.
+        - Any other id (never created, or already deleted) → `404 NOT_FOUND`.
+
+        Reboot requests are not scoped per subscriber, so CAMARA's `sub`-ownership
+        check on the read is not enforced (a documented cut).
+      security:
+        - openId:
+            - network-access-devices:reboot
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: rebootRequestId
+          in: path
+          required: true
+          description: The unique identifier (UUID) of the reboot request.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The requested reboot request.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RebootRequest"
+              examples:
+                rebootAll:
+                  summary: A reboot request targeting all the subscriber's devices
+                  value:
+                    id: 8f14e45f-ceea-467d-9a3e-2c9f2b0f0a01
+                    devices:
+                      - 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    createdAt: "2024-06-01T14:27:08Z"
+                    modifiedAt: "2024-06-01T14:27:08Z"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the store state (docs/DESIGN.md §7). The
+          `rebootRequestId` is opaque and server-minted, so it is not a
+          reserved-error plane.
+        cases:
+          - input: an id returned by a prior createRebootRequest
+            result: "200 — that RebootRequest, verbatim"
+          - input: a well-formed UUID that was never created (or already deleted)
+            result: "404 NOT_FOUND"
+    patch:
+      operationId: updateRebootRequest
+      summary: Update a reboot request by id
+      description: |
+        Updates a previously created reboot request by its server-minted `id`.
+        This is the update leg of the stateful reboot-request lifecycle. The body
+        is an [RFC 7386](https://www.rfc-editor.org/rfc/rfc7386)
+        `merge-patch+json` document over the **mutable** fields (`atTime`,
+        `message`): a supplied value replaces, an explicit `null` clears, and the
+        identity / target / audit fields (`id`, `devices`, `createdAt`,
+        `modifiedAt`) plus any unknown key are ignored. On a successful update
+        `modifiedAt` is bumped.
+
+        Two control planes (docs/DESIGN.md §7). The **request body** is validated
+        first (a malformed `atTime` or an over-long `message` → `400
+        INVALID_ARGUMENT`, before the store is consulted). Then the opaque id
+        selects the **store state**, and the stored request's **schedule state**
+        gates the update:
+
+        - A stored id whose request carries an `atTime` (a still-pending
+          **scheduled** reboot) → `200` with the updated `RebootRequest`; the
+          change persists.
+        - A stored id for an **immediate** reboot (no `atTime` — it has already
+          fired) → `409 NETWORK_ACCESS_DEVICES.INCOMPATIBLE_STATE`: an
+          in-progress/completed reboot cannot be modified. The store is left
+          unchanged.
+        - Any other id (never created, or already deleted) → `404 NOT_FOUND`.
+
+        CamaraSim runs no reboot engine, so "already fired" is modelled by the
+        absence of a future `atTime` rather than a live status transition, and the
+        reboot targets (`devices`) are fixed at creation — a PATCH does not
+        re-target (documented simplifications). Reboot requests are not scoped per
+        subscriber, so CAMARA's `sub`-ownership check on the update is not enforced
+        (a documented cut).
+      security:
+        - openId:
+            - network-access-devices:reboot
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: rebootRequestId
+          in: path
+          required: true
+          description: The unique identifier (UUID) of the reboot request.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: "#/components/schemas/RebootRequestUpdate"
+            examples:
+              reschedule:
+                summary: Reschedule a pending reboot and note why
+                value:
+                  atTime: "2024-07-01T03:00:00Z"
+                  message: rescheduled to a later window
+              clearMessage:
+                summary: Clear the free-text note
+                value:
+                  message: null
+      responses:
+        "200":
+          description: The updated reboot request.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RebootRequest"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          description: |
+            The reboot request cannot be updated in its current state — it is an
+            immediate reboot that has already started (CAMARA `409` with the
+            API-specific code `NETWORK_ACCESS_DEVICES.INCOMPATIBLE_STATE`).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkAccessDevicesError"
+              example:
+                status: 409
+                code: NETWORK_ACCESS_DEVICES.INCOMPATIBLE_STATE
+                message: The reboot request has already started and can no longer be modified.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The request body is validated first (a `400` wins over the store/state),
+          then the opaque store-state id and the stored request's schedule state
+          (scheduled vs immediate) select the result (docs/DESIGN.md §7).
+        cases:
+          - input: a stored id for a scheduled reboot (has atTime) + a valid patch
+            result: "200 — the updated RebootRequest (modifiedAt bumped); persists"
+          - input: a stored id for an immediate reboot (no atTime)
+            result: "409 NETWORK_ACCESS_DEVICES.INCOMPATIBLE_STATE (store unchanged)"
+          - input: a well-formed UUID that was never created (or already deleted)
+            result: "404 NOT_FOUND"
+          - input: a malformed atTime or a message over 255 chars
+            result: "400 INVALID_ARGUMENT (before the store is consulted)"
+    delete:
+      operationId: deleteRebootRequest
+      summary: Cancel/delete a reboot request by id
+      description: |
+        Cancels/deletes a previously created reboot request, evicting it from the
+        store. This is the delete leg of the stateful reboot-request lifecycle.
+
+        Like the read leg, the `rebootRequestId` is server-minted and opaque, so
+        it is **not** a reserved-error scenario plane. The **store state** is the
+        sole control plane (docs/DESIGN.md §7):
+
+        - A stored id → `204 No Content` (single-use eviction — a later
+          `getRebootRequest`/`deleteRebootRequest` for the same id is a `404`).
+        - Any other id (never created, or already deleted) → `404 NOT_FOUND`.
+
+        Reboot requests are not scoped per subscriber, so CAMARA's `sub`-ownership
+        check on the delete is not enforced (a documented cut).
+      security:
+        - openId:
+            - network-access-devices:reboot
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: rebootRequestId
+          in: path
+          required: true
+          description: The unique identifier (UUID) of the reboot request.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Reboot request deleted successfully (no content).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the store state (docs/DESIGN.md §7). The
+          `rebootRequestId` is opaque and server-minted, so it is not a
+          reserved-error plane. Deletion is single-use.
+        cases:
+          - input: an id returned by a prior createRebootRequest
+            result: "204 No Content — evicted; a later GET/DELETE for it is 404"
+          - input: a well-formed UUID that was never created (or already deleted)
+            result: "404 NOT_FOUND"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    NetworkAccessDevice:
+      type: object
+      additionalProperties: false
+      description: |
+        An operator-supplied network access device (gateway, router, or access
+        point). Operator-managed infrastructure — not end-user equipment. Only
+        `id` is required; CamaraSim also reports `deviceStatus`, `name`,
+        `description`, and `hardwareAddress`. The Commonalities `Device` end-user
+        identifier fields and `serviceSite` are omitted for these operator
+        devices (a documented, schema-valid cut).
+      required:
+        - id
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+          description: The unique identifier of the device (UUID).
+          example: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: The name of the device.
+          example: Gateway-1
+        description:
+          type: string
+          minLength: 0
+          maxLength: 255
+          description: A description of the device.
+          example: Operator-supplied network access gateway
+        hardwareAddress:
+          description: The hardware address of the device.
+          type: object
+          additionalProperties: false
+          required:
+            - hardwareAddressType
+            - value
+          properties:
+            hardwareAddressType:
+              type: string
+              enum:
+                - EUI-48
+              example: EUI-48
+            value:
+              type: string
+              pattern: "^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"
+              maxLength: 17
+              example: "12:34:56:78:9A:BC"
+        deviceStatus:
+          type: string
+          enum:
+            - connected
+            - disconnected
+            - unavailable
+          default: unavailable
+          description: The current status of the device.
+          example: connected
+
+    NetworkAccessDeviceList:
+      type: array
+      description: A list of network access devices.
+      maxItems: 100
+      items:
+        $ref: "#/components/schemas/NetworkAccessDevice"
+
+    RebootRequestCreate:
+      type: object
+      additionalProperties: false
+      description: |
+        The fields accepted when creating a reboot request. All are optional:
+        `devices` names the target devices (omit / empty → reboot all the
+        subscriber's devices), `atTime` schedules the reboot (omit → immediate),
+        and `message` is a free-text note.
+      properties:
+        devices:
+          type: array
+          maxItems: 100
+          description: |
+            The ids of the Network Access Devices to reboot. Each must be a UUID
+            belonging to the subscriber's device set. Omit (or send an empty
+            array) to reboot all of the subscriber's devices.
+          items:
+            type: string
+            format: uuid
+            example: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        atTime:
+          type: string
+          format: date-time
+          maxLength: 64
+          description: |
+            When to perform the reboot (RFC 3339, with time zone). Omit for an
+            immediate reboot.
+          example: "2024-06-01T02:00:00Z"
+        message:
+          type: string
+          maxLength: 255
+          description: A free-text note associated with the reboot request.
+          example: nightly maintenance window
+
+    RebootRequestUpdate:
+      type: object
+      additionalProperties: false
+      description: |
+        The `merge-patch+json` document accepted by `updateRebootRequest` (RFC
+        7386). Only the **mutable** fields are honoured: a supplied `atTime` /
+        `message` replaces the stored value, an explicit `null` clears it. The
+        identity / target / audit fields (`id`, `devices`, `createdAt`,
+        `modifiedAt`) and any other key are ignored, so they are not listed here.
+        An empty object is a valid no-op patch.
+      properties:
+        atTime:
+          type: string
+          format: date-time
+          maxLength: 64
+          nullable: true
+          description: |
+            Reschedule the reboot (RFC 3339, with time zone), or `null` to clear
+            the schedule (making it an immediate reboot).
+          example: "2024-07-01T03:00:00Z"
+        message:
+          type: string
+          maxLength: 255
+          nullable: true
+          description: Replace the free-text note, or `null` to clear it.
+          example: rescheduled to a later window
+
+    NetworkAccessDevicesError:
+      type: object
+      description: |
+        The CAMARA error body with Network-Access-Devices-specific `code` values
+        (a superset of the shared base catalog for this API's `409` update case).
+      required:
+        - status
+        - code
+        - message
+      properties:
+        status:
+          type: integer
+          description: The HTTP status code, echoed in the body.
+        code:
+          type: string
+          description: Machine-readable CAMARA / Network Access Devices error code.
+          enum:
+            - CONFLICT
+            - NETWORK_ACCESS_DEVICES.INCOMPATIBLE_STATE
+        message:
+          type: string
+          description: Human-readable explanation.
+
+    RebootRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        A reboot request for one or more of the subscriber's Network Access
+        Devices, addressed by its server-minted `id`. `devices` is always present
+        on the created resource (the target set, resolved from the request).
+
+        CamaraSim omits the optional `createdBy` / `modifiedBy` audit fields
+        (`format: uuid`) — the simulator's subject is not a UUID — a documented,
+        schema-valid cut.
+      required:
+        - id
+        - devices
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+          description: The unique identifier of the reboot request (UUID).
+          example: 8f14e45f-ceea-467d-9a3e-2c9f2b0f0a01
+        devices:
+          type: array
+          maxItems: 100
+          description: The ids of the Network Access Devices this request reboots.
+          items:
+            type: string
+            format: uuid
+            example: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        atTime:
+          type: string
+          format: date-time
+          maxLength: 64
+          description: When the reboot is scheduled (RFC 3339). Absent for an immediate reboot.
+          example: "2024-06-01T02:00:00Z"
+        message:
+          type: string
+          maxLength: 255
+          description: The free-text note supplied with the request.
+          example: nightly maintenance window
+        createdAt:
+          type: string
+          format: date-time
+          maxLength: 64
+          readOnly: true
+          description: Resource creation date/time (RFC 3339, UTC).
+          example: "2024-06-01T14:27:08Z"
+        modifiedAt:
+          type: string
+          format: date-time
+          maxLength: 64
+          readOnly: true
+          description: Last update date/time (RFC 3339, UTC).
+          example: "2024-06-01T14:27:08Z"

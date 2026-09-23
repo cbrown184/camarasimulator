@@ -1,0 +1,289 @@
+# CamaraSim — Network Health Assessment, API version vwip (CAMARA NetworkInsights, wip).
+#
+# Vendored from the CAMARA NetworkInsights API suite's Network Health Assessment
+# API (work-in-progress — no released version yet, so mounted at its canonical
+# `vwip` base path `/network-health-assessment/vwip`, like the other pre-1.0 wip
+# APIs) and annotated with CamaraSim's parameter-driven functional cases
+# (docs/DESIGN.md §7, §9). Backed by `src/apis/network_health_assessment/vwip.rs`;
+# spec and code must not drift.
+#
+# Serves `GET /health-scores`.
+openapi: 3.0.3
+info:
+  title: Network Health Assessment
+  description: |
+    Reports an **aggregate, network-level** health score for a specified network
+    (e.g. a private network or slice) and its component modules — the whole
+    network, or its wireless / transport / core segment. The score is a `0..100`
+    value the operator's assessment platform derives from the module's
+    performance and fault indicators (higher is healthier); above 90 is
+    excellent/healthy, 60–80 indicates issues, below 60 means the module is
+    basically unable to provide normal service.
+
+    This is the CamaraSim reference double for CAMARA Network Health Assessment
+    (part of the NetworkInsights suite, wip). The `/health-scores` endpoint
+    requires the `network-health-assessment:health-scores:read` scope.
+
+    ## Privacy and data granularity
+
+    All data is aggregated at the network / network-module level and contains no
+    individual device, user, or terminal identifier. It is therefore a two-legged
+    (`client_credentials`) service-to-service query: no end-user personal data is
+    processed, so no user consent or three-legged token is required. The network
+    is identified by the required `networkId` query parameter (a UUID), and the
+    requested module by the required `netType` query parameter.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Two independent control planes drive the answer:
+
+    - **Reserved error suffix (`networkId`).** The `networkId` UUID is the
+      identifier: if its trailing three digits name a reserved CAMARA status, the
+      endpoint answers with that canonical CAMARA error (shared convention — see
+      the referenced `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`,
+      `…422`, `…429`, `…500`, `…503`. A UUID contains digits, so the convention
+      applies unchanged — e.g. `…-000000000404` selects `404 NOT_FOUND`.
+    - **Score (`networkId` digits × `netType`).** Otherwise the `networkId`'s
+      trailing three digits `d` (`000`–`999`) fix the score and `netType` shifts
+      it per module, so both are genuine planes:
+        - `d == 000` (or a `networkId` with fewer than three digits) → **no
+          data**: `score: null`, `scoringTime: null` (the spec's no-data `200`).
+        - otherwise `score = clamp(d / 10 − moduleIndex, 0, 100)`, where
+          `moduleIndex` is `NET`=0, `NET_WIRELESS`=1, `NET_TRANSPORT`=2,
+          `NET_CORE`=3. So the trailing digits set the band directly (`…950` →
+          ~95, `…650` → ~65, `…300` → ~30) and each module reads a little lower
+          than the whole-network composite.
+
+    Example: `networkId=…-000000000950`, `netType=NET` → `score: 95`;
+    `netType=NET_CORE` → `score: 92`; `…-000000000000` → `score: null`;
+    `…-000000000404` → `404 NOT_FOUND`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical Network Health Assessment (wip) declares a
+    subset (400/401/403/404).
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/network-health-assessment/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /health-scores:
+    get:
+      operationId: getHealthScores
+      summary: Query the latest network health score
+      description: |
+        Answers the latest aggregate health score of the network module named by
+        `netType` for the network named by `networkId`
+        (`{ networkId, netType, score, scoringTime }`).
+
+        The `networkId` UUID is the control-plane identifier — see the API
+        description for the parameter-driven functional cases (its trailing three
+        digits set the score band or a reserved CAMARA error, and `netType`
+        shifts the score per module). Returns `score: null` and
+        `scoringTime: null` when the platform has no data (`…000` tail).
+      security:
+        - openId:
+            - network-health-assessment:health-scores:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: networkId
+          in: query
+          required: true
+          description: Unique identifier of the assessed network (UUID format).
+          schema:
+            $ref: "#/components/schemas/NetworkId"
+        - name: netType
+          in: query
+          required: true
+          description: The network module to score.
+          schema:
+            $ref: "#/components/schemas/NetTypeEnum"
+      responses:
+        "200":
+          description: |
+            The latest health score of the selected network module. `score` and
+            `scoringTime` are `null` when no data is available (`…000` tail).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthInfo"
+              examples:
+                excellent:
+                  summary: Whole-network composite, excellent band (`…950` tail)
+                  value:
+                    networkId: "00000000-0000-0000-0000-000000000950"
+                    netType: NET
+                    score: 95.0
+                    scoringTime: "2025-12-01T12:00:00Z"
+                coreModule:
+                  summary: Core module reads a little lower (`…950` tail, NET_CORE)
+                  value:
+                    networkId: "00000000-0000-0000-0000-000000000950"
+                    netType: NET_CORE
+                    score: 92.0
+                    scoringTime: "2025-12-01T12:00:00Z"
+                noData:
+                  summary: No data available (`…000` tail)
+                  value:
+                    networkId: "00000000-0000-0000-0000-000000000000"
+                    netType: NET
+                    score: null
+                    scoringTime: null
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            missing or non-UUID `networkId`, or a missing or unknown `netType`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkHealthError"
+              examples:
+                invalidArgument:
+                  summary: Missing or malformed query parameter
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`networkId` must be a UUID (e.g. 123e4567-e89b-12d3-a456-426614174000)."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `networkId` identifier and `netType`
+          (docs/DESIGN.md §7). The `networkId`'s trailing three digits set the
+          score band (÷10) or a reserved error; `netType` shifts the score per
+          module. Reserved error suffixes come from the shared convention in
+          errors.yaml.
+        cases:
+          - input: networkId ending in a reserved error suffix (e.g. …404, …429)
+            result: the canonical CAMARA error for that status
+          - input: "networkId trailing digits …000 (or fewer than three digits)"
+            result: "200 { score: null, scoringTime: null }"
+          - input: "networkId trailing digits d (001–999, non-reserved), netType=NET"
+            result: "200 score = d/10 (e.g. …950 → 95.0)"
+          - input: "same networkId with netType=NET_WIRELESS / NET_TRANSPORT / NET_CORE"
+            result: "200 score = clamp(d/10 − 1 / 2 / 3, 0, 100)"
+          - input: missing or non-UUID networkId, or missing/unknown netType
+            result: "400 INVALID_ARGUMENT"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    NetworkId:
+      type: string
+      format: uuid
+      maxLength: 36
+      description: Network ID in UUID format (unique identifier of the analysed network).
+      example: "123e4567-e89b-12d3-a456-426614174000"
+
+    NetTypeEnum:
+      type: string
+      description: The network module type to score.
+      enum:
+        - NET
+        - NET_WIRELESS
+        - NET_TRANSPORT
+        - NET_CORE
+      example: NET
+
+    HealthInfo:
+      type: object
+      additionalProperties: false
+      description: |
+        The latest health score of a network module. When no data is available,
+        `score` and `scoringTime` are `null`.
+      required:
+        - networkId
+        - netType
+        - score
+        - scoringTime
+      properties:
+        networkId:
+          $ref: "#/components/schemas/NetworkId"
+        netType:
+          $ref: "#/components/schemas/NetTypeEnum"
+        score:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 100
+          nullable: true
+          description: >-
+            Value of the health score (0–100, higher is better). `null` when no
+            health data is available for the network/module.
+          example: 94.56
+        scoringTime:
+          type: string
+          format: date-time
+          maxLength: 64
+          nullable: true
+          description: >-
+            RFC 3339 instant the score was last calculated (UTC, `Z` offset).
+            `null` when no health data is available.
+          example: "2025-12-01T12:00:00Z"
+
+    NetworkHealthError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Network Health Assessment `code` set.
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - CONFLICT
+                - SERVICE_NOT_APPLICABLE
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

@@ -1,0 +1,357 @@
+# CamaraSim — Media Streaming Rate, API version vwip (CAMARA work-in-progress).
+#
+# Vendored from the CAMARA Device Media Streaming Rate API (media-streaming-rate)
+# and annotated with CamaraSim's parameter-driven functional cases (docs/DESIGN.md
+# §7, §9). Backed by `src/apis/media_streaming_rate/vwip.rs`; spec and code must
+# not drift.
+#
+# Media Streaming Rate has no released version yet — its upstream `main` spec is
+# versioned `wip` — so, unlike the published sub-1.0 APIs (KYC Match v0.3,
+# Location Retrieval v0.4), its canonical base path is literally `vwip`. This
+# tracks the work-in-progress spec; a numbered version will be added when CAMARA
+# cuts a release.
+#
+# Serves `POST /retrieve-maximum-downstream-media-rate`
+# (`retrieveMaximumDownstreamMediaRate`): the maximum downstream media bit rate
+# the network can currently sustain for a device.
+openapi: 3.0.3
+info:
+  title: Media Streaming Rate
+  description: |
+    Returns the maximum **downstream** media bit rate the operator's network can
+    currently sustain for a device — a magnitude (`0..=1024`) plus a unit
+    (`bps` / `kbps` / `Mbps` / `Gbps` / `Tbps`) an application can use to size its
+    media streaming, never raw per-flow telemetry.
+
+    This is the CamaraSim reference double for CAMARA Device Media Streaming Rate
+    (work-in-progress). The device can be identified either by the `device` object
+    in the request body (two-legged / CIBA) or by the identity a three-legged
+    access token authenticated (in which case `device` is omitted). The endpoint
+    requires the `media-streaming-rate:retrieve-maximum-downstream-media-rate`
+    scope.
+
+    ## Identifier resolution (two-legged vs three-legged)
+
+    The `device` object is only meaningful in two-legged auth. In a three-legged
+    token the device is already identified by the token subject:
+
+    - `device` carries an identifier **and** the token subject is itself an
+      E.164 line (a device-authenticated three-legged token) →
+      `422 UNNECESSARY_IDENTIFIER`.
+    - `device` carries an identifier, subject not a line → that identifier is
+      used (two-legged). Precedence: `phoneNumber` → `networkAccessIdentifier` →
+      the IPv4 `publicAddress` → `ipv6Address`.
+    - `device` absent, subject is an E.164 line → the subject is the identifier
+      (three-legged).
+    - `device` absent **and** the subject is not a line → the device cannot be
+      identified → `422 MISSING_IDENTIFIER`.
+    - `device` present but carrying **no** identifier (`minProperties: 1`
+      violated) → `400 INVALID_ARGUMENT`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Two control planes drive the answer:
+
+    1. **Reserved error suffix** — if the resolved identifier's trailing three
+       digits name a reserved CAMARA status, the endpoint answers with that
+       canonical CAMARA error instead of a result (shared convention — see the
+       referenced `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`, `…422`,
+       `…429`, `…500`, `…503`. This plane is checked first.
+    2. **Rate + unit** — otherwise the identifier's trailing three digits `d`
+       (`0..=999`; `…000` / no trailing digits → 0) are the reported magnitude
+       `maxDownstreamMediaBitRateSupported` (always within the schema's `0..=1024`)
+       and `d % 5` selects the `unit` from the lowest-first enum
+       `[bps, kbps, Mbps, Gbps, Tbps]`. Both axes are lowest-first, so `…000` is
+       the floor (`0 bps`, an unmeasured device) and higher tails climb both
+       magnitude and unit — a genuine control plane (the same input always returns
+       the same rate and unit).
+
+    The response echoes the device back only when the identifier is a
+    `phoneNumber` (the CAMARA `DeviceResponse` carries only `phoneNumber`); for an
+    IP-/NAI-keyed request the `device` field is omitted.
+
+    Examples: `+123456789000` → `0 bps` (floor); `+123456789002` → `2 Mbps`
+    (`2 % 5 == 2`); `+123456789013` → `13 Gbps` (`13 % 5 == 3`); `+123456789404`
+    → `404 NOT_FOUND`.
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/media-streaming-rate/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /retrieve-maximum-downstream-media-rate:
+    post:
+      operationId: retrieveMaximumDownstreamMediaRate
+      summary: Retrieve a device's maximum supported downstream media bit rate
+      description: |
+        Returns the maximum downstream media bit rate the network can currently
+        sustain for the device. Supply a `device`, or omit it to use the device
+        identified by a three-legged access token.
+
+        See the API description for the identifier-resolution rules and the
+        parameter-driven functional cases.
+      security:
+        - openId:
+            - media-streaming-rate:retrieve-maximum-downstream-media-rate
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MediaStreamingRateRequest"
+      responses:
+        "200":
+          description: The device's maximum supported downstream media bit rate.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MediaStreamingRateResponse"
+              examples:
+                floor:
+                  summary: An unmeasured device (…000)
+                  value:
+                    maxDownstreamMediaBitRateSupported: 0
+                    unit: bps
+                    device:
+                      phoneNumber: "+123456789000"
+                megabits:
+                  summary: A device supporting 2 Mbps (…002)
+                  value:
+                    maxDownstreamMediaBitRateSupported: 2
+                    unit: Mbps
+                    device:
+                      phoneNumber: "+123456789002"
+        "400":
+          description: |
+            400 — bad request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body, an empty `device`, or a bad `phoneNumber`.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                invalidArgument:
+                  summary: Malformed request
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`device` must contain at least one identifier."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          description: |
+            404 — not found. CamaraSim returns the reserved shared `NOT_FOUND` for
+            an identifier with the `…404` suffix.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                notFound:
+                  summary: Reserved `…404` suffix
+                  value:
+                    status: 404
+                    code: NOT_FOUND
+                    message: The specified resource was not found.
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            device cannot be identified (no `device` and a non-line subject),
+            `UNNECESSARY_IDENTIFIER` when a `device` is submitted on a
+            three-legged device token, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                missingIdentifier:
+                  summary: The device cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The device cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The device is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The device is already identified by the access token.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The maximum downstream media bit rate and its unit are selected from the
+          identifier (the first present device identifier, else the access token
+          subject) whose trailing three digits `d` drive the case (docs/DESIGN.md
+          §7): the magnitude is `d` and the unit is `[bps,kbps,Mbps,Gbps,Tbps]
+          [d % 5]`. Reserved error suffixes come from the shared convention in
+          errors.yaml and are checked first. Canonical Device Media Streaming Rate
+          (wip) declares 422 IDENTIFIER sub-cases (MISSING_IDENTIFIER /
+          UNNECESSARY_IDENTIFIER); CamaraSim models the shared reserved-suffix
+          convention plus the identifier-resolution 422s, and exposes the full
+          shared error set so every reserved case is reachable.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier ending in …000 (or no trailing digits)"
+            result: "200 — maxDownstreamMediaBitRateSupported 0, unit bps (floor)"
+          - input: "any other identifier tail d"
+            result: "200 — maxDownstreamMediaBitRateSupported = d, unit = [bps,kbps,Mbps,Gbps,Tbps][d % 5]"
+          - input: "`device` present but carrying no identifier"
+            result: "400 INVALID_ARGUMENT"
+          - input: "`device` submitted on a three-legged line token"
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no `device` and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    MediaStreamingRateRequest:
+      type: object
+      description: >-
+        Request the maximum supported downstream media bit rate for a device.
+        `device` is optional: omit it to use the device identified by a
+        three-legged access token.
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+
+    Device:
+      type: object
+      description: >-
+        Identifies the device. At least one identifier must be present. Optional
+        at the request level: omit `device` to use the device identified by a
+        three-legged access token. CamaraSim keys its functional cases off the
+        first present identifier, in the order phoneNumber →
+        networkAccessIdentifier → ipv4Address.publicAddress → ipv6Address.
+      minProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        networkAccessIdentifier:
+          type: string
+          description: A network access identifier assigned by the operator.
+          example: "user012@example.com"
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          description: The device's IPv6 address.
+          example: "2001:db8::11"
+
+    DeviceIpv4Addr:
+      type: object
+      description: >-
+        The device's IPv4 address information. CamaraSim reads `publicAddress` as
+        the identifier; `privateAddress`/`publicPort` are accepted for fidelity.
+      properties:
+        publicAddress:
+          type: string
+          example: "203.0.113.12"
+        privateAddress:
+          type: string
+          example: "192.0.2.25"
+        publicPort:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          example: 59765
+
+    MediaStreamingRateResponse:
+      type: object
+      description: The device's maximum supported downstream media bit rate.
+      required:
+        - maxDownstreamMediaBitRateSupported
+        - unit
+      properties:
+        device:
+          $ref: "#/components/schemas/DeviceResponse"
+        maxDownstreamMediaBitRateSupported:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 1024
+          description: >-
+            The maximum downstream media bit rate the network can sustain, in the
+            given `unit`. CamaraSim derives it from the identifier's trailing three
+            digits (`0..=999`, always within the schema range).
+          example: 10
+        unit:
+          $ref: "#/components/schemas/BitRateUnitEnum"
+
+    BitRateUnitEnum:
+      type: string
+      description: The unit of `maxDownstreamMediaBitRateSupported`.
+      enum:
+        - bps
+        - kbps
+        - Mbps
+        - Gbps
+        - Tbps
+      example: Mbps
+
+    DeviceResponse:
+      type: object
+      description: >-
+        The device echoed back on a success. Per CAMARA this carries only
+        `phoneNumber`, so CamaraSim echoes it only for a phone-number-keyed
+        request (omitted for an IP-/NAI-keyed one).
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"

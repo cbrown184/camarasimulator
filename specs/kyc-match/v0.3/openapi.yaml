@@ -1,0 +1,358 @@
+# CamaraSim — Know Your Customer (KYC) Match, API version v0.3 (CAMARA 0.3.0).
+#
+# Vendored from the CAMARA Know Your Customer Match API (kyc-match 0.3.0) and
+# annotated with CamaraSim's parameter-driven functional cases
+# (docs/DESIGN.md §7, §9). Backed by `src/apis/kyc_match/v0_3.rs`; spec and code
+# must not drift.
+#
+# Serves `POST /match`.
+openapi: 3.0.3
+info:
+  title: KYC Match
+  description: |
+    Checks whether customer identity attributes supplied by the caller (name,
+    address, date of birth, e-mail, …) match the operator's own records — a
+    signal used in onboarding, fraud-prevention, and regulatory-compliance flows.
+
+    This is the CamaraSim reference double for CAMARA KYC Match 0.3.0. The
+    customer can optionally be scoped by the `phoneNumber` in the request body
+    (two-legged / CIBA) or by the identity a three-legged access token
+    authenticated. The endpoint requires the `kyc-match:match` scope.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Two independent control planes drive the response:
+
+    - **Reserved error suffix (top-level).** The identifier is the submitted
+      `phoneNumber`, or — when it is omitted — the access token's subject
+      (`sub`). If its trailing three digits name a reserved CAMARA status, the
+      endpoint answers with that canonical CAMARA error instead of a result
+      (shared convention — see the referenced `errors.yaml`): `…400`, `…401`,
+      `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`. Validation runs
+      first, so the request must still be well-formed (include at least one
+      non-`phoneNumber` attribute) for the reserved error to surface.
+    - **Per-attribute verdict (from the value).** Otherwise, for each attribute
+      present in the request, the response carries a `<attribute>Match` verdict
+      chosen from that attribute's **own submitted value** (case-insensitive):
+      a value containing `unavailable` → `not_available`; a value containing
+      `nomatch` → `false` (plus a `<attribute>MatchScore` of 90 for the
+      score-bearing attributes); any other value → `true`. Attributes the caller
+      did not send are absent from the response.
+
+    Examples: `{"name":"John Smith"}` → `{ "nameMatch": "true" }`;
+    `{"name":"nomatch"}` → `{ "nameMatch": "false", "nameMatchScore": 90 }`;
+    `{"address":"unavailable"}` → `{ "addressMatch": "not_available" }`;
+    `{"phoneNumber":"+123456789404","name":"Jane"}` → `404 NOT_FOUND`.
+  version: "0.3.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/kyc-match/v0.3"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /match:
+    post:
+      operationId: matchCustomer
+      summary: Match customer identity attributes against the operator's records
+      description: |
+        Submits a set of customer identity attributes and returns, for each
+        attribute present in the request, whether it matches the operator's
+        records (`true` / `false` / `not_available`). Score-bearing attributes
+        also return a similarity score (0–100) when the verdict is `false`.
+
+        At least one attribute other than `phoneNumber` must be supplied.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - kyc-match:match
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KYC_MatchRequestBody"
+      responses:
+        "200":
+          description: The per-attribute match result.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KYC_MatchResponse"
+              examples:
+                allMatch:
+                  summary: Every submitted attribute matches
+                  value:
+                    nameMatch: "true"
+                    emailMatch: "true"
+                    countryMatch: "true"
+                partialMatch:
+                  summary: A score-bearing attribute does not match
+                  value:
+                    nameMatch: "false"
+                    nameMatchScore: 90
+                notAvailable:
+                  summary: The operator holds no data for the attribute
+                  value:
+                    addressMatch: "not_available"
+        "400":
+          description: |
+            Invalid request. `code` is `INVALID_ARGUMENT` for a malformed body,
+            unknown field, non-string value, or bad `phoneNumber` format; or
+            `KNOW_YOUR_CUSTOMER.INVALID_PARAM_COMBINATION` when no attribute
+            other than `phoneNumber` is supplied.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                invalidArgument:
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: Request body is not a valid KYC_MatchRequestBody.
+                invalidParamCombination:
+                  value:
+                    status: 400
+                    code: KNOW_YOUR_CUSTOMER.INVALID_PARAM_COMBINATION
+                    message: At least one attribute other than `phoneNumber` must be provided.
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The response is driven by two control planes (docs/DESIGN.md §7): a
+          top-level reserved error suffix on the identifier (the submitted
+          `phoneNumber`, else the access token subject) from the shared
+          convention in errors.yaml, and a per-attribute verdict chosen from each
+          attribute's own value. Note: canonical KYC Match 0.3.0 declares
+          400/401/403/404/422; CamaraSim exposes the full shared error set so
+          every reserved suffix is reachable.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: only `phoneNumber` (no other attribute)
+            result: "400 KNOW_YOUR_CUSTOMER.INVALID_PARAM_COMBINATION"
+          - input: an attribute value containing `unavailable`
+            result: '200 { "<attribute>Match": "not_available" }'
+          - input: an attribute value containing `nomatch`
+            result: >-
+              200 { "<attribute>Match": "false" } plus "<attribute>MatchScore": 90
+              for score-bearing attributes
+          - input: any other attribute value
+            result: '200 { "<attribute>Match": "true" }'
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    KYC_MatchRequestBody:
+      type: object
+      description: >-
+        Customer identity attributes to match against the operator's records.
+        Every field is optional at the schema level, but at least one attribute
+        other than `phoneNumber` must be present. All values are strings.
+      properties:
+        phoneNumber:
+          type: string
+          description: >-
+            Phone number in E.164 format (starting with `+`). Scopes the check to
+            a line; not itself a matched attribute. Optional — omit it to use the
+            device identified by a three-legged access token.
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        idDocument:
+          type: string
+          description: Official identity-document number (alphanumeric).
+        name:
+          type: string
+          description: Complete name of the customer.
+        givenName:
+          type: string
+          description: First / given name of the customer.
+        familyName:
+          type: string
+          description: Last name, family name, or surname.
+        nameKanaHankaku:
+          type: string
+          description: Complete name in Hankaku-Kana format (Japan).
+        nameKanaZenkaku:
+          type: string
+          description: Complete name in Zenkaku-Kana format (Japan).
+        middleNames:
+          type: string
+          description: Middle name(s) of the customer.
+        familyNameAtBirth:
+          type: string
+          description: Family name at birth.
+        address:
+          type: string
+          description: Complete address.
+        streetName:
+          type: string
+          description: Name of the street.
+        streetNumber:
+          type: string
+          description: Number of the house / building in the street.
+        postalCode:
+          type: string
+          description: Zip code or postal code.
+        region:
+          type: string
+          description: Region / province / state.
+        locality:
+          type: string
+          description: Locality / town / city.
+        country:
+          type: string
+          description: Country in ISO 3166-1 alpha-2 format.
+        houseNumberExtension:
+          type: string
+          description: Apartment / unit / suite designation.
+        birthdate:
+          type: string
+          description: Date of birth, `YYYY-MM-DD`.
+        email:
+          type: string
+          description: E-mail address (RFC-compliant).
+        gender:
+          type: string
+          description: Gender of the customer.
+          enum: [MALE, FEMALE, OTHER]
+
+    MatchResult:
+      type: string
+      description: >-
+        Verdict for a submitted attribute: `true` (matches the operator's
+        record), `false` (does not match), or `not_available` (the operator
+        holds no data for it).
+      enum:
+        - "true"
+        - "false"
+        - not_available
+
+    MatchScoreResult:
+      type: integer
+      format: int32
+      minimum: 0
+      maximum: 100
+      description: >-
+        Similarity score (0–100) for a score-bearing attribute, present only when
+        its verdict is `false`. CamaraSim reports a fixed 90 (a near miss).
+
+    KYC_MatchResponse:
+      type: object
+      description: >-
+        Per-attribute match result. Only attributes present in the request
+        appear; a `*MatchScore` is included only when the matching `*Match` is
+        `false` and the attribute is score-bearing.
+      properties:
+        idDocumentMatch:
+          $ref: "#/components/schemas/MatchResult"
+        nameMatch:
+          $ref: "#/components/schemas/MatchResult"
+        nameMatchScore:
+          $ref: "#/components/schemas/MatchScoreResult"
+        givenNameMatch:
+          $ref: "#/components/schemas/MatchResult"
+        givenNameMatchScore:
+          $ref: "#/components/schemas/MatchScoreResult"
+        familyNameMatch:
+          $ref: "#/components/schemas/MatchResult"
+        familyNameMatchScore:
+          $ref: "#/components/schemas/MatchScoreResult"
+        nameKanaHankakuMatch:
+          $ref: "#/components/schemas/MatchResult"
+        nameKanaHankakuMatchScore:
+          $ref: "#/components/schemas/MatchScoreResult"
+        nameKanaZenkakuMatch:
+          $ref: "#/components/schemas/MatchResult"
+        nameKanaZenkakuMatchScore:
+          $ref: "#/components/schemas/MatchScoreResult"
+        middleNamesMatch:
+          $ref: "#/components/schemas/MatchResult"
+        middleNamesMatchScore:
+          $ref: "#/components/schemas/MatchScoreResult"
+        familyNameAtBirthMatch:
+          $ref: "#/components/schemas/MatchResult"
+        familyNameAtBirthMatchScore:
+          $ref: "#/components/schemas/MatchScoreResult"
+        addressMatch:
+          $ref: "#/components/schemas/MatchResult"
+        addressMatchScore:
+          $ref: "#/components/schemas/MatchScoreResult"
+        streetNameMatch:
+          $ref: "#/components/schemas/MatchResult"
+        streetNameMatchScore:
+          $ref: "#/components/schemas/MatchScoreResult"
+        streetNumberMatch:
+          $ref: "#/components/schemas/MatchResult"
+        streetNumberMatchScore:
+          $ref: "#/components/schemas/MatchScoreResult"
+        postalCodeMatch:
+          $ref: "#/components/schemas/MatchResult"
+        regionMatch:
+          $ref: "#/components/schemas/MatchResult"
+        regionMatchScore:
+          $ref: "#/components/schemas/MatchScoreResult"
+        localityMatch:
+          $ref: "#/components/schemas/MatchResult"
+        localityMatchScore:
+          $ref: "#/components/schemas/MatchScoreResult"
+        countryMatch:
+          $ref: "#/components/schemas/MatchResult"
+        houseNumberExtensionMatch:
+          $ref: "#/components/schemas/MatchResult"
+        birthdateMatch:
+          $ref: "#/components/schemas/MatchResult"
+        emailMatch:
+          $ref: "#/components/schemas/MatchResult"
+        emailMatchScore:
+          $ref: "#/components/schemas/MatchScoreResult"
+        genderMatch:
+          $ref: "#/components/schemas/MatchResult"

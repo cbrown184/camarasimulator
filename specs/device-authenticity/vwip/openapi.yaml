@@ -1,0 +1,288 @@
+# CamaraSim — Device Authenticity, API version vwip (CAMARA DeviceAuthenticity, wip).
+#
+# Vendored from the CAMARA DeviceAuthenticity API (work-in-progress — no released
+# version yet, so mounted at its canonical `vwip` base path
+# `/device-authenticity/vwip`, like the other pre-1.0 wip APIs) and annotated with
+# CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/device_authenticity/vwip.rs`; spec and code must not drift.
+#
+# Serves `POST /check-status`.
+openapi: 3.0.3
+info:
+  title: Device Authenticity
+  description: |
+    Service that answers whether a device — identified by its **IMEI** — is flagged
+    in the register / anti-fraud lists operators maintain: is it `allowed`, or has
+    it been reported `lost`, `stolen`, `blacklisted`, `blocked`, `fraud`,
+    `non-payment`, or `regulatory` (or is the status `unknown`)? It is an
+    operational / anti-fraud signal: before activating a line on a handset, or
+    trusting a device in a transaction, a service can ask the operator whether the
+    IMEI is in good standing.
+
+    This is the CamaraSim reference double for CAMARA DeviceAuthenticity (wip). The
+    `/check-status` endpoint requires the `device-authenticity:check-status` scope.
+
+    ## Identifier
+
+    The IMEI is the identifier and is **required** in the request body — there is
+    no two-legged / three-legged token-subject fallback (unlike the phone-number
+    APIs), because the device is named explicitly. A missing or non-15-digit `imei`
+    is a `400 INVALID_ARGUMENT`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Two independent control planes drive the answer, both read from the submitted
+    `imei`:
+
+    - **Reserved error suffix (identifier).** If the IMEI's trailing three digits
+      name a reserved CAMARA status, the endpoint answers with that canonical CAMARA
+      error (shared convention — see the referenced `errors.yaml`): `…400`, `…401`,
+      `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`. In particular `…404`
+      gives the canonical `NOT_FOUND` (the API's own 404 code is
+      `IDENTIFIER_NOT_FOUND`) and `…422` gives `SERVICE_NOT_APPLICABLE` (the API's
+      own service-level 422 code).
+    - **Operational status (identifier digits).** Otherwise the IMEI's trailing
+      three digits `d` (every reserved suffix is `≥ 400`, so all small `d` are free)
+      pick the status by `d % 9` over the nine-value enum, in order — so `…000`
+      (index 0) is the healthy `allowed` default, `…001` → `lost`, `…002` →
+      `stolen`, …, `…008` → `unknown`. A non-`allowed` status also carries a
+      deterministic `reportedDate` of `now − d hours`; `allowed` carries none.
+
+    Example: `490154203237000` → `allowed`; `490154203237001` → `lost`;
+    `490154203237002` → `stolen`; `490154203237404` → `404 NOT_FOUND`;
+    `490154203237422` → `422 SERVICE_NOT_APPLICABLE`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical DeviceAuthenticity (wip) declares a subset
+    (400/401/403/404/422/429).
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/device-authenticity/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /check-status:
+    post:
+      operationId: checkImeiStatus
+      summary: Check the register status of a device using its IMEI
+      description: |
+        Verify whether an IMEI is present in the allowed / prohibited / tracked
+        lists maintained by operators, returning its `operationalStatus`.
+
+        The device is identified by the required `imei` in the body — see the API
+        description for the parameter-driven functional cases (the trailing three
+        digits select the operational status, or a reserved CAMARA error).
+      security:
+        - openId:
+            - device-authenticity:check-status
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RequestBody"
+      responses:
+        "200":
+          description: The register / operational status of the queried IMEI.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImeiStatusResponse"
+              examples:
+                allowed:
+                  summary: Device in good standing (happy-path default, `…000` tail)
+                  value:
+                    imei: "490154203237000"
+                    operationalStatus: allowed
+                    lastChecked: "2026-08-05T10:41:38Z"
+                stolen:
+                  summary: Reported stolen (`…002` tail) — carries a reportedDate
+                  value:
+                    imei: "490154203237002"
+                    operationalStatus: stolen
+                    lastChecked: "2026-08-05T10:41:38Z"
+                    reportedDate: "2026-08-05T08:41:38Z"
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body, or an `imei` that is missing or not a 15-digit string.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceAuthenticityError"
+              examples:
+                invalidArgument:
+                  summary: Missing or malformed `imei`
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`imei` is required and must be a 15-digit string."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            422 — unprocessable. CamaraSim returns the reserved shared
+            `SERVICE_NOT_APPLICABLE` for an IMEI ending in the `…422` suffix (the
+            API's own service-level 422 code).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceAuthenticityError"
+              examples:
+                serviceNotApplicable:
+                  summary: Reserved `…422` suffix
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the submitted `imei` (docs/DESIGN.md §7). The IMEI's
+          trailing three digits pick the operational status by `d % 9` over the
+          nine-value enum; reserved error suffixes come from the shared convention
+          in errors.yaml.
+        cases:
+          - input: imei ending in a reserved error suffix (e.g. …404, …422)
+            result: the canonical CAMARA error for that status
+          - input: "imei trailing digits …000 (or d with d % 9 == 0)"
+            result: "200 { operationalStatus: allowed } (no reportedDate)"
+          - input: "imei trailing digits …001"
+            result: "200 { operationalStatus: lost, reportedDate: now − 1h }"
+          - input: "imei trailing digits …002"
+            result: "200 { operationalStatus: stolen, reportedDate: now − 2h }"
+          - input: "imei trailing digits …008"
+            result: "200 { operationalStatus: unknown, reportedDate: now − 8h }"
+          - input: missing imei, or an imei that is not exactly 15 digits
+            result: "400 INVALID_ARGUMENT"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    RequestBody:
+      type: object
+      description: Request body for the IMEI register-status check.
+      required:
+        - imei
+      properties:
+        imei:
+          type: string
+          description: The IMEI number of the device to check (15 digits).
+          pattern: '^[0-9]{15}$'
+          example: "490154203237518"
+
+    ImeiStatusResponse:
+      type: object
+      additionalProperties: false
+      description: Register and operational status information for the queried IMEI.
+      required:
+        - imei
+        - operationalStatus
+      properties:
+        imei:
+          type: string
+          description: The IMEI that was checked.
+          pattern: '^[0-9]{15}$'
+          example: "490154203237518"
+        operationalStatus:
+          type: string
+          description: Operational status determined by register presence.
+          enum:
+            - allowed
+            - lost
+            - stolen
+            - blacklisted
+            - blocked
+            - fraud
+            - non-payment
+            - regulatory
+            - unknown
+          example: stolen
+        lastChecked:
+          type: string
+          format: date-time
+          description: >-
+            Date and time the information was last confirmed correct by the fraud
+            check service (RFC 3339 with time zone). Always the moment of the call
+            in the simulator.
+          example: "2026-08-05T10:41:38Z"
+        reportedDate:
+          type: string
+          format: date-time
+          description: >-
+            Date/time the IMEI was reported with its current adverse status
+            (RFC 3339 with time zone). Present only for a non-`allowed` status.
+          example: "2026-08-05T08:41:38Z"
+
+    DeviceAuthenticityError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Device Authenticity `code` set (the API's own `IDENTIFIER_NOT_FOUND`
+        and `QUOTA_EXCEEDED` plus the shared reserved-error codes).
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - OUT_OF_RANGE
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - IDENTIFIER_NOT_FOUND
+                - SERVICE_NOT_APPLICABLE
+                - CONFLICT
+                - QUOTA_EXCEEDED
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

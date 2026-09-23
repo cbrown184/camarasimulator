@@ -1,0 +1,449 @@
+# CamaraSim — Consent Info, API version vwip (CAMARA ConsentInfo, wip).
+#
+# Vendored from the CAMARA ConsentInfo API (work-in-progress — no released
+# version yet, so mounted at its canonical `vwip` base path `/consent-info/vwip`,
+# like the other pre-1.0 wip APIs) and annotated with CamaraSim's parameter-driven
+# functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/consent_info/vwip.rs`; spec and code must not drift.
+#
+# Serves `POST /retrieve`.
+openapi: 3.0.3
+info:
+  title: Consent Info
+  description: |
+    Service that reports the **current consent status** an end user has granted
+    for a set of data-processing `scopes` under a declared `purpose`
+    (`dpv:<Purpose>`, from the W3C Data Privacy Vocabulary). Before processing a
+    subscriber's data a service can ask the operator whether the necessary consent
+    is currently valid for processing, and — when it is not — obtain a `captureUrl`
+    where the end user can be redirected to grant it.
+
+    This is the CamaraSim reference double for CAMARA ConsentInfo (wip). The
+    `/retrieve` endpoint requires the `consent-info:retrieve` scope.
+
+    ## Identifier resolution — two-legged vs three-legged
+
+    Faithful to CAMARA, the `phoneNumber` in the request body is valid *only* in
+    two-legged auth. In a three-legged token the line is already identified by the
+    token **subject** (`sub`), so the number must not be resubmitted:
+
+    - `phoneNumber` present **and** the token subject is itself an E.164 number
+      (a line-authenticated three-legged token) → `422 UNNECESSARY_IDENTIFIER`.
+    - `phoneNumber` present, subject not a line → the submitted number is the
+      identifier (two-legged).
+    - `phoneNumber` absent, subject is an E.164 number → the subject is the
+      identifier (three-legged).
+    - `phoneNumber` absent **and** the subject is not a line → the line cannot be
+      identified → `422 MISSING_IDENTIFIER`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Three independent control planes drive the answer:
+
+    - **Reserved error suffix (identifier).** If the resolved identifier's trailing
+      three digits name a reserved CAMARA status, the endpoint answers with that
+      canonical CAMARA error (shared convention — see the referenced `errors.yaml`):
+      `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`. In
+      particular `…404` gives the canonical `NOT_FOUND` (the API's own 404 code is
+      `IDENTIFIER_NOT_FOUND`) and `…422` gives `SERVICE_NOT_APPLICABLE` (the API's
+      own service-level 422 code).
+    - **Consent status (identifier digits).** Otherwise the identifier's trailing
+      three digits `d` (`000`–`999`) pick the consent state via `d % 6`: `0` →
+      valid for processing (`statusValidForProcessing: true`, no `statusReason`,
+      a future `expirationDate`), `1` → `PENDING`, `2` → `REQUESTED`, `3` →
+      `DENIED`, `4` → `EXPIRED` (a past `expirationDate`), `5` → `OBJECTED`. So
+      `…000` (or an identifier with no digits) is the granted-and-valid default.
+    - **`requestCaptureUrl` (request body).** When consent is *not* valid **and**
+      the caller set `requestCaptureUrl: true`, the response carries a
+      deterministic top-level `captureUrl`; otherwise it is omitted (a valid
+      consent needs no capture, and a caller that did not ask gets none).
+
+    Two request-level planes select the API's own 403s:
+
+    - a requested scope containing `forbidden` → `403 NOT_ALLOWED_SCOPES_PURPOSE`
+      (the scope/purpose combination is not permitted);
+    - a `callbackUrl` that is not a valid `http(s)` URL → `403 INVALID_CALLBACK_URL`.
+
+    Example: `+123456789000` → `statusValidForProcessing: true`; `+123456789001`
+    → `false, statusReason: PENDING`; `+123456789004` → `false, statusReason:
+    EXPIRED`; `+123456789404` → `404 NOT_FOUND`; `+123456789422` → `422
+    SERVICE_NOT_APPLICABLE`.
+
+    ## Documented modelling choices / cuts
+
+    - CamaraSim returns a **single** grouped `statusInfo` entry echoing the
+      requested `scopes` and `purpose` (the schema allows one entry per grouping;
+      one grouping covers the whole requested set here).
+    - The stateful `CAPTURE_FREQUENCY_EXCEEDED` 403 (rate limit on capture
+      requests) is a cut — the simulator is stateless and holds no per-caller rate.
+    - The optional asynchronous `callbackUrl` delivery is validated but not
+      exercised (no callback is sent).
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical ConsentInfo (wip) declares a subset.
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/consent-info/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /retrieve:
+    post:
+      operationId: retrieveStatus
+      summary: Retrieve the current consent status for a set of scopes and a purpose
+      description: |
+        Answers whether the consent needed for a set of `scopes` under a declared
+        `purpose` is currently valid for processing for a subscriber
+        (`{ statusInfo: [ … ], captureUrl? }`).
+
+        The subscriber is identified by the submitted `phoneNumber` (two-legged)
+        or by the access-token subject (three-legged) — see the API description
+        for the identifier-resolution rules and the parameter-driven functional
+        cases (the identifier's trailing three digits pick the consent state).
+      security:
+        - openId:
+            - consent-info:retrieve
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetrieveStatusRequestBody"
+      responses:
+        "200":
+          description: The current consent status for the requested scopes/purpose.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetrieveStatusResponseBody"
+              examples:
+                valid:
+                  summary: Consent valid for processing (happy-path default, `…000` tail)
+                  value:
+                    statusInfo:
+                      - scopes: ["kyc-match:match"]
+                        purpose: "dpv:FraudPreventionAndDetection"
+                        statusValidForProcessing: true
+                        expirationDate: "2027-08-06T12:00:00Z"
+                pendingWithCapture:
+                  summary: Consent pending, capture URL requested (`…001` tail)
+                  value:
+                    statusInfo:
+                      - scopes: ["kyc-match:match"]
+                        purpose: "dpv:FraudPreventionAndDetection"
+                        statusValidForProcessing: false
+                        statusReason: PENDING
+                    captureUrl: "https://consent.camarasim.example/capture/9f2b1c0a4d5e6f70"
+                expired:
+                  summary: Consent expired (`…004` tail)
+                  value:
+                    statusInfo:
+                      - scopes: ["kyc-match:match"]
+                        purpose: "dpv:FraudPreventionAndDetection"
+                        statusValidForProcessing: false
+                        statusReason: EXPIRED
+                        expirationDate: "2026-07-01T12:00:00Z"
+        "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body, a missing required field (`scopes` / `purpose` /
+            `requestCaptureUrl`), an unknown field, an empty `scopes` array, a
+            `purpose` that violates `^dpv:[a-zA-Z0-9]+$`, or a `phoneNumber` that
+            is not in E.164 format.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsentInfoError"
+              examples:
+                invalidArgument:
+                  summary: Malformed body or field
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`purpose` must match the pattern `^dpv:[a-zA-Z0-9]+$`."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            403 — forbidden. CamaraSim returns the generic `PERMISSION_DENIED`
+            when the token lacks the `consent-info:retrieve` scope,
+            `NOT_ALLOWED_SCOPES_PURPOSE` when a requested scope is not permitted
+            for the purpose (a scope containing `forbidden`), or
+            `INVALID_CALLBACK_URL` for a `callbackUrl` that is not a valid
+            `http(s)` URL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsentInfoError"
+              examples:
+                permissionDenied:
+                  summary: Missing scope
+                  value:
+                    status: 403
+                    code: PERMISSION_DENIED
+                    message: Client does not have sufficient permissions to perform this action.
+                notAllowedScopesPurpose:
+                  summary: Scope/purpose combination not allowed
+                  value:
+                    status: 403
+                    code: NOT_ALLOWED_SCOPES_PURPOSE
+                    message: The requested combination of scopes and purpose is not allowed.
+                invalidCallbackUrl:
+                  summary: Malformed callback URL
+                  value:
+                    status: 403
+                    code: INVALID_CALLBACK_URL
+                    message: "`callbackUrl` must be a valid http(s) URL."
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            line cannot be identified (no `phoneNumber` and a non-line subject),
+            `UNNECESSARY_IDENTIFIER` when a `phoneNumber` is submitted on a
+            three-legged line token, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsentInfoError"
+              examples:
+                missingIdentifier:
+                  summary: The line cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The phone number cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The number is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The phone number is already identified by the access token.
+                serviceNotApplicable:
+                  summary: Reserved `…422` suffix
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved line identifier and the request body
+          (docs/DESIGN.md §7). The identifier's trailing three digits pick the
+          consent state (d % 6); requestCaptureUrl gates the capture URL. Reserved
+          error suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404, …422)
+            result: the canonical CAMARA error for that status
+          - input: "identifier trailing digits …000 (or no digits)"
+            result: "200 statusValidForProcessing: true, future expirationDate, no statusReason"
+          - input: "identifier trailing digits d with d % 6 == 1 (e.g. …001)"
+            result: "200 statusValidForProcessing: false, statusReason: PENDING"
+          - input: "identifier trailing digits d with d % 6 == 2 (e.g. …002)"
+            result: "200 statusReason: REQUESTED"
+          - input: "identifier trailing digits d with d % 6 == 3 (e.g. …003)"
+            result: "200 statusReason: DENIED"
+          - input: "identifier trailing digits d with d % 6 == 4 (e.g. …004)"
+            result: "200 statusReason: EXPIRED, past expirationDate"
+          - input: "identifier trailing digits d with d % 6 == 5 (e.g. …005)"
+            result: "200 statusReason: OBJECTED"
+          - input: not-valid consent with requestCaptureUrl true
+            result: "200 with a top-level captureUrl"
+          - input: not-valid consent with requestCaptureUrl false (or a valid consent)
+            result: "200 with no captureUrl"
+          - input: a requested scope containing `forbidden`
+            result: "403 NOT_ALLOWED_SCOPES_PURPOSE"
+          - input: a callbackUrl that is not a valid http(s) URL
+            result: "403 INVALID_CALLBACK_URL"
+          - input: no phoneNumber, an E.164 token subject (three-legged)
+            result: same cases, driven by the subject's trailing three digits
+          - input: phoneNumber submitted on a three-legged line token
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no phoneNumber and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: malformed body, missing/unknown field, empty scopes, bad purpose, or non-E.164 phoneNumber
+            result: "400 INVALID_ARGUMENT"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    RetrieveStatusRequestBody:
+      type: object
+      additionalProperties: false
+      description: |
+        Request for the current consent status. `scopes`, `purpose`, and
+        `requestCaptureUrl` are required. The `phoneNumber` is valued only in
+        two-legged authentication; supplying it with a three-legged (line) token
+        yields `422 UNNECESSARY_IDENTIFIER`, and omitting it under a non-line
+        token yields `422 MISSING_IDENTIFIER`.
+      required:
+        - scopes
+        - purpose
+        - requestCaptureUrl
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        scopes:
+          type: array
+          minItems: 1
+          description: The data-processing scopes whose consent status is requested.
+          items:
+            type: string
+          example: ["kyc-match:match"]
+        purpose:
+          type: string
+          description: >-
+            The declared processing purpose, a `dpv:<Purpose>` token from the W3C
+            Data Privacy Vocabulary.
+          pattern: '^dpv:[a-zA-Z0-9]+$'
+          example: "dpv:FraudPreventionAndDetection"
+        requestCaptureUrl:
+          type: boolean
+          description: >-
+            Whether to include a `captureUrl` in the response when consent is not
+            valid for processing.
+        callbackUrl:
+          type: string
+          format: uri
+          description: >-
+            Optional URL to notify asynchronously of consent-status changes.
+            CamaraSim validates it (`403 INVALID_CALLBACK_URL` if malformed) but
+            does not deliver callbacks (documented cut).
+
+    RetrieveStatusResponseBody:
+      type: object
+      additionalProperties: false
+      description: The consent status for the requested scopes/purpose.
+      required:
+        - statusInfo
+      properties:
+        statusInfo:
+          type: array
+          minItems: 1
+          description: >-
+            One entry per scope/purpose grouping. CamaraSim returns a single
+            grouped entry covering the whole requested set (documented choice).
+          items:
+            $ref: "#/components/schemas/StatusInfoObject"
+        captureUrl:
+          type: string
+          format: uri
+          description: >-
+            Present only when consent is not valid for processing and the request
+            set `requestCaptureUrl: true`. A URL where the end user can be
+            redirected to grant the missing consent.
+
+    StatusInfoObject:
+      type: object
+      additionalProperties: false
+      description: The consent status for one scope/purpose grouping.
+      required:
+        - statusValidForProcessing
+      properties:
+        scopes:
+          type: array
+          description: The scopes this status covers (echoed from the request).
+          items:
+            type: string
+        purpose:
+          type: string
+          description: The purpose this status covers (echoed from the request).
+        statusValidForProcessing:
+          type: boolean
+          description: >-
+            Whether the consent is currently valid so the data may be processed.
+        statusReason:
+          type: string
+          description: >-
+            Present only when `statusValidForProcessing` is `false`; why the
+            consent is not currently valid.
+          enum:
+            - PENDING
+            - REQUESTED
+            - DENIED
+            - EXPIRED
+            - OBJECTED
+        expirationDate:
+          type: string
+          format: date-time
+          description: >-
+            When the consent expires (future for a valid consent, past for an
+            `EXPIRED` one). Omitted for the other not-yet-granted reasons.
+
+    ConsentInfoError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Consent Info `code` set (the identifier 422 codes, the API's own
+        403 codes, and `IDENTIFIER_NOT_FOUND`).
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_ALLOWED_SCOPES_PURPOSE
+                - INVALID_CALLBACK_URL
+                - NOT_FOUND
+                - IDENTIFIER_NOT_FOUND
+                - MISSING_IDENTIFIER
+                - UNNECESSARY_IDENTIFIER
+                - SERVICE_NOT_APPLICABLE
+                - CONFLICT
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

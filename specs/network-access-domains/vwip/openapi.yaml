@@ -1,0 +1,2475 @@
+# CamaraSim — Network Access Domains, API version vwip
+# (CAMARA NetworkAccessManagement / Network Access Domains, wip).
+#
+# Vendored from the CAMARA NetworkAccessManagement "Network Access Domains" API
+# (work-in-progress — no released version yet, so mounted at its canonical `vwip`
+# base path `/network-access-domains/vwip`, like its sibling Network Access
+# Devices and the other pre-1.0 wip APIs) and annotated with CamaraSim's
+# functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/network_access_domains/vwip.rs`; spec and code must not drift.
+#
+# So far this vendored slice serves two read-only endpoints:
+#   * `GET /trust-domains/capabilities` (getTrustDomainCapabilities) — the
+#     provider-level capabilities document describing which Trust Domain access
+#     types and policy limits this API provider supports. It has no request body
+#     and no device identifier, so — unlike the identifier-keyed APIs — it carries
+#     no reserved-error scenario plane: it always answers the same fixed document.
+#   * `GET /services` (getServices) — the caller's Services catalog. It has no
+#     request body either, but it is keyed to the authenticated identity, so its
+#     control plane is the token subject (DESIGN §7): a reserved error suffix →
+#     the canonical CAMARA error; else the subject's trailing three digits fix the
+#     returned ServiceList deterministically.
+# It also serves the single-service `GET /services/{serviceId}` read
+# (getService), the stateful Trust Domain create leg
+# `POST /trust-domains` (createTrustDomain), the collection list leg
+# `GET /trust-domains` (getTrustDomains), its read-back
+# `GET /trust-domains/{trustDomainId}` (getTrustDomain), its in-place update leg
+# `PATCH /trust-domains/{trustDomainId}` (updateTrustDomain), and its delete leg
+# `DELETE /trust-domains/{trustDomainId}` (deleteTrustDomain), backed by the
+# in-memory trust-domain store. The Trust Domain Device sub-resource has its
+# create leg `POST /trust-domains/{trustDomainId}/devices`
+# (createTrustDomainDevice), its list leg
+# `GET /trust-domains/{trustDomainId}/devices` (getTrustDomainDevices), and its
+# read leg `GET /trust-domains/{trustDomainId}/devices/{deviceId}`
+# (getTrustDomainDevice), its update leg
+# `PATCH /trust-domains/{trustDomainId}/devices/{deviceId}`
+# (updateTrustDomainDevice), and its delete leg
+# `DELETE /trust-domains/{trustDomainId}/devices/{deviceId}`
+# (deleteTrustDomainDevice), backed by an in-memory device store keyed by
+# (trustDomainId, deviceId). The Trust Domain Device sub-resource CRUD is now
+# complete.
+openapi: 3.0.3
+info:
+  title: Network Access Domains
+  description: |
+    Service for configuring **home-network access domains** — Trust Domains that
+    group devices under a common access policy (Wi-Fi or Thread) on the
+    subscriber's home network. This is part of the CAMARA Home Devices family and
+    the CamaraSim reference double for the CAMARA NetworkAccessManagement
+    "Network Access Domains" API (wip).
+
+    ## `GET /trust-domains/capabilities`
+
+    Returns the set of Trust Domain configuration capabilities the API provider
+    supports: which access types (Wi-Fi WPA-Personal/Enterprise, Thread) and
+    their properties, plus the policy limits (max devices, per-domain
+    up/downstream bandwidth bands, egress-list constraints) a caller may configure
+    when creating a Trust Domain. It requires the `network-access-domains:trust-domains`
+    scope.
+
+    ## `GET /services`
+
+    Returns the caller's **Services** catalog — a `ServiceList` of the logical
+    commercial subscriptions / account relationships the authenticated identity
+    holds, each tied to a `serviceSite` (a subscriber location). It requires the
+    `network-access-domains:services:read` scope.
+
+    ## `GET /services/{serviceId}`
+
+    Returns a single **Service** from that catalog by id. It requires the same
+    `network-access-domains:services:read` scope.
+
+    ## `POST /trust-domains`
+
+    Creates a **Trust Domain** for one of the caller's services (a `serviceId`, a
+    `name`, an `enabled` flag, and 1-4 `accessDetails`), mints a server-assigned
+    `trustDomainId`, and returns the full `TrustDomain` (`201`). It requires the
+    `network-access-domains:trust-domains` scope. This is CamaraSim's first
+    stateful Trust Domain leg — the created Trust Domain is held in an in-memory
+    store so later read/update/delete legs can address it.
+
+    ## `GET /trust-domains/{trustDomainId}`
+
+    Reads a **Trust Domain** back by the server-assigned `trustDomainId` that
+    `createTrustDomain` returned. It requires the same
+    `network-access-domains:trust-domains` scope. The id is opaque
+    (SHA-256-derived), so the in-memory store is the only control plane: a stored
+    id → `200` with the persisted `TrustDomain`, any other id → `404 NOT_FOUND`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    **`getTrustDomainCapabilities`** — provider capabilities are fixed operator
+    configuration, not keyed to any device or subscriber, so this operation has
+    **no** parameter-driven control plane: given a token carrying the required
+    scope it always answers the same deterministic `TrustDomainCapabilities`
+    document (`200`).
+
+    **`getServices`** has no request body either, but it is keyed to the
+    authenticated identity, so its control plane is the **token subject**: a
+    reserved error suffix on the subject → the canonical CAMARA error; otherwise
+    the subject's trailing three digits `d` fix the catalog deterministically —
+    `d == 0` (`…000` / no digits) → `200 []` (nothing associated; a list never
+    404s), else `((d - 1) % 3) + 1` services (1–3), each with a deterministic
+    UUID-shaped `id` and `serviceSite`.
+
+    **`getService`** (`GET /services/{serviceId}`) reads one `Service` from that
+    same identity-keyed catalog. It regenerates the subject's catalog (no store)
+    and matches the `serviceId` path parameter. Two control planes (DESIGN §7):
+    the subject's reserved error suffix → the canonical CAMARA error (an
+    account-level plane, checked first, mirroring `getServices`); otherwise the
+    `serviceId` vs the catalog — an id the identity holds → `200` that `Service`,
+    any other id (unknown / another identity's / malformed) → `404 NOT_FOUND`.
+    The `serviceId` is opaque to the caller (SHA-256-derived), so it is not itself
+    a reserved-error plane; because the catalog is regenerated rather than stored,
+    a malformed id is indistinguishable from an unknown one and folds into the same
+    `404` (mirroring the sibling `getNetworkAccessDevice`).
+
+    For all three, a missing/invalid token → `401`; a token without the
+    endpoint's scope → `403` (both from the shared resource-server layer).
+
+    **`createTrustDomain`** (`POST /trust-domains`) creates a Trust Domain from a
+    `TrustDomainCreate` body. Three control planes (docs/DESIGN.md §7): the token
+    subject's reserved error suffix → the canonical CAMARA error (an account-level
+    plane, checked first); request validation → `400 INVALID_ARGUMENT`; and the
+    in-memory store — the `trustDomainId` is derived from the `(serviceId, name)`
+    pair, so re-creating the same name for the same service collides → `409`.
+
+    **`getTrustDomain`** (`GET /trust-domains/{trustDomainId}`) reads a created
+    Trust Domain back. The `trustDomainId` is an opaque, server-minted UUID, so —
+    mirroring the sibling `readNetwork` / `getApp` read legs — the in-memory store
+    is the only control plane: a stored id → `200` with the persisted
+    `TrustDomain`, any other id (never created or malformed) → `404 NOT_FOUND`
+    (a malformed id folds into the same `404`, no store entry to tell them apart).
+
+    **`updateTrustDomain`** (`PATCH /trust-domains/{trustDomainId}`) updates a
+    created Trust Domain in place from a `TrustDomainUpdate` (every field optional).
+    Two control planes: the request body (validated first, so a body `400` wins over
+    a `404`) and store state (a stored id → `200` with the updated `TrustDomain`,
+    any other id → `404`). A present field replaces, an explicit `null` on a
+    clearable optional (`description`/`expiration`/`policies`) removes it, and
+    `accessDetails` replaces wholesale; the read-only identity/audit fields are
+    immutable and `modifiedAt`/`modifiedBy` are re-stamped. There is no `409` — the
+    resource is addressed by its fixed id, so a rename can't collide.
+
+    **`deleteTrustDomain`** (`DELETE /trust-domains/{trustDomainId}`) evicts a
+    created Trust Domain. Keyed only to the store, mirroring `getTrustDomain`: a
+    stored id is removed → `204 No Content` (single-use — a second delete of the
+    same id finds nothing), any other id (never created, already deleted, or
+    malformed) → `404 NOT_FOUND`. Deletion is synchronous with no CloudEvent.
+
+    **`createTrustDomainDevice`** (`POST /trust-domains/{trustDomainId}/devices`)
+    registers a device inside an existing Trust Domain. Four control planes: the
+    token subject's reserved error suffix (checked first); request validation
+    (`400`); the parent Trust Domain's existence in the store (`404`, checked
+    after validation so a body `400` wins); and the in-memory device store — the
+    `deviceId` is derived from the `(trustDomainId, deviceName)` pair, so the same
+    `deviceName` in the same Trust Domain collides → `409`. A just-created device
+    is `connected: false` / `associated: false` with no assigned address, the
+    write-only `deviceCredential` is stripped, and it requires the
+    `network-access-domains:devices` scope.
+
+    **`getTrustDomainDevice`**
+    (`GET /trust-domains/{trustDomainId}/devices/{deviceId}`) reads a created
+    device back. Unlike the create leg, it is store-only (mirroring
+    `getTrustDomain`): the device store is keyed by the full
+    `(trustDomainId, deviceId)` pair and the `deviceId` is an opaque
+    server-minted UUID, so the token subject is not a control plane — a stored
+    pair → `200` with the persisted `TrustDomainDevice`, any other pair (unknown
+    parent, unknown device, another Trust Domain's device, or a malformed id) →
+    `404 NOT_FOUND` (folded, one store lookup). Same `network-access-domains:devices`
+    scope as the create leg.
+
+    **`getTrustDomainDevices`** (`GET /trust-domains/{trustDomainId}/devices`)
+    lists the devices registered in a Trust Domain as a `TrustDomainDeviceList`
+    (a plain array of `TrustDomainDevice`, no page wrapper, no query parameter).
+    Store-only, like the read leg: the parent Trust Domain must exist
+    (unknown/malformed id → `404`, mirroring `getTrustDomain`), and the device
+    store supplies the roster — an existing Trust Domain with no devices → `200
+    []`, and the list is scoped to the Trust Domain (a device in another Trust
+    Domain never appears). The token subject is not a control plane. Same
+    `network-access-domains:devices` scope as the other device legs.
+
+    **`deleteTrustDomainDevice`**
+    (`DELETE /trust-domains/{trustDomainId}/devices/{deviceId}`) deregisters a
+    device. Store-only like the read leg (mirroring `deleteTrustDomain`): the
+    device store is keyed by the full `(trustDomainId, deviceId)` pair and the
+    `deviceId` is an opaque server-minted UUID, so the token subject is not a
+    control plane — a stored pair is evicted → `204 No Content` (single-use), any
+    other pair (unknown parent, unknown device, another Trust Domain's device, or
+    a malformed id) → `404 NOT_FOUND` (folded, one store operation). Same
+    `network-access-domains:devices` scope as the other device legs.
+
+    ## Documented cuts
+
+    - The read-only `getTrustDomainCapabilities`, `getServices` and `getService`
+      legs and the stateful `createTrustDomain` / `getTrustDomain` /
+      `updateTrustDomain` / `deleteTrustDomain` legs are implemented, plus the
+      Trust Domain Device create + read + list + update + delete legs
+      `createTrustDomainDevice` / `getTrustDomainDevice` / `getTrustDomainDevices`
+      / `updateTrustDomainDevice` / `deleteTrustDomainDevice`. The Trust Domain
+      Device sub-resource CRUD is complete.
+    - `createTrustDomainDevice` validates the required `deviceName`/`enabled`, the
+      optional scalar fields, and the `hardwareAddress` (EUI-48 type + MAC
+      pattern), but accepts and echoes the nested `bootstrappingInfo` as-is and
+      never echoes the write-only `deviceCredential` (contents not validated); a
+      freshly created device has no assigned `ipv4Address`/`ipv6Address` and is
+      `connected`/`associated` `false` until association (no live onboarding). The
+      `deviceId` is a deterministic version-5 UUID over `(trustDomainId,
+      deviceName)`, so re-creating the same name in the same Trust Domain re-mints
+      the same id (that is how the `409` duplicate is detected).
+    - `createTrustDomain` admits only the access types this provider advertises
+      (Wi-Fi WPA-Personal/Enterprise, Thread STRUCTURED). A canonical but
+      unadvertised `Thread:TLV` access detail → `400 INVALID_ARGUMENT`.
+    - `createTrustDomain` validates the required fields and each access detail's
+      discriminated required keys, but not the nested field *values* (SSID
+      pattern, hex-string lengths, Thread channel range) nor the `policies`
+      object contents (accepted and echoed as-is) — a documented cut.
+    - The write-only WPA `password` is stripped from the `TrustDomain` response.
+    - The `trustDomainId` (and the audit `createdBy`/`modifiedBy`) are
+      deterministic version-5 UUIDs derived from the request, not random —
+      re-creating the same `(serviceId, name)` re-mints the same id (that is how
+      the `409` duplicate is detected). The audit `createdBy`/`modifiedBy`
+      identify the token subject, not a real operator account.
+    - `getService` folds a malformed (non-UUID) `serviceId` into the same `404
+      NOT_FOUND` as an unknown id (the catalog is regenerated per identity rather
+      than stored, so the two are indistinguishable), mirroring the sibling
+      `getNetworkAccessDevice`.
+    - The Services catalog is a deterministic, representative set (no real billing
+      backend): the returned service/site names are simulator defaults, keyed only
+      to the identity. Each `serviceSite` now carries a deterministic
+      `location.geographicPoint` (a WGS-84 point stable per identity/slot); the
+      canonical `location.propertyAddress` (a civic address) remains omitted (it is
+      optional in the schema). The point is a fixed, renderable coordinate, not a
+      queryable spatial field, so it is not a scenario control plane.
+    - The advertised capabilities are a fixed, representative set covering all four
+      CAMARA access-type variants' families (Wi-Fi WPA-Personal, Wi-Fi
+      WPA-Enterprise, Thread) and all four policy capabilities; the exact values
+      are simulator defaults (schema-valid), not negotiated per operator.
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/network-access-domains/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /trust-domains/capabilities:
+    get:
+      operationId: getTrustDomainCapabilities
+      summary: Get Trust Domain capabilities
+      description: |
+        Retrieves the set of Trust Domain configuration capabilities supported by
+        the API provider — the supported access types and their variants, and the
+        policy limits (max devices, per-domain bandwidth bands, egress-list
+        constraints) a caller may configure.
+
+        There is no request body and no device identifier: capabilities are fixed
+        provider configuration, so this operation has no parameter-driven control
+        plane and always returns the same document (docs/DESIGN.md §7).
+      security:
+        - openId:
+            - network-access-domains:trust-domains
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: Trust Domain capabilities supported by this API provider.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrustDomainCapabilities"
+              examples:
+                capabilities:
+                  summary: The provider's fixed Trust Domain capabilities
+                  value:
+                    supportedAccessTypes:
+                      - accessType: "Wi-Fi:WPA_PERSONAL"
+                        wifiProperties:
+                          ssidRequired: true
+                          supportedSecurityModes:
+                            - WPA2-Personal
+                            - WPA3-Personal
+                            - WPA2-WPA3-Personal
+                          passwordConstraints:
+                            minLength: 8
+                            maxLength: 63
+                            requireSpecialCharacters: false
+                          authServerRequired: false
+                      - accessType: "Wi-Fi:WPA_ENTERPRISE"
+                        wifiProperties:
+                          ssidRequired: true
+                          supportedSecurityModes:
+                            - WPA2-Enterprise
+                            - WPA3-Enterprise
+                          authServerRequired: true
+                      - accessType: "Thread:STRUCTURED"
+                        threadProperties:
+                          supportedChannels:
+                            min: 11
+                            max: 26
+                          networkKeyFormat: "32-hex-digits"
+                          networkNameConstraints:
+                            minLength: 1
+                            maxLength: 16
+                          maxDatasetLength: 254
+                    supportedPolicies:
+                      maxDevices:
+                        minValue: 1
+                        maxValue: 100
+                      maxDomainDownstreamRate:
+                        minValue: 1000000
+                        maxValue: 1000000000
+                      maxDomainUpstreamRate:
+                        minValue: 1000000
+                        maxValue: 1000000000
+                      egressAllowedList:
+                        maxEntries: 50
+                        supportedDestinationTypes:
+                          - IP
+                          - FQDN
+                          - CIDR
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Provider capabilities are fixed operator configuration with no
+          device/subscriber key, so this operation has no parameter-driven control
+          plane (docs/DESIGN.md §7): a scoped token always yields the same
+          document.
+        cases:
+          - input: a token carrying the network-access-domains:trust-domains scope
+            result: "200 — the fixed TrustDomainCapabilities document"
+          - input: a token without the scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+
+  /trust-domains:
+    post:
+      operationId: createTrustDomain
+      summary: Create a Trust Domain
+      description: |
+        Creates a Trust Domain — a group of devices on the subscriber's home
+        network sharing a common access policy — for one of the caller's
+        services. The caller submits a `TrustDomainCreate` (a `serviceId`, a
+        human-readable `name`, an `enabled` flag, and 1–4 `accessDetails`); the
+        simulator mints a server-assigned `trustDomainId`, stores the Trust
+        Domain in memory, and returns the full `TrustDomain` (`201`).
+
+        Three control planes drive the outcome (docs/DESIGN.md §7):
+
+        1. **The token subject** — a reserved error suffix on the authenticated
+           identity selects the canonical CAMARA error (an account-level plane,
+           checked first, mirroring `getServices`/`getService`).
+        2. **Request validation** — a missing/blank/oversized `name`, a missing
+           `enabled`, a missing/malformed `serviceId`, an `accessDetails` that is
+           empty or longer than 4, or an entry whose `accessType` is unknown, is
+           not one this provider advertises (see
+           `GET /trust-domains/capabilities`), or lacks its variant's required
+           keys → `400 INVALID_ARGUMENT`.
+        3. **Store state** — the `trustDomainId` is derived from the
+           `(serviceId, name)` pair, so creating a Trust Domain with the same
+           `name` for the same `serviceId` collides → `409` (duplicate name for
+           service).
+      security:
+        - openId:
+            - network-access-domains:trust-domains
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrustDomainCreate"
+            examples:
+              wifiPersonal:
+                summary: A Trust Domain with one Wi-Fi WPA-Personal access detail
+                value:
+                  serviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                  name: "Primary WiFi Network"
+                  description: "Primary home WiFi Network for all devices"
+                  enabled: true
+                  accessDetails:
+                    - accessType: "Wi-Fi:WPA_PERSONAL"
+                      ssid: "my-ssid"
+                      securityMode:
+                        password: "my-password"
+                        securityModeType: "WPA3-Personal"
+      responses:
+        "201":
+          description: The Trust Domain was created.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrustDomain"
+              examples:
+                created:
+                  summary: The created Trust Domain (write-only password omitted)
+                  value:
+                    id: "b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b"
+                    serviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    name: "Primary WiFi Network"
+                    description: "Primary home WiFi Network for all devices"
+                    enabled: true
+                    accessDetails:
+                      - accessType: "Wi-Fi:WPA_PERSONAL"
+                        ssid: "my-ssid"
+                        securityMode:
+                          securityModeType: "WPA3-Personal"
+                    createdAt: "2024-01-01T09:00:00Z"
+                    createdBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                    modifiedAt: "2024-01-01T09:00:00Z"
+                    modifiedBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          createTrustDomain has three control planes (docs/DESIGN.md §7): the
+          token subject's reserved error suffix (checked first), request
+          validation, and the in-memory store (a duplicate name-for-service
+          collides). The trustDomainId is derived from the (serviceId, name)
+          pair, so the same name for the same service re-mints the same id and is
+          rejected as a duplicate.
+        cases:
+          - input: "a valid TrustDomainCreate for a fresh (serviceId, name)"
+            result: "201 — the created TrustDomain (write-only password stripped)"
+          - input: "a second create with the same (serviceId, name)"
+            result: "409 — duplicate name for the service"
+          - input: "a different name for the same serviceId"
+            result: "201 — a distinct Trust Domain"
+          - input: "missing/blank/over-64-char name, missing enabled, or malformed serviceId"
+            result: "400 INVALID_ARGUMENT"
+          - input: "accessDetails empty, longer than 4, or missing a variant's required keys"
+            result: "400 INVALID_ARGUMENT"
+          - input: "an accessType not advertised (e.g. Thread:TLV) or unknown"
+            result: "400 INVALID_ARGUMENT"
+          - input: "the token subject trailing digits are …404"
+            result: "404 NOT_FOUND (reserved error suffix, account-level)"
+          - input: "the token subject trailing digits are …429"
+            result: "429 TOO_MANY_REQUESTS (reserved error suffix, account-level)"
+          - input: a token without the network-access-domains:trust-domains scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+    get:
+      operationId: getTrustDomains
+      summary: List the caller's Trust Domains
+      description: |
+        Lists every Trust Domain created so far as a `TrustDomainList` — a plain
+        array of `TrustDomain` (there is no page wrapper and no query parameter).
+
+        There is no request body, so the outcome keys only on state
+        (docs/DESIGN.md §7):
+
+        - **The in-memory store** is the sole control plane. A scan returns the
+          created Trust Domains, each rendered verbatim (the write-only WPA
+          `password` was already stripped at create). With no Trust Domain created
+          yet → `200 []` (a list never `404`s on an empty result).
+
+        Unlike `createTrustDomain`, the token subject is **not** a control plane
+        (the read is store-only). CamaraSim does not scope Trust Domains per
+        subscriber, so the CAMARA per-caller narrowing — and the broader
+        `network-access-domains:trust-domains:read-all` scope variant — are a
+        documented cut: the base scope returns the whole store. The list is
+        returned sorted by Trust Domain `id` for a stable order (CAMARA declares
+        no ordering for the Trust Domain list).
+      security:
+        - openId:
+            - network-access-domains:trust-domains
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The created Trust Domains (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrustDomainList"
+              examples:
+                one:
+                  summary: One created Trust Domain (write-only password omitted)
+                  value:
+                    - id: "b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b"
+                      serviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                      name: "Primary WiFi Network"
+                      description: "Primary home WiFi Network for all devices"
+                      enabled: true
+                      accessDetails:
+                        - accessType: "Wi-Fi:WPA_PERSONAL"
+                          ssid: "my-ssid"
+                          securityMode:
+                            securityModeType: "WPA3-Personal"
+                      createdAt: "2024-01-01T09:00:00Z"
+                      createdBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                      modifiedAt: "2024-01-01T09:00:00Z"
+                      modifiedBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                empty:
+                  summary: No Trust Domains created yet
+                  value: []
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          getTrustDomains is keyed only to state (docs/DESIGN.md §7): the
+          in-memory store supplies the roster. The opaque server-minted
+          trustDomainId has no reserved-suffix plane and the token subject is not
+          consulted (the read is store-only). With no Trust Domains created it
+          lists 200 []; the write-only WPA password is stripped at create so it
+          never leaks. Per-caller scoping and the read-all scope variant are a
+          documented cut — the base scope returns the whole store.
+        cases:
+          - input: "one or more Trust Domains created"
+            result: "200 — a TrustDomainList array of every created Trust Domain (WPA password stripped)"
+          - input: "no Trust Domains created yet"
+            result: "200 — an empty array (a list never 404s on an empty result)"
+          - input: a token without the network-access-domains:trust-domains scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+
+  /trust-domains/{trustDomainId}:
+    get:
+      operationId: getTrustDomain
+      summary: Retrieve a Trust Domain by id
+      description: |
+        Retrieves a single `TrustDomain` by the server-assigned `trustDomainId`
+        that `createTrustDomain` returned.
+
+        There is no request body and no device identifier: the operation is keyed
+        only to the in-memory store (docs/DESIGN.md §7). The `trustDomainId` is an
+        opaque, SHA-256-derived UUID the caller cannot construct, so it is not
+        itself a scenario plane — a stored id → `200` with the persisted
+        `TrustDomain` (the write-only WPA password was already stripped at
+        create), any other id (never created or malformed) → `404 NOT_FOUND`. A
+        malformed id folds into the same `404` (there is no store entry to
+        distinguish it from an unknown one).
+      security:
+        - openId:
+            - network-access-domains:trust-domains
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: trustDomainId
+          in: path
+          required: true
+          description: The server-assigned id of the Trust Domain to retrieve.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The requested Trust Domain.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrustDomain"
+              examples:
+                trustDomain:
+                  summary: A stored Trust Domain (write-only password omitted)
+                  value:
+                    id: "b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b"
+                    serviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    name: "Primary WiFi Network"
+                    description: "Primary home WiFi Network for all devices"
+                    enabled: true
+                    accessDetails:
+                      - accessType: "Wi-Fi:WPA_PERSONAL"
+                        ssid: "my-ssid"
+                        securityMode:
+                          securityModeType: "WPA3-Personal"
+                    createdAt: "2024-01-01T09:00:00Z"
+                    createdBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                    modifiedAt: "2024-01-01T09:00:00Z"
+                    modifiedBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          getTrustDomain is keyed only to the in-memory store (docs/DESIGN.md §7).
+          The trustDomainId is an opaque server-minted UUID, so store state is the
+          only control plane: a stored id returns the persisted TrustDomain, any
+          other id — unknown or malformed — is a 404 (folded, no store entry to
+          tell them apart).
+        cases:
+          - input: "a trustDomainId returned by a prior createTrustDomain"
+            result: "200 — the persisted TrustDomain (write-only password omitted)"
+          - input: "a well-formed trustDomainId that was never created"
+            result: "404 NOT_FOUND"
+          - input: "a malformed (non-UUID) trustDomainId"
+            result: "404 NOT_FOUND (folded, no store to distinguish it)"
+          - input: a token without the network-access-domains:trust-domains scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+    patch:
+      operationId: updateTrustDomain
+      summary: Update a Trust Domain by id
+      description: |
+        Updates a single `TrustDomain` in place by the server-assigned
+        `trustDomainId` that `createTrustDomain` returned. The caller sends a
+        `TrustDomainUpdate` — the mutable subset of a Trust Domain, **every field
+        optional** — and only the fields present in the body are changed; an absent
+        field is left unchanged. Per the CAMARA schema `accessDetails` is a **full
+        replacement** (a supplied array replaces the stored one wholesale, it is not
+        merged). The read-only identity/audit fields (`id`, `serviceId`,
+        `createdAt`, `createdBy`) are immutable — a body that carries them has them
+        ignored — and every successful update refreshes `modifiedAt`/`modifiedBy`.
+
+        Two control planes (docs/DESIGN.md §7), mirroring the repo's other PATCH
+        legs: the **request body** is validated first (so a body `400` wins over a
+        `404`), then **store state** — the opaque server-minted `trustDomainId` is
+        not itself a scenario plane, so a stored id → `200` with the updated
+        `TrustDomain`, any other id (never created, already deleted, or malformed) →
+        `404 NOT_FOUND` (folded). Unlike `createTrustDomain` there is **no `409`**:
+        the operation addresses an existing resource by its fixed id and never
+        re-derives it. The write-only WPA `password` is stripped from any
+        replacement `accessDetails` so it never appears in the echoed `TrustDomain`.
+      security:
+        - openId:
+            - network-access-domains:trust-domains
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: trustDomainId
+          in: path
+          required: true
+          description: The server-assigned id of the Trust Domain to update.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrustDomainUpdate"
+            examples:
+              renameAndDisable:
+                summary: Rename and disable a Trust Domain
+                value:
+                  name: "Guest WiFi Network"
+                  enabled: false
+              clearDescription:
+                summary: Clear the optional description (explicit null)
+                value:
+                  description: null
+              replaceAccessDetails:
+                summary: Replace the access details wholesale
+                value:
+                  accessDetails:
+                    - accessType: "Wi-Fi:WPA_PERSONAL"
+                      ssid: "new-ssid"
+                      securityMode:
+                        password: "new-s3cr3t"
+                        securityModeType: "WPA3-Personal"
+      responses:
+        "200":
+          description: The updated Trust Domain.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrustDomain"
+              examples:
+                trustDomain:
+                  summary: The updated Trust Domain (write-only password omitted)
+                  value:
+                    id: "b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b"
+                    serviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    name: "Guest WiFi Network"
+                    enabled: false
+                    accessDetails:
+                      - accessType: "Wi-Fi:WPA_PERSONAL"
+                        ssid: "my-ssid"
+                        securityMode:
+                          securityModeType: "WPA3-Personal"
+                    createdAt: "2024-01-01T09:00:00Z"
+                    createdBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                    modifiedAt: "2024-06-01T12:00:00Z"
+                    modifiedBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          updateTrustDomain has two control planes (docs/DESIGN.md §7): the request
+          body (validated first, so a body 400 wins over a 404) and store state (the
+          opaque server-minted trustDomainId is not a scenario plane). Every field
+          in TrustDomainUpdate is optional; a present field replaces, an explicit
+          null on a clearable optional field (description/expiration/policies)
+          removes it, and accessDetails replaces wholesale. There is no 409 — an
+          existing resource is addressed by its fixed id, so a rename cannot collide.
+        cases:
+          - input: "a stored trustDomainId + { name, enabled } to change"
+            result: "200 — the updated TrustDomain (modifiedAt/By re-stamped)"
+          - input: "a stored trustDomainId + { description: null }"
+            result: "200 — the optional description is cleared"
+          - input: "a stored trustDomainId + { accessDetails: [...] }"
+            result: "200 — accessDetails replaced wholesale (password stripped)"
+          - input: "a stored trustDomainId + an empty {} body"
+            result: "200 — a no-op that only re-stamps modifiedAt/modifiedBy"
+          - input: "a stored trustDomainId + a body with a serviceId/id field"
+            result: "200 — read-only identity fields ignored (immutable)"
+          - input: "any id + an ill-typed field (e.g. enabled: \"yes\")"
+            result: "400 INVALID_ARGUMENT (body validated before the store lookup)"
+          - input: "a well-formed trustDomainId that was never created"
+            result: "404 NOT_FOUND"
+          - input: "a malformed (non-UUID) trustDomainId"
+            result: "404 NOT_FOUND (folded, no store to distinguish it)"
+          - input: a token without the network-access-domains:trust-domains scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+    delete:
+      operationId: deleteTrustDomain
+      summary: Delete a Trust Domain by id
+      description: |
+        Deletes a single `TrustDomain` by the server-assigned `trustDomainId`
+        that `createTrustDomain` returned, and (conceptually) removes its
+        configuration from every network access device where it is applied.
+
+        There is no request body and no device identifier: the operation is keyed
+        only to the in-memory store (docs/DESIGN.md §7). The `trustDomainId` is an
+        opaque, SHA-256-derived UUID the caller cannot construct, so it is not
+        itself a scenario plane — a stored id is evicted → `204 No Content`
+        (single-use: a second delete of the same id finds nothing), any other id
+        (never created, already deleted, or malformed) → `404 NOT_FOUND`. A
+        malformed id folds into the same `404` (there is no store entry to
+        distinguish it from an unknown one). Deletion is synchronous.
+      security:
+        - openId:
+            - network-access-domains:trust-domains
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: trustDomainId
+          in: path
+          required: true
+          description: The server-assigned id of the Trust Domain to delete.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: The Trust Domain was deleted successfully. No content.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          deleteTrustDomain is keyed only to the in-memory store (docs/DESIGN.md
+          §7). The trustDomainId is an opaque server-minted UUID, so store state
+          is the only control plane: a stored id is evicted (204, single-use), any
+          other id — unknown, already-deleted, or malformed — is a 404 (folded, no
+          store entry to tell them apart).
+        cases:
+          - input: "a trustDomainId returned by a prior createTrustDomain"
+            result: "204 No Content — the Trust Domain is evicted"
+          - input: "the same trustDomainId a second time (already deleted)"
+            result: "404 NOT_FOUND (single-use)"
+          - input: "a well-formed trustDomainId that was never created"
+            result: "404 NOT_FOUND"
+          - input: "a malformed (non-UUID) trustDomainId"
+            result: "404 NOT_FOUND (folded, no store to distinguish it)"
+          - input: a token without the network-access-domains:trust-domains scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+
+  /trust-domains/{trustDomainId}/devices:
+    get:
+      operationId: getTrustDomainDevices
+      summary: List the devices registered in a Trust Domain
+      description: |
+        Lists every device registered in the Trust Domain named by
+        `{trustDomainId}` as a `TrustDomainDeviceList` — a plain array of
+        `TrustDomainDevice` (there is no page wrapper and no query parameter).
+
+        There is no request body, so the outcome keys only on state
+        (docs/DESIGN.md §7):
+
+        1. **Parent Trust Domain existence** — the collection lives *under* a
+           Trust Domain, so an unknown/never-created (or malformed)
+           `{trustDomainId}` → `404 NOT_FOUND` (the parent path segment must
+           resolve). The `trustDomainId` is an opaque, server-minted UUID, so it
+           has no reserved-suffix plane — the in-memory store is the only judge,
+           mirroring `getTrustDomain`.
+        2. **The device store** — the Trust Domain's device roster, each device
+           rendered verbatim (the write-only `deviceCredential` was already
+           stripped at create). A Trust Domain with no devices yet → `200 []` (a
+           list never `404`s on an empty *result* once the parent resolves). The
+           list is scoped to this Trust Domain: a device created in a different
+           Trust Domain never appears.
+
+        Like the device read leg, the token subject is **not** a control plane
+        (the read is store-only). The list is returned sorted by device `id` for
+        a stable order (CAMARA declares no ordering for `TrustDomainDeviceList`).
+      security:
+        - openId:
+            - network-access-domains:devices
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: trustDomainId
+          in: path
+          required: true
+          description: The server-assigned id of the Trust Domain to list devices for.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The devices registered in the Trust Domain (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrustDomainDeviceList"
+              examples:
+                two:
+                  summary: A Trust Domain with two registered devices
+                  value:
+                    - id: "c2f1a7b3-8d4e-5f6a-9b0c-1d2e3f4a5b6c"
+                      deviceName: "Alice's Laptop"
+                      deviceType: "LAPTOP"
+                      enabled: true
+                      connected: false
+                      associated: false
+                      createdAt: "2024-01-01T09:00:00Z"
+                      createdBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                      modifiedAt: "2024-01-01T09:00:00Z"
+                      modifiedBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                    - id: "d3a2b8c4-9e5f-6a7b-0c1d-2e3f4a5b6c7d"
+                      deviceName: "Alice's Phone"
+                      deviceType: "SMARTPHONE"
+                      enabled: true
+                      connected: false
+                      associated: false
+                      createdAt: "2024-01-01T09:05:00Z"
+                      createdBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                      modifiedAt: "2024-01-01T09:05:00Z"
+                      modifiedBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                empty:
+                  summary: An existing Trust Domain with no devices yet
+                  value: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          getTrustDomainDevices is keyed only to state (docs/DESIGN.md §7): the
+          parent Trust Domain must exist (unknown/malformed id → 404, mirroring
+          getTrustDomain), and the in-memory device store supplies the roster.
+          The opaque server-minted trustDomainId has no reserved-suffix plane and
+          the token subject is not consulted (the read is store-only). An existing
+          Trust Domain with no devices lists 200 []; the list is scoped to the
+          Trust Domain and never leaks another's devices.
+        cases:
+          - input: "an existing Trust Domain with two devices"
+            result: "200 — a TrustDomainDeviceList array of both devices (deviceCredential stripped)"
+          - input: "an existing Trust Domain with no devices yet"
+            result: "200 — an empty array (a list never 404s on an empty result)"
+          - input: "a well-formed but never-created trustDomainId"
+            result: "404 NOT_FOUND (the parent Trust Domain does not exist)"
+          - input: "a Trust Domain B, when a device exists only in Trust Domain A"
+            result: "200 — an empty array (the list is scoped to the Trust Domain)"
+          - input: "the token subject trailing digits are …429 but the Trust Domain exists"
+            result: "200 — the list is store-only, the subject is not a plane"
+          - input: a token without the network-access-domains:devices scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+    post:
+      operationId: createTrustDomainDevice
+      summary: Register a device in a Trust Domain
+      description: |
+        Registers a device inside an existing Trust Domain. The caller submits a
+        `TrustDomainDeviceCreate` (a required `deviceName` + `enabled`, plus the
+        optional `externalId`/`deviceType`/`blocked`/`hardwareAddress`/
+        `bootstrappingInfo`/`deviceCredential`); the simulator mints a
+        server-assigned `deviceId`, stores the device in memory under its owning
+        Trust Domain, and returns the full `TrustDomainDevice` (`201`).
+
+        Four control planes drive the outcome (docs/DESIGN.md §7):
+
+        1. **The token subject** — a reserved error suffix on the authenticated
+           identity selects the canonical CAMARA error (an account-level plane,
+           checked first, mirroring `createTrustDomain`).
+        2. **Request validation** — a missing/blank/oversized `deviceName`, a
+           missing or non-boolean `enabled`, an out-of-range `externalId`, a
+           non-boolean `blocked`, an unknown `deviceType`, or a malformed
+           `hardwareAddress` (`hardwareAddressType` other than `EUI-48`, or a
+           `value` that is not an EUI-48 MAC) → `400 INVALID_ARGUMENT`.
+        3. **Parent cross-reference** — the `{trustDomainId}` path must name a
+           Trust Domain already created (in the in-memory store), else
+           `404 NOT_FOUND`. Validation is checked before this, so a body `400`
+           wins over the parent `404`.
+        4. **Store state** — the `deviceId` is derived from the
+           `(trustDomainId, deviceName)` pair, so creating a device with the same
+           `deviceName` in the same Trust Domain collides → `409` (duplicate
+           device name in the Trust Domain).
+
+        A freshly created device is not yet `associated`/`connected` and holds no
+        assigned network address, so `connected`/`associated` are rendered
+        `false` and `ipv4Address`/`ipv6Address` are omitted until association (a
+        documented cut — the simulator has no live onboarding). The write-only
+        `deviceCredential` is stripped from the echoed `TrustDomainDevice`, and
+        the nested `bootstrappingInfo`/`deviceCredential` contents are validated
+        only for object shape (documented cuts, mirroring the Trust Domain
+        `policies`).
+      security:
+        - openId:
+            - network-access-domains:devices
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: trustDomainId
+          in: path
+          required: true
+          description: The server-assigned id of the Trust Domain to add the device to.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrustDomainDeviceCreate"
+            examples:
+              laptop:
+                summary: A laptop identified by its EUI-48 hardware address
+                value:
+                  deviceName: "Alice's Laptop"
+                  deviceType: "LAPTOP"
+                  enabled: true
+                  hardwareAddress:
+                    hardwareAddressType: "EUI-48"
+                    value: "00:11:22:33:44:55"
+      responses:
+        "201":
+          description: The device was registered in the Trust Domain.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrustDomainDevice"
+              examples:
+                created:
+                  summary: The created device (write-only deviceCredential omitted)
+                  value:
+                    id: "c2f1a7b3-8d4e-5f6a-9b0c-1d2e3f4a5b6c"
+                    deviceName: "Alice's Laptop"
+                    deviceType: "LAPTOP"
+                    enabled: true
+                    hardwareAddress:
+                      hardwareAddressType: "EUI-48"
+                      value: "00:11:22:33:44:55"
+                    connected: false
+                    associated: false
+                    createdAt: "2024-01-01T09:00:00Z"
+                    createdBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                    modifiedAt: "2024-01-01T09:00:00Z"
+                    modifiedBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          createTrustDomainDevice has four control planes (docs/DESIGN.md §7): the
+          token subject's reserved error suffix (checked first), request
+          validation, the parent Trust Domain's existence, and the in-memory
+          device store (a duplicate deviceName in the Trust Domain collides). The
+          deviceId is derived from the (trustDomainId, deviceName) pair, so the
+          same name in the same Trust Domain re-mints the same id and is rejected
+          as a duplicate.
+        cases:
+          - input: "a valid TrustDomainDeviceCreate for an existing Trust Domain"
+            result: "201 — the created TrustDomainDevice (deviceCredential stripped, connected/associated false)"
+          - input: "a second create with the same deviceName in the same Trust Domain"
+            result: "409 — duplicate device name in the Trust Domain"
+          - input: "a different deviceName in the same Trust Domain"
+            result: "201 — a distinct device"
+          - input: "missing/blank/over-255-char deviceName, missing/ill-typed enabled, or out-of-range externalId"
+            result: "400 INVALID_ARGUMENT"
+          - input: "an unknown deviceType, or a hardwareAddress with a non-EUI-48 type or a value that is not an EUI-48 MAC"
+            result: "400 INVALID_ARGUMENT"
+          - input: "an invalid body against an unknown trustDomainId"
+            result: "400 INVALID_ARGUMENT (validation precedes the parent lookup)"
+          - input: "a valid body against a well-formed but never-created trustDomainId"
+            result: "404 NOT_FOUND (parent Trust Domain does not exist)"
+          - input: "the token subject trailing digits are …404"
+            result: "404 NOT_FOUND (reserved error suffix, account-level, before the parent lookup)"
+          - input: "the token subject trailing digits are …429"
+            result: "429 TOO_MANY_REQUESTS (reserved error suffix, account-level)"
+          - input: a token without the network-access-domains:devices scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+
+  /trust-domains/{trustDomainId}/devices/{deviceId}:
+    get:
+      operationId: getTrustDomainDevice
+      summary: Retrieve a device in a Trust Domain by id
+      description: |
+        Retrieves a single `TrustDomainDevice` by the server-assigned `deviceId`
+        that `createTrustDomainDevice` returned, inside its owning
+        `trustDomainId`.
+
+        There is no request body: the operation is keyed only to the in-memory
+        device store (docs/DESIGN.md §7). Unlike the device *create* leg — which
+        keys off the token subject to reach the account-level reserved-error set —
+        the `deviceId` is an opaque, SHA-256-derived UUID over the
+        `(trustDomainId, deviceName)` pair that the caller cannot construct, so it
+        is not itself a scenario plane and the token subject is not consulted (the
+        read is store-only, mirroring `getTrustDomain`). A stored
+        `(trustDomainId, deviceId)` pair → `200` with the persisted
+        `TrustDomainDevice` (the write-only `deviceCredential` was already stripped
+        at create); any other pair → `404 NOT_FOUND`. Because the store is keyed by
+        the full pair, an unknown parent Trust Domain, an unknown device, a device
+        that belongs to a *different* Trust Domain, and a malformed id all fold
+        into the same `404` (one store lookup).
+      security:
+        - openId:
+            - network-access-domains:devices
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: trustDomainId
+          in: path
+          required: true
+          description: The server-assigned id of the Trust Domain the device belongs to.
+          schema:
+            type: string
+            format: uuid
+        - name: deviceId
+          in: path
+          required: true
+          description: The server-assigned id of the device to retrieve.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The requested Trust Domain Device.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrustDomainDevice"
+              examples:
+                device:
+                  summary: A stored device (write-only deviceCredential omitted)
+                  value:
+                    id: "c2f1a7b3-8d4e-5f6a-9b0c-1d2e3f4a5b6c"
+                    deviceName: "Alice's Laptop"
+                    deviceType: "LAPTOP"
+                    enabled: true
+                    hardwareAddress:
+                      hardwareAddressType: "EUI-48"
+                      value: "00:11:22:33:44:55"
+                    connected: false
+                    associated: false
+                    createdAt: "2024-01-01T09:00:00Z"
+                    createdBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                    modifiedAt: "2024-01-01T09:00:00Z"
+                    modifiedBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          getTrustDomainDevice is keyed only to the in-memory device store
+          (docs/DESIGN.md §7). The store is keyed by the full (trustDomainId,
+          deviceId) pair and the deviceId is an opaque server-minted UUID, so —
+          unlike the device create leg — the token subject is not a control plane
+          and store state is the only plane: a stored pair returns the persisted
+          TrustDomainDevice, any other pair (unknown parent, unknown device,
+          another Trust Domain's device, or a malformed id) is a 404 (folded, one
+          store lookup).
+        cases:
+          - input: "a (trustDomainId, deviceId) pair returned by a prior createTrustDomainDevice"
+            result: "200 — the persisted TrustDomainDevice (write-only deviceCredential omitted)"
+          - input: "a well-formed deviceId that was never created in the Trust Domain"
+            result: "404 NOT_FOUND"
+          - input: "a deviceId that exists in a different Trust Domain"
+            result: "404 NOT_FOUND (the key mismatch folds into the same 404)"
+          - input: "a valid deviceId under a well-formed but never-created trustDomainId"
+            result: "404 NOT_FOUND"
+          - input: "a malformed (non-UUID) deviceId"
+            result: "404 NOT_FOUND (folded, no store entry to distinguish it)"
+          - input: "the token subject trailing digits are …429 but the device exists"
+            result: "200 — the read is store-only, the subject is not a plane"
+          - input: a token without the network-access-domains:devices scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+    patch:
+      operationId: updateTrustDomainDevice
+      summary: Update a device in a Trust Domain by id
+      description: |
+        Updates a single `TrustDomainDevice` in place by the server-assigned
+        `deviceId` that `createTrustDomainDevice` returned, inside its owning
+        `trustDomainId`. The caller sends a `TrustDomainDeviceUpdate` — the mutable
+        subset of a device (`deviceName`/`deviceType`/`enabled`/`blocked`/
+        `hardwareAddress`/`bootstrappingInfo`/`deviceCredential`), **every field
+        optional** — and only the fields present in the body are changed; an absent
+        field is left unchanged. The create-only `externalId` and the read-only
+        identity/lifecycle/audit fields (`id`, `connected`, `associated`,
+        `createdAt`, `createdBy`, any assigned `ipv4Address`/`ipv6Address`) are
+        immutable — a body that carries them has them ignored — and every successful
+        update refreshes `modifiedAt`/`modifiedBy`.
+
+        Two control planes (docs/DESIGN.md §7), mirroring the sibling `updateTrustDomain`
+        PATCH leg: the **request body** is validated first (so a body `400` wins over
+        a `404`), then **store state** — the opaque server-minted `deviceId` is not
+        itself a scenario plane and the token subject is not consulted (the update is
+        store-only, mirroring `getTrustDomainDevice`/`deleteTrustDomainDevice`). A
+        stored `(trustDomainId, deviceId)` pair → `200` with the updated
+        `TrustDomainDevice`; any other pair (unknown parent, unknown/other-domain
+        device, or a malformed id) → `404 NOT_FOUND` (folded). Unlike
+        `createTrustDomainDevice` there is **no `409`**: the operation addresses an
+        existing device by its fixed id and never re-derives it, so a rename cannot
+        collide (the canonical `updateTrustDomainDevice` response set is
+        `200`/`400`/`404`). The write-only `deviceCredential` is accepted (validated
+        for object shape) but never applied to or echoed in the stored device — no
+        live onboarding, a documented cut mirroring `createTrustDomainDevice`.
+      security:
+        - openId:
+            - network-access-domains:devices
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: trustDomainId
+          in: path
+          required: true
+          description: The server-assigned id of the Trust Domain the device belongs to.
+          schema:
+            type: string
+            format: uuid
+        - name: deviceId
+          in: path
+          required: true
+          description: The server-assigned id of the device to update.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrustDomainDeviceUpdate"
+            examples:
+              renameAndDisable:
+                summary: Rename and disable a device
+                value:
+                  deviceName: "Alice's Old Laptop"
+                  enabled: false
+              block:
+                summary: Block the device from forwarding data
+                value:
+                  blocked: true
+      responses:
+        "200":
+          description: The updated Trust Domain Device.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrustDomainDevice"
+              examples:
+                device:
+                  summary: The updated device (write-only deviceCredential omitted)
+                  value:
+                    id: "c2f1a7b3-8d4e-5f6a-9b0c-1d2e3f4a5b6c"
+                    deviceName: "Alice's Old Laptop"
+                    deviceType: "LAPTOP"
+                    enabled: false
+                    blocked: true
+                    hardwareAddress:
+                      hardwareAddressType: "EUI-48"
+                      value: "00:11:22:33:44:55"
+                    connected: false
+                    associated: false
+                    createdAt: "2024-01-01T09:00:00Z"
+                    createdBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                    modifiedAt: "2024-06-01T12:00:00Z"
+                    modifiedBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          updateTrustDomainDevice has two control planes (docs/DESIGN.md §7): the
+          request body (validated first, so a body 400 wins over a 404) and store
+          state (the opaque server-minted deviceId is not a scenario plane and the
+          token subject is not consulted — store-only, mirroring
+          getTrustDomainDevice/deleteTrustDomainDevice). Every field in
+          TrustDomainDeviceUpdate is optional; a present field replaces the stored
+          value, the write-only deviceCredential is accepted but neither applied nor
+          echoed, and every successful update re-stamps modifiedAt/modifiedBy. There
+          is no 409 — an existing device is addressed by its fixed id, so a rename
+          cannot collide.
+        cases:
+          - input: "a stored (trustDomainId, deviceId) + { deviceName, enabled, blocked }"
+            result: "200 — the updated TrustDomainDevice (modifiedAt/By re-stamped)"
+          - input: "a stored (trustDomainId, deviceId) + an empty {} body"
+            result: "200 — a no-op that only re-stamps modifiedAt/modifiedBy"
+          - input: "a stored (trustDomainId, deviceId) + { deviceCredential: {...} }"
+            result: "200 — credential accepted but stripped from the echo (write-only)"
+          - input: "a body with a read-only id/externalId/connected field"
+            result: "200 — immutable/create-only fields ignored"
+          - input: "any pair + an ill-typed field (e.g. enabled: \"yes\", deviceType: \"SERVER\")"
+            result: "400 INVALID_ARGUMENT (body validated before the store lookup)"
+          - input: "a well-formed deviceId that was never created in the Trust Domain"
+            result: "404 NOT_FOUND"
+          - input: "a deviceId that exists in a different Trust Domain"
+            result: "404 NOT_FOUND (the key mismatch folds into the same 404)"
+          - input: "a valid deviceId under a well-formed but never-created trustDomainId"
+            result: "404 NOT_FOUND"
+          - input: "a malformed (non-UUID) deviceId"
+            result: "404 NOT_FOUND (folded, no store entry to distinguish it)"
+          - input: "the token subject trailing digits are …429 but the device exists"
+            result: "200 — the update is store-only, the subject is not a plane"
+          - input: a token without the network-access-domains:devices scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+    delete:
+      operationId: deleteTrustDomainDevice
+      summary: Deregister a device from a Trust Domain by id
+      description: |
+        Deregisters and removes a single `TrustDomainDevice` by the
+        server-assigned `deviceId` that `createTrustDomainDevice` returned, inside
+        its owning `trustDomainId`.
+
+        There is no request body: the operation is keyed only to the in-memory
+        device store (docs/DESIGN.md §7). Like `getTrustDomainDevice`, the
+        `deviceId` is an opaque, server-minted UUID over the
+        `(trustDomainId, deviceName)` pair that the caller cannot construct, so it
+        is not itself a scenario plane and the token subject is not consulted (the
+        delete is store-only, mirroring `deleteTrustDomain`). A stored
+        `(trustDomainId, deviceId)` pair is evicted → `204 No Content`
+        (single-use: a second delete of the same pair finds nothing); any other
+        pair → `404 NOT_FOUND`. Because the store is keyed by the full pair, an
+        unknown parent Trust Domain, an unknown device, a device that belongs to a
+        *different* Trust Domain, and a malformed id all fold into the same `404`
+        (one store operation). Deletion is synchronous.
+      security:
+        - openId:
+            - network-access-domains:devices
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: trustDomainId
+          in: path
+          required: true
+          description: The server-assigned id of the Trust Domain the device belongs to.
+          schema:
+            type: string
+            format: uuid
+        - name: deviceId
+          in: path
+          required: true
+          description: The server-assigned id of the device to deregister.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: The device was deregistered successfully. No content.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          deleteTrustDomainDevice is keyed only to the in-memory device store
+          (docs/DESIGN.md §7). The store is keyed by the full (trustDomainId,
+          deviceId) pair and the deviceId is an opaque server-minted UUID, so —
+          like getTrustDomainDevice — the token subject is not a control plane and
+          store state is the only plane: a stored pair is evicted (204,
+          single-use), any other pair (unknown parent, unknown device, another
+          Trust Domain's device, or a malformed id) is a 404 (folded, one store
+          operation).
+        cases:
+          - input: "a (trustDomainId, deviceId) pair returned by a prior createTrustDomainDevice"
+            result: "204 No Content — the device is deregistered"
+          - input: "the same pair a second time (already deleted)"
+            result: "404 NOT_FOUND (single-use)"
+          - input: "a well-formed deviceId that was never created in the Trust Domain"
+            result: "404 NOT_FOUND"
+          - input: "a deviceId that exists in a different Trust Domain"
+            result: "404 NOT_FOUND (the key mismatch folds into the same 404; the real device survives)"
+          - input: "a valid deviceId under a well-formed but never-created trustDomainId"
+            result: "404 NOT_FOUND"
+          - input: "a malformed (non-UUID) deviceId"
+            result: "404 NOT_FOUND (folded, no store entry to distinguish it)"
+          - input: "the token subject trailing digits are …429 but the device exists"
+            result: "204 — the delete is store-only, the subject is not a plane"
+          - input: a token without the network-access-domains:devices scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+
+  /services:
+    get:
+      operationId: getServices
+      summary: Retrieve the services for the authenticated identity
+      description: |
+        Retrieves the caller's `ServiceList` — the logical commercial
+        subscriptions / account relationships (each tied to a `serviceSite`) the
+        authenticated identity holds.
+
+        There is no request body: the operation is keyed to the authenticated
+        identity (the token subject), which is its control plane
+        (docs/DESIGN.md §7). A list never 404s — an identity with nothing
+        associated yields an empty array.
+      security:
+        - openId:
+            - network-access-domains:services:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The services associated with the authenticated identity.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceList"
+              examples:
+                twoServices:
+                  summary: An identity with two services
+                  value:
+                    - id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                      name: "Main Home Internet"
+                      description: "Internet subscription for primary residence"
+                      serviceSite:
+                        id: "123e4567-e89b-12d3-a456-426614174000"
+                        name: "Primary Residence"
+                        description: "123 Main Street"
+                        location:
+                          geographicPoint:
+                            latitude: 50.735851
+                            longitude: 7.10066
+                    - id: "123e4567-e89b-12d3-a456-426614174001"
+                      name: "Vacation Home Internet"
+                      description: "Internet subscription for vacation home"
+                      serviceSite:
+                        id: "123e4567-e89b-12d3-a456-426614174002"
+                        name: "Vacation Home"
+                        description: "45 Lakeside Road"
+                        location:
+                          geographicPoint:
+                            latitude: 47.36667
+                            longitude: 8.55
+                empty:
+                  summary: An identity with no associated services
+                  value: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          getServices is keyed to the authenticated identity (the token subject),
+          which is its control plane (docs/DESIGN.md §7). A reserved error suffix
+          on the subject selects the canonical CAMARA error; otherwise the
+          subject's trailing three digits `d` fix the ServiceList
+          deterministically.
+        cases:
+          - input: "subject trailing digits …000 (or no digits)"
+            result: "200 — an empty ServiceList (nothing associated)"
+          - input: "subject trailing digits …001"
+            result: "200 — 1 service"
+          - input: "subject trailing digits …005"
+            result: "200 — 2 services ((5-1) % 3 + 1)"
+          - input: "subject trailing digits …003"
+            result: "200 — 3 services"
+          - input: "subject trailing digits …404"
+            result: "404 NOT_FOUND (reserved error suffix)"
+          - input: "subject trailing digits …429"
+            result: "429 TOO_MANY_REQUESTS (reserved error suffix)"
+          - input: a token without the network-access-domains:services:read scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+
+  /services/{serviceId}:
+    get:
+      operationId: getService
+      summary: Retrieve a single service by id
+      description: |
+        Retrieves a single `Service` from the authenticated identity's catalog by
+        its `serviceId`.
+
+        There is no request body: the operation is keyed to the authenticated
+        identity (the token subject) and the `serviceId` path parameter
+        (docs/DESIGN.md §7). The subject's reserved error suffix selects the
+        canonical CAMARA error (an account-level plane, checked first); otherwise
+        the `serviceId` is matched against the identity's catalog — a match →
+        `200` with that `Service`, any other id (unknown, another identity's, or
+        malformed) → `404 NOT_FOUND`.
+      security:
+        - openId:
+            - network-access-domains:services:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: serviceId
+          in: path
+          required: true
+          description: The id of the service to retrieve.
+          schema:
+            $ref: "#/components/schemas/ServiceId"
+      responses:
+        "200":
+          description: The requested service.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Service"
+              examples:
+                service:
+                  summary: A single service
+                  value:
+                    id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    name: "Main Home Internet"
+                    description: "Internet subscription for primary residence"
+                    serviceSite:
+                      id: "123e4567-e89b-12d3-a456-426614174000"
+                      name: "Primary Residence"
+                      description: "123 Main Street"
+                      location:
+                        geographicPoint:
+                          latitude: 50.735851
+                          longitude: 7.10066
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          getService is keyed to the authenticated identity (the token subject)
+          and the serviceId path parameter (docs/DESIGN.md §7). The subject's
+          reserved error suffix selects the canonical CAMARA error (checked
+          first); otherwise the serviceId is matched against the identity's
+          deterministic catalog. A malformed (non-UUID) serviceId folds into the
+          same 404 as an unknown id (the catalog is regenerated, not stored, so
+          the two are indistinguishable).
+        cases:
+          - input: "a serviceId drawn from the identity's catalog"
+            result: "200 — that Service"
+          - input: "a well-formed serviceId the identity does not hold"
+            result: "404 NOT_FOUND"
+          - input: "a serviceId belonging to a different identity's catalog"
+            result: "404 NOT_FOUND"
+          - input: "a malformed (non-UUID) serviceId"
+            result: "404 NOT_FOUND (folded, no store to distinguish it)"
+          - input: "any serviceId when the subject trailing digits are …000"
+            result: "404 NOT_FOUND (empty catalog)"
+          - input: "any serviceId when the subject trailing digits are …404"
+            result: "404 NOT_FOUND (reserved error suffix, account-level)"
+          - input: "any serviceId when the subject trailing digits are …429"
+            result: "429 TOO_MANY_REQUESTS (reserved error suffix, account-level)"
+          - input: a token without the network-access-domains:services:read scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    TrustDomainCapabilities:
+      type: object
+      additionalProperties: false
+      description: |
+        Describes the Trust Domain configuration capabilities supported by this
+        API provider.
+      required:
+        - supportedAccessTypes
+      properties:
+        supportedAccessTypes:
+          type: array
+          minItems: 1
+          maxItems: 4
+          description: List of supported access types and their variants.
+          items:
+            $ref: "#/components/schemas/SupportedAccessType"
+        supportedPolicies:
+          type: object
+          additionalProperties: false
+          description: Map of supported policy types to their capability details.
+          properties:
+            maxDevices:
+              $ref: "#/components/schemas/MaxDevicesPolicyCapability"
+            maxDomainDownstreamRate:
+              $ref: "#/components/schemas/BandwidthPolicyCapability"
+            maxDomainUpstreamRate:
+              $ref: "#/components/schemas/BandwidthPolicyCapability"
+            egressAllowedList:
+              $ref: "#/components/schemas/EgressPolicyCapability"
+
+    SupportedAccessType:
+      type: object
+      description: |
+        A supported access type. `accessType` is the discriminator; the remaining
+        properties belong to the matching variant (Wi-Fi variants carry
+        `wifiProperties`, Thread variants carry `threadProperties`).
+      required:
+        - accessType
+      discriminator:
+        propertyName: accessType
+      properties:
+        accessType:
+          type: string
+          enum:
+            - "Wi-Fi:WPA_PERSONAL"
+            - "Wi-Fi:WPA_ENTERPRISE"
+            - "Thread:STRUCTURED"
+            - "Thread:TLV"
+          description: The access type identifier.
+        wifiProperties:
+          $ref: "#/components/schemas/WiFiAccessTypeProperties"
+        threadProperties:
+          $ref: "#/components/schemas/ThreadAccessTypeProperties"
+
+    WiFiAccessTypeProperties:
+      type: object
+      additionalProperties: false
+      description: The configuration properties supported for a Wi-Fi access type.
+      properties:
+        ssidRequired:
+          type: boolean
+          example: true
+        supportedSecurityModes:
+          type: array
+          maxItems: 5
+          items:
+            type: string
+            enum:
+              - WPA2-Personal
+              - WPA3-Personal
+              - WPA2-WPA3-Personal
+              - WPA2-Enterprise
+              - WPA3-Enterprise
+        passwordConstraints:
+          $ref: "#/components/schemas/PasswordConstraints"
+        authServerRequired:
+          type: boolean
+          example: false
+
+    PasswordConstraints:
+      type: object
+      additionalProperties: false
+      description: The constraints on a Wi-Fi pre-shared-key / password.
+      required:
+        - minLength
+        - maxLength
+      properties:
+        minLength:
+          type: integer
+          format: int32
+          minimum: 8
+          maximum: 63
+          example: 8
+        maxLength:
+          type: integer
+          format: int32
+          minimum: 8
+          maximum: 63
+          example: 63
+        requireSpecialCharacters:
+          type: boolean
+          example: false
+
+    ThreadAccessTypeProperties:
+      type: object
+      additionalProperties: false
+      description: The configuration properties supported for a Thread access type.
+      properties:
+        supportedChannels:
+          type: object
+          additionalProperties: false
+          required:
+            - min
+            - max
+          properties:
+            min:
+              type: integer
+              minimum: 11
+              maximum: 26
+              example: 11
+            max:
+              type: integer
+              minimum: 11
+              maximum: 26
+              example: 26
+        networkKeyFormat:
+          type: string
+          enum:
+            - "32-hex-digits"
+        networkNameConstraints:
+          type: object
+          additionalProperties: false
+          required:
+            - minLength
+            - maxLength
+          properties:
+            minLength:
+              type: integer
+              minimum: 1
+              maximum: 16
+              example: 1
+            maxLength:
+              type: integer
+              minimum: 1
+              maximum: 16
+              example: 16
+        maxDatasetLength:
+          type: integer
+          minimum: 1
+          maximum: 254
+          example: 254
+
+    MaxDevicesPolicyCapability:
+      type: object
+      additionalProperties: false
+      description: The supported range for the max-devices-per-domain policy.
+      required:
+        - maxValue
+        - minValue
+      properties:
+        minValue:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 1024
+          example: 1
+        maxValue:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 1024
+          example: 100
+
+    BandwidthPolicyCapability:
+      type: object
+      additionalProperties: false
+      description: The supported range (bits/second) for a per-domain bandwidth policy.
+      required:
+        - maxValue
+        - minValue
+      properties:
+        minValue:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 10000000000
+          example: 1000000
+        maxValue:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 10000000000
+          example: 1000000000
+
+    EgressPolicyCapability:
+      type: object
+      additionalProperties: false
+      description: The constraints on a Trust Domain egress allow-list policy.
+      required:
+        - maxEntries
+        - supportedDestinationTypes
+      properties:
+        maxEntries:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 1024
+          example: 50
+        supportedDestinationTypes:
+          type: array
+          maxItems: 3
+          items:
+            type: string
+            enum:
+              - IP
+              - FQDN
+              - CIDR
+
+    ServiceId:
+      type: string
+      format: uuid
+      description: |
+        A unique identifier that represents a service account. A valid UUID (RFC
+        4122, versions 1-5) using only lowercase hexadecimal characters.
+      example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+
+    ServiceList:
+      type: array
+      description: A list of services accessible to the calling identity.
+      maxItems: 100
+      items:
+        $ref: "#/components/schemas/Service"
+
+    Service:
+      type: object
+      description: |
+        A service represents a logical commercial subscription or account
+        relationship between a network operator and a subscriber (residential,
+        commercial, public Wi-Fi, or other service types).
+      required:
+        - id
+      properties:
+        id:
+          $ref: "#/components/schemas/ServiceId"
+        name:
+          type: string
+          maxLength: 64
+          description: Optional friendly name for the service.
+          example: "Main Home Internet"
+        description:
+          type: string
+          maxLength: 255
+          description: Optional description of the service.
+          example: "Internet subscription for primary residence"
+        serviceSite:
+          $ref: "#/components/schemas/ServiceSite"
+
+    ServiceSite:
+      type: object
+      description: |
+        A Service Site represents a subscriber location associated with one or
+        more Network Access Devices.
+      required:
+        - id
+      properties:
+        id:
+          $ref: "#/components/schemas/ServiceId"
+        name:
+          type: string
+          maxLength: 64
+          description: The name of the service site.
+          example: "Primary Residence"
+        description:
+          type: string
+          maxLength: 64
+          description: A textual description of the service site.
+          example: "123 Main Street"
+        location:
+          $ref: "#/components/schemas/Location"
+
+    Location:
+      type: object
+      description: |
+        The physical location of a service site. The canonical schema carries a
+        WGS-84 `geographicPoint` and a civic `propertyAddress`; CamaraSim emits a
+        deterministic `geographicPoint` only (`propertyAddress` is a documented
+        cut). The point is a fixed, representative coordinate the caller can
+        render, not a queryable spatial field, so it is not a scenario control
+        plane (docs/DESIGN.md §7).
+      properties:
+        geographicPoint:
+          $ref: "#/components/schemas/Point"
+
+    Point:
+      type: object
+      description: A WGS-84 point (decimal degrees).
+      required:
+        - latitude
+        - longitude
+      properties:
+        latitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+          example: 50.735851
+        longitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+          example: 7.10066
+
+    # --- Trust Domain create (createTrustDomain) --------------------------
+
+    Uuid:
+      type: string
+      format: uuid
+      minLength: 36
+      maxLength: 36
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      description: |
+        A UUID (RFC 4122, versions 1-5) using only lowercase hexadecimal
+        characters. CamaraSim mints server-assigned ids (the `trustDomainId`
+        and the audit `createdBy`/`modifiedBy`) as deterministic, name-based
+        version-5 UUIDs.
+      example: "b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b"
+
+    DateTime:
+      type: string
+      format: date-time
+      maxLength: 64
+      description: |
+        An RFC 3339 date-time with a time zone. CamaraSim emits the audit
+        `createdAt`/`modifiedAt` stamps as UTC instants with a `Z` offset.
+      example: "2024-01-01T09:00:00Z"
+
+    Policies:
+      type: object
+      additionalProperties: true
+      description: |
+        Trust Domain policy limits (max devices, per-domain up/downstream
+        bandwidth, egress allow-list) a caller may configure. CamaraSim accepts
+        and echoes the object but does not validate its contents against the
+        advertised capabilities — the full `Policies` shape is a documented cut.
+        See `GET /trust-domains/capabilities` for the supported policy ranges.
+
+    WpaPersonalDetail:
+      type: object
+      additionalProperties: false
+      description: WPA Personal security mode configuration for Wi-Fi networks.
+      required:
+        - password
+      properties:
+        password:
+          type: string
+          writeOnly: true
+          minLength: 8
+          maxLength: 255
+          pattern: "^[\\x20-\\x7E]{8,63}$"
+          description: |
+            The pre-shared key for the WPA Personal Wi-Fi network. Write-only —
+            it is never echoed in a `TrustDomain` response.
+          example: "my-password"
+        securityModeType:
+          type: string
+          enum:
+            - WPA2-Personal
+            - WPA2-WPA3-Personal
+            - WPA3-Personal
+          description: |
+            The security mode type for the WPA Personal Wi-Fi network. Leave
+            blank to auto-select.
+          example: "WPA3-Personal"
+
+    WpaEnterpriseDetail:
+      type: object
+      additionalProperties: false
+      description: WPA Enterprise security mode configuration for Wi-Fi networks.
+      required:
+        - securityModeType
+      properties:
+        authServer:
+          type: string
+          maxLength: 255
+          description: The authentication server for the WPA Enterprise Wi-Fi network.
+          example: "1.2.3.4"
+        securityModeType:
+          type: string
+          enum:
+            - WPA2-Enterprise
+            - WPA3-Enterprise
+          description: The security mode type for the WPA Enterprise Wi-Fi network.
+          example: "WPA3-Enterprise"
+
+    WiFiWpaPersonalAccessDetail:
+      type: object
+      additionalProperties: false
+      description: Access details for Wi-Fi networks using WPA Personal security mode.
+      required:
+        - accessType
+        - securityMode
+      properties:
+        accessType:
+          type: string
+          enum:
+            - "Wi-Fi:WPA_PERSONAL"
+          example: "Wi-Fi:WPA_PERSONAL"
+        ssid:
+          type: string
+          minLength: 2
+          maxLength: 32
+          pattern: "^(?! )[\\x20-\\x7E]{2,32}(?<! )$"
+          description: SSID (2-32 printable ASCII characters, no leading/trailing space).
+          example: "my-ssid"
+        securityMode:
+          $ref: "#/components/schemas/WpaPersonalDetail"
+
+    WiFiWpaEnterpriseAccessDetail:
+      type: object
+      additionalProperties: false
+      description: Access details for Wi-Fi networks using WPA Enterprise security mode.
+      required:
+        - accessType
+        - securityMode
+      properties:
+        accessType:
+          type: string
+          enum:
+            - "Wi-Fi:WPA_ENTERPRISE"
+          example: "Wi-Fi:WPA_ENTERPRISE"
+        ssid:
+          type: string
+          minLength: 2
+          maxLength: 32
+          pattern: "^(?! )[\\x20-\\x7E]{2,32}(?<! )$"
+          description: SSID (2-32 printable ASCII characters, no leading/trailing space).
+          example: "my-ssid"
+        securityMode:
+          $ref: "#/components/schemas/WpaEnterpriseDetail"
+
+    ThreadStructuredAccessDetail:
+      type: object
+      additionalProperties: false
+      description: Access details for Thread networks using the structured format.
+      required:
+        - accessType
+        - channel
+        - extendedPanId
+        - networkKey
+        - networkName
+        - panId
+      properties:
+        accessType:
+          type: string
+          enum:
+            - "Thread:STRUCTURED"
+          example: "Thread:STRUCTURED"
+        channel:
+          type: integer
+          format: int32
+          minimum: 11
+          maximum: 26
+          description: The Thread channel (IEEE 802.15.4 channel number).
+          example: 13
+        extendedPanId:
+          type: string
+          pattern: "^[0-9a-fA-F]{16}$"
+          maxLength: 16
+          description: The Extended PAN ID (16 hex digits).
+          example: "d63e8e3e495ebbc3"
+        networkKey:
+          type: string
+          pattern: "^[0-9a-fA-F]{32}$"
+          maxLength: 32
+          description: The Thread Network Key (32 hex digits).
+          example: "dfd34f0f05cad978ec4e32b0413038ff"
+        networkName:
+          type: string
+          minLength: 1
+          maxLength: 16
+          description: The Thread Network Name (1-16 ASCII characters).
+          example: "Spec-Thread-B3AF"
+        panId:
+          type: string
+          pattern: "^[0-9a-fA-F]{4}$"
+          maxLength: 4
+          description: The PAN ID (4 hex digits).
+          example: "d63e"
+
+    ThreadTlvAccessDetail:
+      type: object
+      additionalProperties: false
+      description: |
+        Access details for Thread networks using the TLV-encoded operational
+        dataset. Present in the canonical schema, but **not advertised** by this
+        provider (see `GET /trust-domains/capabilities`), so `createTrustDomain`
+        rejects a Thread:TLV access detail with `400 INVALID_ARGUMENT`.
+      required:
+        - accessType
+        - operationalDataset
+      properties:
+        accessType:
+          type: string
+          enum:
+            - "Thread:TLV"
+          example: "Thread:TLV"
+        operationalDataset:
+          type: string
+          maxLength: 255
+          description: The Thread operational dataset encoded as a TLV hex string.
+          example: "0e08000000000000010010000102030405060708090a0b0c0d0e0f"
+
+    AccessDetail:
+      oneOf:
+        - $ref: "#/components/schemas/WiFiWpaPersonalAccessDetail"
+        - $ref: "#/components/schemas/WiFiWpaEnterpriseAccessDetail"
+        - $ref: "#/components/schemas/ThreadStructuredAccessDetail"
+        - $ref: "#/components/schemas/ThreadTlvAccessDetail"
+      discriminator:
+        propertyName: accessType
+        mapping:
+          "Wi-Fi:WPA_PERSONAL": "#/components/schemas/WiFiWpaPersonalAccessDetail"
+          "Wi-Fi:WPA_ENTERPRISE": "#/components/schemas/WiFiWpaEnterpriseAccessDetail"
+          "Thread:STRUCTURED": "#/components/schemas/ThreadStructuredAccessDetail"
+          "Thread:TLV": "#/components/schemas/ThreadTlvAccessDetail"
+      required:
+        - accessType
+      description: |
+        Network access details for one access type. `accessType` is the
+        discriminator; the remaining properties belong to the matching variant.
+
+    TrustDomainUpdate:
+      type: object
+      description: The updatable fields of a Trust Domain.
+      properties:
+        name:
+          type: string
+          maxLength: 64
+          description: Human-readable name for the Trust Domain.
+          example: "Primary WiFi Network"
+        description:
+          type: string
+          maxLength: 255
+          description: Detailed description of the Trust Domain.
+          example: "Primary home WiFi Network for all devices"
+        enabled:
+          type: boolean
+          description: Whether the Trust Domain is currently enabled.
+          example: true
+        expiration:
+          allOf:
+            - $ref: "#/components/schemas/DateTime"
+          description: |
+            The expiration date and time of the Trust Domain. If omitted, the
+            Trust Domain does not automatically expire.
+        policies:
+          $ref: "#/components/schemas/Policies"
+        accessDetails:
+          type: array
+          minItems: 1
+          maxItems: 4
+          description: |
+            The access configurations that define how devices may join the Trust
+            Domain (1-4 entries). On creation the full list must be supplied.
+          items:
+            $ref: "#/components/schemas/AccessDetail"
+
+    TrustDomainCreate:
+      allOf:
+        - $ref: "#/components/schemas/TrustDomainUpdate"
+        - type: object
+          properties:
+            serviceId:
+              $ref: "#/components/schemas/ServiceId"
+      required:
+        - name
+        - enabled
+        - accessDetails
+        - serviceId
+      description: The request body used to create a Trust Domain.
+
+    TrustDomain:
+      allOf:
+        - type: object
+          required:
+            - id
+          properties:
+            id:
+              allOf:
+                - $ref: "#/components/schemas/Uuid"
+              readOnly: true
+              description: The server-assigned Trust Domain identifier.
+        - $ref: "#/components/schemas/TrustDomainCreate"
+        - type: object
+          properties:
+            createdAt:
+              allOf:
+                - $ref: "#/components/schemas/DateTime"
+              readOnly: true
+              description: When the Trust Domain was created.
+            createdBy:
+              allOf:
+                - $ref: "#/components/schemas/Uuid"
+              readOnly: true
+              description: The identity that created the Trust Domain.
+            modifiedAt:
+              allOf:
+                - $ref: "#/components/schemas/DateTime"
+              readOnly: true
+              description: When the Trust Domain was last modified.
+            modifiedBy:
+              allOf:
+                - $ref: "#/components/schemas/Uuid"
+              readOnly: true
+              description: The identity that last modified the Trust Domain.
+      description: |
+        A Trust Domain. On the `createTrustDomain` response the write-only WPA
+        `password` inside any `accessDetails` entry is omitted.
+
+    DeviceType:
+      type: string
+      enum:
+        - AUTOMOTIVE
+        - DESKTOP
+        - IOT
+        - LAPTOP
+        - MEDICAL
+        - OTHER
+        - SMARTPHONE
+        - TABLET
+        - TV
+        - WEARABLE
+      description: The category of device being registered in the Trust Domain.
+      example: "LAPTOP"
+
+    HardwareAddress:
+      type: object
+      additionalProperties: false
+      required:
+        - hardwareAddressType
+        - value
+      properties:
+        hardwareAddressType:
+          type: string
+          enum:
+            - "EUI-48"
+          description: The hardware address type. Only EUI-48 (MAC-48) is supported.
+          example: "EUI-48"
+        value:
+          type: string
+          pattern: "^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"
+          description: |
+            The device's EUI-48 hardware (MAC) address — six 2-hex-digit groups
+            separated by `:` or `-`.
+          example: "00:11:22:33:44:55"
+      description: A device hardware (MAC) address.
+
+    BootstrappingInfo:
+      type: object
+      additionalProperties: true
+      description: |
+        Provisioning/bootstrapping details for onboarding the device (e.g. a DPP,
+        Matter, or WKSO protocol configuration with a `protocolPreference`
+        ordering). CamaraSim accepts and echoes the object but does not validate
+        its protocol internals — the full `BootstrappingInfo` shape is a
+        documented cut.
+
+    DeviceCredential:
+      type: object
+      additionalProperties: true
+      writeOnly: true
+      description: |
+        Per-device or shared credential material for the device (e.g. a
+        `credentialAction` of `GENERATE` or `ASSIGN`). Write-only — CamaraSim
+        accepts it on create but never echoes it in a `TrustDomainDevice`
+        response, and does not validate its internals (a documented cut).
+
+    TrustDomainDeviceUpdate:
+      type: object
+      description: The updatable fields of a Trust Domain Device.
+      properties:
+        deviceName:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Human-readable name for the device.
+          example: "Alice's Laptop"
+        deviceType:
+          $ref: "#/components/schemas/DeviceType"
+        enabled:
+          type: boolean
+          description: Whether the device is permitted to authenticate to the Trust Domain.
+          example: true
+        blocked:
+          type: boolean
+          description: Whether the device is currently blocked from forwarding data.
+          example: false
+        hardwareAddress:
+          $ref: "#/components/schemas/HardwareAddress"
+        bootstrappingInfo:
+          $ref: "#/components/schemas/BootstrappingInfo"
+        deviceCredential:
+          $ref: "#/components/schemas/DeviceCredential"
+
+    TrustDomainDeviceCreate:
+      allOf:
+        - $ref: "#/components/schemas/TrustDomainDeviceUpdate"
+        - type: object
+          properties:
+            externalId:
+              type: string
+              minLength: 1
+              maxLength: 255
+              description: A caller-supplied external identifier for the device.
+              example: "asset-42"
+      required:
+        - deviceName
+        - enabled
+      description: The request body used to register a device in a Trust Domain.
+
+    TrustDomainDevice:
+      allOf:
+        - type: object
+          required:
+            - id
+          properties:
+            id:
+              allOf:
+                - $ref: "#/components/schemas/Uuid"
+              readOnly: true
+              description: The server-assigned device identifier.
+        - $ref: "#/components/schemas/TrustDomainDeviceCreate"
+        - type: object
+          properties:
+            ipv4Address:
+              type: object
+              additionalProperties: true
+              readOnly: true
+              description: |
+                The device's assigned IPv4 address, once associated. CamaraSim
+                omits it until the device is associated (a documented cut — no
+                live onboarding).
+            ipv6Address:
+              type: string
+              readOnly: true
+              description: |
+                The device's assigned IPv6 address, once associated. Omitted by
+                CamaraSim until association (a documented cut).
+            connected:
+              type: boolean
+              readOnly: true
+              description: |
+                Whether the device is currently present on the network. A
+                freshly created device is `false`.
+              example: false
+            associated:
+              type: boolean
+              readOnly: true
+              description: |
+                Whether the device has completed onboarding/association. A
+                freshly created device is `false`.
+              example: false
+            createdAt:
+              allOf:
+                - $ref: "#/components/schemas/DateTime"
+              readOnly: true
+              description: When the device was created.
+            createdBy:
+              allOf:
+                - $ref: "#/components/schemas/Uuid"
+              readOnly: true
+              description: The identity that created the device.
+            modifiedAt:
+              allOf:
+                - $ref: "#/components/schemas/DateTime"
+              readOnly: true
+              description: When the device was last modified.
+            modifiedBy:
+              allOf:
+                - $ref: "#/components/schemas/Uuid"
+              readOnly: true
+              description: The identity that last modified the device.
+      description: |
+        A device registered in a Trust Domain. On the `createTrustDomainDevice`
+        response the write-only `deviceCredential` is omitted, and
+        `connected`/`associated` are `false` with no assigned `ipv4Address`/
+        `ipv6Address` until the device associates.
+
+    TrustDomainList:
+      type: array
+      description: |
+        A list of the caller's Trust Domains — the `200` body of `getTrustDomains`
+        (`GET /trust-domains`). A plain array of `TrustDomain` (no page wrapper);
+        empty when no Trust Domain has been created yet. Each Trust Domain has its
+        write-only WPA `password` stripped (as at create). CamaraSim returns the
+        array sorted by each Trust Domain's `id` for a stable order.
+      items:
+        $ref: "#/components/schemas/TrustDomain"
+      maxItems: 100
+
+    TrustDomainDeviceList:
+      type: array
+      description: |
+        A list of the devices registered in a Trust Domain — the `200` body of
+        `getTrustDomainDevices` (`GET /trust-domains/{trustDomainId}/devices`).
+        A plain array of `TrustDomainDevice` (no page wrapper); empty when the
+        Trust Domain has no devices yet. CamaraSim returns the array sorted by
+        each device's `id` for a stable order.
+      items:
+        $ref: "#/components/schemas/TrustDomainDevice"
+      maxItems: 1024

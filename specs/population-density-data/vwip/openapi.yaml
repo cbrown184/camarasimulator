@@ -1,0 +1,480 @@
+# CamaraSim — Population Density Data, API version vwip (CAMARA work-in-progress).
+#
+# Vendored from the CAMARA Population Density Data API (population-density-data)
+# and annotated with CamaraSim's parameter-driven functional cases
+# (docs/DESIGN.md §7, §9). Backed by `src/apis/population_density_data/vwip.rs`;
+# spec and code must not drift.
+#
+# Population Density Data has no released version yet — its upstream `main` spec
+# is versioned `wip` — so, like Device Visit Location, its canonical base path is
+# literally `vwip`. A numbered version will be added when CAMARA cuts a release.
+#
+# Serves `POST /retrieve`.
+#
+# ## Simulator scope (documented cuts)
+#
+# CamaraSim implements the **synchronous GEOHASHLIST** path. Accepted for schema
+# fidelity but deliberately not implemented (answered with the CAMARA-canonical
+# "unsupported" codes rather than silently degrading):
+#   - `POLYGON` areaType → 422 POPULATION_DENSITY_DATA.UNSUPPORTED_AREA_TYPE
+#     (and, since `precision` is POLYGON-only, `precision` with a GEOHASHLIST →
+#     400 INVALID_ARGUMENT).
+#   - Asynchronous delivery (`sink`/`sinkCredential`, the 202 + CloudEvents
+#     callback flow) — accepted but not acted on; a request too large to answer
+#     synchronously (> 100 geohashes) → 422
+#     POPULATION_DENSITY_DATA.UNSUPPORTED_SYNC_RESPONSE.
+#   - The ±3-month absolute start-time checks (MIN_/MAX_STARTTIME_EXCEEDED,
+#     INVALID_TIME_PERIOD) — omitted so behaviour stays independent of the wall
+#     clock; the deterministic INVALID_END_TIME / MAX_TIME_PERIOD_EXCEEDED checks
+#     are enforced.
+openapi: 3.0.3
+info:
+  title: Population Density Data
+  description: |
+    Estimates how many people are in a geographic area over a time window, as a
+    per-cell people-per-km² figure with a min/max confidence band — an aggregate,
+    privacy-preserving signal (crowd safety, retail footfall, drone-flight risk).
+    It never reveals an individual device's location.
+
+    This is the CamaraSim reference double for CAMARA Population Density Data
+    (work-in-progress). The API is **area-keyed** (no phone/device identifier):
+    the caller supplies the area to estimate — a `GEOHASHLIST` of geohash cells
+    (implemented) or a `POLYGON` boundary (a documented cut here) — plus the
+    `startTime`/`endTime` window. The endpoint requires the
+    `population-density-data:read` scope.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    There is no device identifier; the **geometry drives the answer** (mirrors
+    Region Device Count). The request's **first geohash** is the area's control
+    identifier for the shared reserved-error convention, and every geohash's own
+    characters drive its cell:
+
+    1. **The first geohash** — if its trailing three digits name a reserved CAMARA
+       status, the endpoint answers with that canonical CAMARA error instead of a
+       result (shared convention — see the referenced `errors.yaml`): `…400`,
+       `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`. Geohash
+       characters include the digits `0-9`, so this applies unchanged. Checked
+       after structural validation but before the time window, so it dominates the
+       window and data planes.
+
+    2. **Each geohash** deterministically fixes its cell (a stable hash of the
+       geohash string): `h % 7 == 0` → `NO_DATA`; `h % 7 == 1` → `LOW_DENSITY`;
+       otherwise `DENSITY_ESTIMATION` with `pplDensity = (h % 20000) + 1`
+       people/km² and a ±10% min/max band. The overall `status` is a function of
+       the cells: all `NO_DATA` → `AREA_NOT_SUPPORTED`; some `NO_DATA` →
+       `PART_OF_AREA_NOT_SUPPORTED`; otherwise `SUPPORTED_AREA`.
+
+    3. **Structural / capability planes:** an unknown `areaType` → `400
+       INVALID_ARGUMENT`; a geohash violating `^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$`,
+       an empty list, or a list over the schema's 1000-item max → `400
+       INVALID_ARGUMENT`; a geohash more precise than the sim supports (length > 9)
+       → `422 UNSUPPORTED_PRECISION`; a list over 100 geohashes → `422
+       UNSUPPORTED_SYNC_RESPONSE`; a `POLYGON` area → `422 UNSUPPORTED_AREA_TYPE`;
+       `precision` set with a `GEOHASHLIST` → `400 INVALID_ARGUMENT`.
+
+    4. **The time window** (`startTime`/`endTime`, both required, RFC 3339): a
+       malformed timestamp → `400 INVALID_ARGUMENT`; `endTime` before `startTime`
+       → `400 POPULATION_DENSITY_DATA.INVALID_END_TIME`; a window longer than 7
+       days → `400 POPULATION_DENSITY_DATA.MAX_TIME_PERIOD_EXCEEDED`.
+
+    Examples: a `GEOHASHLIST` of ordinary geohashes over a valid ≤7-day window →
+    `200` with one cell per geohash; a first geohash `"u4pruy429"` → `429
+    TOO_MANY_REQUESTS`; a `POLYGON` area → `422 UNSUPPORTED_AREA_TYPE`; a 10-char
+    geohash → `422 UNSUPPORTED_PRECISION`; `endTime < startTime` → `400
+    POPULATION_DENSITY_DATA.INVALID_END_TIME`.
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/population-density-data/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /retrieve:
+    post:
+      operationId: retrievePopulationDensity
+      summary: Retrieve population density for an area over a time window
+      description: |
+        Returns, per grid cell, an estimated people-per-km² figure with a min/max
+        band (or a `NO_DATA` / `LOW_DENSITY` marker), plus an overall area-support
+        `status`.
+
+        CamaraSim implements the synchronous `GEOHASHLIST` path. See the API
+        description for the parameter-driven functional cases and the documented
+        cuts (`POLYGON`, async `sink`, absolute start-time checks).
+      security:
+        - openId:
+            - population-density-data:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PopulationDensityRequest"
+      responses:
+        "200":
+          description: The population density estimate for the requested area.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PopulationDensityResponse"
+              examples:
+                partlySupported:
+                  summary: A two-geohash area with one density cell and one NO_DATA cell
+                  value:
+                    timedPopulationDensityData:
+                      - startTime: "2024-01-01T00:00:00Z"
+                        endTime: "2024-01-08T00:00:00Z"
+                        cellPopulationDensityData:
+                          - geohash: "u4pruy"
+                            dataType: DENSITY_ESTIMATION
+                            pplDensity: 4213
+                            minPplDensity: 3792
+                            maxPplDensity: 4634
+                          - geohash: "gbsuv"
+                            dataType: NO_DATA
+                    status: PART_OF_AREA_NOT_SUPPORTED
+        "400":
+          description: |
+            400 — bad request. CamaraSim returns `INVALID_ARGUMENT` for a malformed
+            body, an unknown `areaType`, `precision` set with a `GEOHASHLIST`, an
+            empty or over-1000 geohash list, a malformed geohash, or a malformed
+            `startTime`/`endTime`; `POPULATION_DENSITY_DATA.INVALID_END_TIME` when
+            `endTime` is earlier than `startTime`; and
+            `POPULATION_DENSITY_DATA.MAX_TIME_PERIOD_EXCEEDED` for a window longer
+            than 7 days.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                invalidArgument:
+                  summary: Malformed request
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`startTime` and `endTime` must be valid RFC 3339 date-times."
+                invalidEndTime:
+                  summary: endTime earlier than startTime
+                  value:
+                    status: 400
+                    code: POPULATION_DENSITY_DATA.INVALID_END_TIME
+                    message: "`endTime` must not be earlier than `startTime`."
+                maxTimePeriodExceeded:
+                  summary: Window longer than 7 days
+                  value:
+                    status: 400
+                    code: POPULATION_DENSITY_DATA.MAX_TIME_PERIOD_EXCEEDED
+                    message: The requested time window must not exceed 7 days.
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns
+            `POPULATION_DENSITY_DATA.UNSUPPORTED_AREA_TYPE` for a `POLYGON` area
+            (only `GEOHASHLIST` is implemented),
+            `POPULATION_DENSITY_DATA.UNSUPPORTED_PRECISION` for a geohash longer
+            than the supported precision (length > 9),
+            `POPULATION_DENSITY_DATA.UNSUPPORTED_SYNC_RESPONSE` for a list too large
+            to answer synchronously (> 100 geohashes), or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for a `…422` first-geohash suffix.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                unsupportedAreaType:
+                  summary: POLYGON area (not implemented by this sim)
+                  value:
+                    status: 422
+                    code: POPULATION_DENSITY_DATA.UNSUPPORTED_AREA_TYPE
+                    message: "This simulator supports only `GEOHASHLIST` areas; `POLYGON` is not supported."
+                unsupportedPrecision:
+                  summary: Geohash more precise than supported
+                  value:
+                    status: 422
+                    code: POPULATION_DENSITY_DATA.UNSUPPORTED_PRECISION
+                    message: The requested geohash precision (length) is not supported.
+                unsupportedSyncResponse:
+                  summary: Too many geohashes for a synchronous answer
+                  value:
+                    status: 422
+                    code: POPULATION_DENSITY_DATA.UNSUPPORTED_SYNC_RESPONSE
+                    message: The request is too large for a synchronous response; a `sink` (async) request is required, which is not supported.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Population Density Data is area-keyed with no device identifier, so the
+          geometry is the control plane (docs/DESIGN.md §7). The first geohash
+          selects reserved errors via the shared convention in errors.yaml; each
+          geohash's characters fix its cell; the cell mix fixes the overall status.
+          Canonical Population Density Data (wip) also supports POLYGON areas,
+          hourly time-sliced results, the async sink flow, and the ±3-month
+          absolute start-time checks; CamaraSim implements the synchronous
+          GEOHASHLIST path with a single time slice and exposes the "unsupported"
+          codes for the rest (documented cuts).
+        cases:
+          - input: "first geohash ending in a reserved error suffix (e.g. …404)"
+            result: the canonical CAMARA error for that status
+          - input: "a GEOHASHLIST of valid geohashes, valid ≤7-day window"
+            result: "200 — one cell per geohash; dataType/density from each geohash; status from the cell mix"
+          - input: "areaType POLYGON"
+            result: "422 POPULATION_DENSITY_DATA.UNSUPPORTED_AREA_TYPE"
+          - input: "precision set with a GEOHASHLIST"
+            result: "400 INVALID_ARGUMENT"
+          - input: "a geohash longer than 9 characters"
+            result: "422 POPULATION_DENSITY_DATA.UNSUPPORTED_PRECISION"
+          - input: "more than 100 geohashes"
+            result: "422 POPULATION_DENSITY_DATA.UNSUPPORTED_SYNC_RESPONSE"
+          - input: "a malformed geohash, empty list, or over-1000 list"
+            result: "400 INVALID_ARGUMENT"
+          - input: "endTime earlier than startTime"
+            result: "400 POPULATION_DENSITY_DATA.INVALID_END_TIME"
+          - input: "window longer than 7 days"
+            result: "400 POPULATION_DENSITY_DATA.MAX_TIME_PERIOD_EXCEEDED"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    PopulationDensityRequest:
+      type: object
+      description: Request a population density estimate for an area over a time window.
+      required:
+        - area
+        - startTime
+        - endTime
+      additionalProperties: false
+      properties:
+        area:
+          $ref: "#/components/schemas/Area"
+        startTime:
+          type: string
+          format: date-time
+          description: Start of the time window (RFC 3339, UTC).
+          example: "2024-01-01T00:00:00Z"
+        endTime:
+          type: string
+          format: date-time
+          description: |
+            End of the time window (RFC 3339, UTC). Must not be earlier than
+            `startTime`, and the window must not exceed 7 days.
+          example: "2024-01-08T00:00:00Z"
+        precision:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 12
+          description: |
+            Geohash precision for a `POLYGON` area's returned cells. Applies only
+            to `POLYGON`; supplying it with a `GEOHASHLIST` is a `400`. (POLYGON is
+            not implemented by CamaraSim.)
+        sink:
+          type: string
+          format: uri
+          description: |
+            Async callback URL. Accepted for schema fidelity; CamaraSim answers
+            synchronously and does not deliver to a sink (a documented cut).
+        sinkCredential:
+          type: object
+          description: |
+            Async callback credential. Accepted for schema fidelity; not applied
+            (async delivery is a documented cut).
+
+    Area:
+      type: object
+      description: |
+        The area to estimate. A `GEOHASHLIST` carries `geohashes`; a `POLYGON`
+        carries a `boundary`. CamaraSim implements `GEOHASHLIST`; a `POLYGON`
+        request is answered `422 UNSUPPORTED_AREA_TYPE`.
+      required:
+        - areaType
+      additionalProperties: false
+      properties:
+        areaType:
+          type: string
+          enum: [POLYGON, GEOHASHLIST]
+          description: The kind of area supplied.
+        geohashes:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          description: The geohash cells to estimate (required for `GEOHASHLIST`).
+          items:
+            $ref: "#/components/schemas/Geohash"
+        boundary:
+          type: array
+          minItems: 3
+          maxItems: 15
+          description: |
+            The polygon boundary vertices (for `POLYGON`). Accepted for fidelity;
+            `POLYGON` is not implemented by CamaraSim.
+          items:
+            $ref: "#/components/schemas/Point"
+
+    Geohash:
+      type: string
+      minLength: 1
+      maxLength: 12
+      pattern: '^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$'
+      description: A geohash string (base32; excludes a, i, l, o).
+      example: "u4pruy"
+
+    Point:
+      type: object
+      description: A boundary vertex (WGS84).
+      required:
+        - latitude
+        - longitude
+      additionalProperties: false
+      properties:
+        latitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+        longitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+
+    PopulationDensityResponse:
+      type: object
+      description: The population density estimate for the requested area.
+      required:
+        - timedPopulationDensityData
+        - status
+      properties:
+        timedPopulationDensityData:
+          type: array
+          maxItems: 168
+          description: |
+            Per-time-slice density data. CamaraSim returns a single slice covering
+            the whole requested window (it does not subdivide into hourly slices).
+          items:
+            $ref: "#/components/schemas/TimedPopulationDensityData"
+        status:
+          type: string
+          enum:
+            - SUPPORTED_AREA
+            - PART_OF_AREA_NOT_SUPPORTED
+            - AREA_NOT_SUPPORTED
+            - OPERATION_NOT_COMPLETED
+          description: |
+            Overall support status for the area. CamaraSim derives it from the
+            cells: all `NO_DATA` → `AREA_NOT_SUPPORTED`; some `NO_DATA` →
+            `PART_OF_AREA_NOT_SUPPORTED`; otherwise `SUPPORTED_AREA`.
+            `OPERATION_NOT_COMPLETED` (the async-timeout case) is not produced by
+            the synchronous sim.
+        statusInfo:
+          type: string
+          maxLength: 512
+          description: Present when `status` is `OPERATION_NOT_COMPLETED` (unused here).
+
+    TimedPopulationDensityData:
+      type: object
+      description: Density data for one time slice of the requested window.
+      required:
+        - startTime
+        - endTime
+        - cellPopulationDensityData
+      properties:
+        startTime:
+          type: string
+          format: date-time
+          maxLength: 64
+        endTime:
+          type: string
+          format: date-time
+          maxLength: 64
+        cellPopulationDensityData:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          description: One entry per grid cell (here, per input geohash).
+          items:
+            $ref: "#/components/schemas/CellPopulationDensityData"
+
+    CellPopulationDensityData:
+      type: object
+      description: |
+        Density for one cell. A `DENSITY_ESTIMATION` cell carries `pplDensity` and
+        a min/max band; `NO_DATA` / `LOW_DENSITY` cells carry no numbers.
+      required:
+        - geohash
+        - dataType
+      properties:
+        geohash:
+          $ref: "#/components/schemas/Geohash"
+        dataType:
+          type: string
+          enum: [NO_DATA, LOW_DENSITY, DENSITY_ESTIMATION]
+          description: |
+            `NO_DATA` — no coverage/data for the cell; `LOW_DENSITY` — population
+            below the privacy-preserving reporting threshold; `DENSITY_ESTIMATION`
+            — an estimate is provided.
+        pplDensity:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
+          description: Estimated people per km² (only for `DENSITY_ESTIMATION`).
+        minPplDensity:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
+          description: Lower bound of the estimate (only for `DENSITY_ESTIMATION`).
+        maxPplDensity:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
+          description: Upper bound of the estimate (only for `DENSITY_ESTIMATION`).
