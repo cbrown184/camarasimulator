@@ -29,6 +29,15 @@ enforcement, PKCE, audience, and expiry against DESIGN §6, and confirm auth tes
 cover each grant type and failure mode.
 
 Verified sub-items:
+- ✅ Client authentication methods now match discovery: discovery + `specs/auth`
+  advertise `private_key_jwt` in `token_endpoint_auth_methods_supported`, and the
+  token endpoint (all three grants) and `/bc-authorize` now honour it —
+  `client_id_from_assertion` (`src/auth/token.rs`) reads the client id from a
+  `client_assertion` JWT's `sub` (falling back to `iss`), signature unverified,
+  matching the "any secret accepted" test-double posture (DESIGN §6). Precedence:
+  `client_secret_basic` → `client_secret_post` → `private_key_jwt`. Spec request
+  bodies (`TokenRequest`, `BackchannelAuthenticationRequest`) gained
+  `client_assertion`/`client_assertion_type`. 6 new tests. No new dependency.
 - ✅ Resource-server temporal validation (`src/auth/verify.rs`): `exp` enforced;
   `nbf` (not-before, RFC 7519 §4.1.5) now enforced when present → 401
   `UNAUTHENTICATED` (`AuthError::NotYetValid`), documented in `specs/auth`. Stale
@@ -140,4 +149,15 @@ Respect phase order. Preferred next work:
   `#![allow(dead_code)]` with a targeted allow on `client_id`. 3 new tests.
   `cargo test` green: 3033 passed, 0 failed. `cargo build --release` green;
   binary = 5,323,352 bytes (+192 B, no new dependency).
+- 2026-09-26 — Phase 0 auth pass: made the advertised `private_key_jwt` token
+  endpoint auth method real. Discovery + `specs/auth` listed `private_key_jwt` in
+  `token_endpoint_auth_methods_supported`, but only `client_secret_basic`/`_post`
+  were honoured. Added `client_id_from_assertion` (`src/auth/token.rs`) resolving
+  the client id from a `client_assertion` JWT (`sub`, else `iss`; signature not
+  verified — "authenticate the shape, not credentials", DESIGN §6) and wired it as
+  a third client-auth fallback into all three token grants and `/bc-authorize`
+  (`src/auth/ciba.rs`). Updated the vendored spec's endpoint descriptions, the 401
+  example, and both request-body schemas (`client_assertion`/`client_assertion_type`)
+  in the same pass. 6 new tests. `cargo test` green: 3039 passed, 0 failed.
+  `cargo build --release` green; binary = 5,330,520 bytes (+7,168 B, no new dependency).
 </content>

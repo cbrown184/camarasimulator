@@ -21,11 +21,15 @@
 //! The simulator is a test double, so it authenticates the *shape* of the flow
 //! but not real credentials:
 //!
-//! - **Client authentication** is required and resolved from either
-//!   `client_secret_basic` (HTTP Basic `Authorization` header) or
-//!   `client_secret_post` (`client_id`/`client_secret` form fields). Any secret
-//!   is accepted; the `client_id` becomes the token `sub`/`client_id`. A request
-//!   with no resolvable `client_id` fails with `invalid_client` (401).
+//! - **Client authentication** is required and resolved, in precedence order,
+//!   from `client_secret_basic` (HTTP Basic `Authorization` header),
+//!   `client_secret_post` (`client_id`/`client_secret` form fields), or
+//!   `private_key_jwt` (a `client_assertion` JWT, RFC 7523 §2.2 / OIDC Core §9).
+//!   These are exactly the methods discovery advertises
+//!   (`token_endpoint_auth_methods_supported`). Any secret / assertion signature
+//!   is accepted (the simulator authenticates the flow shape, not credentials);
+//!   the resolved `client_id` becomes the token `sub`/`client_id`. A request with
+//!   no resolvable `client_id` fails with `invalid_client` (401).
 //! - **Scope** is granted as requested: the space-delimited `scope` parameter is
 //!   echoed into the token's `scope` claim and the response. Absent → empty.
 //! - **Expiry** is fixed at [`EXPIRES_IN`] seconds.
@@ -63,6 +67,9 @@ struct TokenForm {
     code_verifier: Option<String>,
     // CIBA grant (OpenID CIBA Core §10.1): the id from `POST /bc-authorize`.
     auth_req_id: Option<String>,
+    // `private_key_jwt` client authentication (RFC 7523 §2.2 / OIDC Core §9).
+    client_assertion: Option<String>,
+    client_assertion_type: Option<String>,
 }
 
 /// `POST /oauth2/token`.
@@ -100,15 +107,23 @@ pub async fn handler(headers: HeaderMap, body: String) -> Response {
 
 /// Issue a token for the `client_credentials` grant.
 fn client_credentials(headers: &HeaderMap, form: TokenForm) -> Response {
-    // The client must authenticate (RFC 6749 §4.4.2). We accept any secret but
-    // require a client identity via Basic auth or the `client_id` form field.
-    let client_id = match client_id_from_basic(headers).or(form.client_id) {
+    // The client must authenticate (RFC 6749 §4.4.2). We accept any credential
+    // but require a client identity via Basic auth, the `client_id` form field,
+    // or a `private_key_jwt` client assertion.
+    let client_id = match client_id_from_basic(headers)
+        .or(form.client_id)
+        .or_else(|| {
+            client_id_from_assertion(
+                form.client_assertion_type.as_deref(),
+                form.client_assertion.as_deref(),
+            )
+        }) {
         Some(id) => id,
         None => {
             return oauth_error(
                 StatusCode::UNAUTHORIZED,
                 "invalid_client",
-                "client authentication required (client_secret_basic or client_secret_post)",
+                "client authentication required (client_secret_basic, client_secret_post, or private_key_jwt)",
             )
         }
     };
@@ -148,14 +163,22 @@ fn authorization_code(headers: &HeaderMap, form: TokenForm) -> Response {
             )
         }
     };
-    // Public client + PKCE: the client still identifies itself (Basic or form).
-    let client_id = match client_id_from_basic(headers).or(form.client_id) {
+    // Public client + PKCE: the client still identifies itself (Basic, the
+    // `client_id` form field, or a `private_key_jwt` client assertion).
+    let client_id = match client_id_from_basic(headers)
+        .or(form.client_id)
+        .or_else(|| {
+            client_id_from_assertion(
+                form.client_assertion_type.as_deref(),
+                form.client_assertion.as_deref(),
+            )
+        }) {
         Some(id) => id,
         None => {
             return oauth_error(
                 StatusCode::UNAUTHORIZED,
                 "invalid_client",
-                "client authentication required (client_id or client_secret_basic)",
+                "client authentication required (client_secret_basic, client_secret_post, or private_key_jwt)",
             )
         }
     };
@@ -219,13 +242,20 @@ fn authorization_code(headers: &HeaderMap, form: TokenForm) -> Response {
 /// its `sub` is the simulator's synthetic resource owner (`camarasim-user`); the
 /// `auth_req_id` is consumed (single use).
 fn ciba_grant(headers: &HeaderMap, form: TokenForm) -> Response {
-    let client_id = match client_id_from_basic(headers).or(form.client_id) {
+    let client_id = match client_id_from_basic(headers)
+        .or(form.client_id)
+        .or_else(|| {
+            client_id_from_assertion(
+                form.client_assertion_type.as_deref(),
+                form.client_assertion.as_deref(),
+            )
+        }) {
         Some(id) => id,
         None => {
             return oauth_error(
                 StatusCode::UNAUTHORIZED,
                 "invalid_client",
-                "client authentication required (client_secret_basic or client_secret_post)",
+                "client authentication required (client_secret_basic, client_secret_post, or private_key_jwt)",
             )
         }
     };
@@ -340,6 +370,40 @@ pub(super) fn client_id_from_basic(headers: &HeaderMap) -> Option<String> {
     let creds = String::from_utf8(decoded).ok()?;
     let (id, _secret) = creds.split_once(':')?;
     (!id.is_empty()).then(|| id.to_string())
+}
+
+/// The `client_assertion_type` value that selects `private_key_jwt` client
+/// authentication (RFC 7523 §2.1, OIDC Core §9).
+const JWT_BEARER_ASSERTION_TYPE: &str =
+    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+
+/// Extract a `client_id` from a `private_key_jwt` client assertion (RFC 7523 §2.2,
+/// OIDC Core §9). The assertion's **signature is not verified** — the simulator
+/// authenticates the flow *shape*, not credentials, matching the "any secret
+/// accepted" posture of the other methods — so the client identity is read from
+/// the assertion's claims: `sub` (the client authenticating), falling back to
+/// `iss` (RFC 7523 requires both to be the client_id).
+///
+/// Returns `None` unless `assertion_type` is the JWT-bearer type and `assertion`
+/// is a JWT whose claims segment decodes to an object with a non-empty `sub`/`iss`.
+/// `pub(super)` so `/bc-authorize` ([`super::ciba`]) authenticates clients the
+/// same way as the token grants.
+pub(super) fn client_id_from_assertion(
+    assertion_type: Option<&str>,
+    assertion: Option<&str>,
+) -> Option<String> {
+    if assertion_type? != JWT_BEARER_ASSERTION_TYPE {
+        return None;
+    }
+    // A JWT is `header.claims.signature`; the client_id lives in the claims.
+    let claims_b64 = assertion?.split('.').nth(1)?;
+    let claims_bytes = URL_SAFE_NO_PAD.decode(claims_b64).ok()?;
+    let claims: Value = serde_json::from_slice(&claims_bytes).ok()?;
+    claims["sub"]
+        .as_str()
+        .or_else(|| claims["iss"].as_str())
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
 }
 
 /// Current Unix time in seconds (server runtime clock; not on any hot loop).
@@ -948,5 +1012,153 @@ mod tests {
         verifying_key
             .verify(signing_input.as_bytes(), &signature)
             .expect("authorization_code token verifies under the JWKS public key");
+    }
+
+    // --- private_key_jwt client authentication (RFC 7523 / OIDC Core §9) ---
+    //
+    // Discovery advertises `private_key_jwt` in token_endpoint_auth_methods_supported,
+    // so the endpoints must resolve a client from a `client_assertion`. The
+    // assertion signature is not verified (test-double posture); the client id is
+    // taken from the assertion's `sub` (falling back to `iss`).
+
+    /// The `client_assertion_type` for `private_key_jwt`.
+    const ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+
+    /// Build a `private_key_jwt` client assertion whose `sub`/`iss` are `client_id`.
+    /// The signature segment is a placeholder — the simulator does not verify it.
+    fn assertion_with(sub: Option<&str>, iss: Option<&str>) -> String {
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","typ":"JWT"}"#);
+        let mut claims = json!({
+            "aud": "http://sim.local:8080/oauth2/token",
+            "jti": "assertion-1",
+            "exp": 9_999_999_999_u64,
+        });
+        if let Some(s) = sub {
+            claims["sub"] = Value::String(s.to_string());
+        }
+        if let Some(i) = iss {
+            claims["iss"] = Value::String(i.to_string());
+        }
+        let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        format!("{header}.{claims_b64}.sig-not-verified")
+    }
+
+    /// urlencode a form body carrying a `private_key_jwt` assertion (no client_id).
+    fn body_with_assertion(prefix: &str, assertion: &str) -> String {
+        let enc = serde_urlencoded::to_string([
+            ("client_assertion_type", ASSERTION_TYPE),
+            ("client_assertion", assertion),
+        ])
+        .unwrap();
+        format!("{prefix}&{enc}")
+    }
+
+    #[tokio::test]
+    async fn client_credentials_authenticates_via_private_key_jwt() {
+        // No client_id form field and no Basic auth — only the assertion.
+        let body = body_with_assertion(
+            "grant_type=client_credentials",
+            &assertion_with(Some("assertion-client"), Some("assertion-client")),
+        );
+        let (status, _, resp) = post_token(&body, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, claims) = decode_jwt(resp["access_token"].as_str().unwrap());
+        assert_eq!(claims["sub"], "assertion-client");
+        assert_eq!(claims["client_id"], "assertion-client");
+    }
+
+    #[tokio::test]
+    async fn private_key_jwt_falls_back_to_iss_when_sub_absent() {
+        let body = body_with_assertion(
+            "grant_type=client_credentials",
+            &assertion_with(None, Some("iss-only-client")),
+        );
+        let (status, _, resp) = post_token(&body, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, claims) = decode_jwt(resp["access_token"].as_str().unwrap());
+        assert_eq!(claims["client_id"], "iss-only-client");
+    }
+
+    #[tokio::test]
+    async fn assertion_is_ignored_without_the_jwt_bearer_type() {
+        // A client_assertion present but with the wrong (here: missing) type is
+        // not private_key_jwt, so no client is resolved → invalid_client.
+        let enc = serde_urlencoded::to_string([(
+            "client_assertion",
+            assertion_with(Some("assertion-client"), None).as_str(),
+        )])
+        .unwrap();
+        let body = format!("grant_type=client_credentials&{enc}");
+        let (status, _, resp) = post_token(&body, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(resp["error"], "invalid_client");
+    }
+
+    #[tokio::test]
+    async fn basic_auth_takes_precedence_over_the_assertion() {
+        // base64("basic-client:secret") == "YmFzaWMtY2xpZW50OnNlY3JldA=="
+        let body = body_with_assertion(
+            "grant_type=client_credentials",
+            &assertion_with(Some("assertion-client"), None),
+        );
+        let (status, _, resp) =
+            post_token(&body, Some("Basic YmFzaWMtY2xpZW50OnNlY3JldA==")).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, claims) = decode_jwt(resp["access_token"].as_str().unwrap());
+        assert_eq!(claims["client_id"], "basic-client");
+    }
+
+    #[tokio::test]
+    async fn bc_authorize_authenticates_via_private_key_jwt() {
+        // /bc-authorize accepts the same client-auth methods as the token endpoint.
+        let assertion = assertion_with(Some("ciba-client"), Some("ciba-client"));
+        let enc = serde_urlencoded::to_string([
+            ("scope", "openid"),
+            ("login_hint", "tel:+34600000001"),
+            ("client_assertion_type", ASSERTION_TYPE),
+            ("client_assertion", &assertion),
+        ])
+        .unwrap();
+        let response = super::super::routes()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/bc-authorize")
+                    .header("host", "sim.local:8080")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(enc))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let bc: Value = serde_json::from_slice(&bytes).unwrap();
+        let auth_req_id = bc["auth_req_id"].as_str().unwrap();
+
+        // The auth_req_id was issued to ciba-client; polling as that client works.
+        let poll_body = format!(
+            "grant_type=urn:openid:params:grant-type:ciba&client_id=ciba-client&auth_req_id={auth_req_id}"
+        );
+        let (status, _, resp) = post_token(&poll_body, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, claims) = decode_jwt(resp["access_token"].as_str().unwrap());
+        assert_eq!(claims["client_id"], "ciba-client");
+    }
+
+    #[test]
+    fn client_id_from_assertion_requires_the_bearer_type() {
+        let assertion = assertion_with(Some("c"), None);
+        // Right type resolves; any other (or absent) type does not.
+        assert_eq!(
+            client_id_from_assertion(Some(ASSERTION_TYPE), Some(&assertion)),
+            Some("c".to_string())
+        );
+        assert_eq!(client_id_from_assertion(Some("other"), Some(&assertion)), None);
+        assert_eq!(client_id_from_assertion(None, Some(&assertion)), None);
+        // A malformed assertion (not a JWT) yields no client.
+        assert_eq!(client_id_from_assertion(Some(ASSERTION_TYPE), Some("nonsense")), None);
     }
 }

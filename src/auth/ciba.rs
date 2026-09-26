@@ -178,6 +178,9 @@ struct BcForm {
     /// The end-user identifier hint (CAMARA uses `login_hint`, e.g. `tel:+34...`).
     /// Also selects the simulator's functional case (see the module docs).
     login_hint: Option<String>,
+    /// `private_key_jwt` client authentication (RFC 7523 §2.2 / OIDC Core §9).
+    client_assertion: Option<String>,
+    client_assertion_type: Option<String>,
 }
 
 /// `POST /bc-authorize` — CIBA backchannel authentication endpoint.
@@ -198,14 +201,22 @@ pub async fn handler(headers: HeaderMap, body: String) -> Response {
         }
     };
 
-    // Client authentication (client_secret_basic or client_secret_post).
-    let client_id = match token::client_id_from_basic(&headers).or(form.client_id) {
+    // Client authentication (client_secret_basic, client_secret_post, or
+    // private_key_jwt) — the same methods the token endpoint accepts.
+    let client_id = match token::client_id_from_basic(&headers)
+        .or(form.client_id)
+        .or_else(|| {
+            token::client_id_from_assertion(
+                form.client_assertion_type.as_deref(),
+                form.client_assertion.as_deref(),
+            )
+        }) {
         Some(id) => id,
         None => {
             return token::oauth_error(
                 StatusCode::UNAUTHORIZED,
                 "invalid_client",
-                "client authentication required (client_secret_basic or client_secret_post)",
+                "client authentication required (client_secret_basic, client_secret_post, or private_key_jwt)",
             )
         }
     };
