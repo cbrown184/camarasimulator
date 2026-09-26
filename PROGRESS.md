@@ -28,6 +28,14 @@ Auth modules present under `src/auth/` (`token`, `authorize`, `ciba`, `codes`,
 enforcement, PKCE, audience, and expiry against DESIGN §6, and confirm auth tests
 cover each grant type and failure mode.
 
+Verified sub-items:
+- ✅ Resource-server temporal validation (`src/auth/verify.rs`): `exp` enforced;
+  `nbf` (not-before, RFC 7519 §4.1.5) now enforced when present → 401
+  `UNAUTHENTICATED` (`AuthError::NotYetValid`), documented in `specs/auth`. Stale
+  module comment claiming no business endpoint consumes `Claims` corrected (60 do).
+  Still to verify: `client_credentials`/`authorization_code`+PKCE/CIBA grant paths
+  and scope/purpose mapping end to end.
+
 ### Phase 1 — Stateless, non-spatial (identity/number)
 - ✅ number-verification v1
 - ✅ sim-swap v2
@@ -123,4 +131,13 @@ Respect phase order. Preferred next work:
   Baseline `cargo test` green: 3030 passed, 0 failed. `cargo build --release`
   green; release binary `target/release/camarasimulator` = 5,323,160 bytes
   (5.1 MB). Per-API completeness still to be audited in future passes.
+- 2026-09-26 — Phase 0 auth pass: added `nbf` (not-before) validation to the
+  resource-server verifier (`src/auth/verify.rs`), faithful to RFC 7519 §4.1.5 /
+  RFC 9068 — a token with a future `nbf` is now rejected 401 `UNAUTHENTICATED`
+  (new `AuthError::NotYetValid`); absent `nbf` unaffected. Updated `specs/auth`
+  middleware checklist + 401 description in the same pass; corrected the stale
+  `verify.rs` comment (60 mounted APIs consume `Claims`) and replaced the blanket
+  `#![allow(dead_code)]` with a targeted allow on `client_id`. 3 new tests.
+  `cargo test` green: 3033 passed, 0 failed. `cargo build --release` green;
+  binary = 5,323,352 bytes (+192 B, no new dependency).
 </content>

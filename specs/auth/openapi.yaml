@@ -20,6 +20,8 @@ info:
         or HMAC token is rejected outright) and the signature must verify under the
         public key published at `/oauth2/jwks`.
       - **Expiry** — `exp` is required and must be in the future.
+      - **Not-before** — `nbf` is optional, but if present the token is rejected
+        until the server clock reaches it (RFC 7519 §4.1.5).
       - **Audience** — `aud` must contain the resource server's identifier (the
         issuer base URL), so a token minted for one host is not accepted by another.
       - **Scope** — each endpoint additionally requires its own CAMARA purpose
@@ -27,8 +29,8 @@ info:
 
     On failure the response is the CAMARA error body (`CamaraError`) with an
     RFC 6750 `WWW-Authenticate` challenge: a missing / malformed / bad-signature /
-    expired / wrong-audience token yields **401 `UNAUTHENTICATED`**; a valid token
-    lacking the required scope yields **403 `PERMISSION_DENIED`**. The reusable
+    expired / not-yet-valid / wrong-audience token yields **401 `UNAUTHENTICATED`**;
+    a valid token lacking the required scope yields **403 `PERMISSION_DENIED`**. The reusable
     `securitySchemes.camaraOAuth`, `responses.Unauthenticated`, and
     `responses.PermissionDenied` below are referenced by the individual API specs.
   version: 0.0.1
@@ -457,9 +459,10 @@ components:
   responses:
     Unauthenticated:
       description: |
-        The access token is missing, malformed, badly signed, expired, or intended
-        for a different audience. Carries an RFC 6750 `WWW-Authenticate: Bearer`
-        challenge (with `error="invalid_token"` when a token was presented).
+        The access token is missing, malformed, badly signed, expired, not yet
+        valid (`nbf`), or intended for a different audience. Carries an RFC 6750
+        `WWW-Authenticate: Bearer` challenge (with `error="invalid_token"` when a
+        token was presented).
       headers:
         WWW-Authenticate:
           schema:

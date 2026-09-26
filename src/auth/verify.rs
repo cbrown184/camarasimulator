@@ -16,7 +16,10 @@
 //!    the bundled key published at `/oauth2/jwks` ([`keys::verify_rs256`]).
 //! 2. **Expiry** — `exp` is required (RFC 9068 `at+jwt`) and must be in the
 //!    future relative to the server clock.
-//! 3. **Audience** — `aud` must contain this resource server's identifier, i.e.
+//! 3. **Not-before** — `nbf` is optional, but if present the token must not be
+//!    accepted before it (RFC 7519 §4.1.5): the server clock must be at or after
+//!    `nbf`.
+//! 4. **Audience** — `aud` must contain this resource server's identifier, i.e.
 //!    the issuer base URL derived from the request (the same value the token
 //!    endpoint stamps as `aud`), so a token minted for one host is not accepted
 //!    by another.
@@ -31,15 +34,14 @@
 //! Failures map to the CAMARA error body `{ status, code, message }` with an
 //! RFC 6750 `WWW-Authenticate` challenge:
 //!
-//! - missing / malformed / bad-signature / expired / wrong-audience token →
-//!   **401 `UNAUTHENTICATED`**;
+//! - missing / malformed / bad-signature / expired / not-yet-valid /
+//!   wrong-audience token → **401 `UNAUTHENTICATED`**;
 //! - valid token lacking the required scope → **403 `PERMISSION_DENIED`**.
 
-// This is the resource-server surface: it is exercised by the auth tests but not
-// yet reached from any product route (no CAMARA business endpoint is mounted).
-// Phase 1 API modules consume `Claims`/`AuthError`; until then, allow dead code
-// so the release build stays warning-clean.
-#![allow(dead_code)]
+// This is the resource-server surface: the mounted CAMARA business endpoints name
+// `Claims` in their handler signatures to require a verified token and call
+// `Claims::require_scope` for endpoint authorisation, so the whole surface is
+// reached from product routes as well as the auth tests.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -88,6 +90,10 @@ impl Claims {
     }
 
     /// The authenticated client identifier (`client_id` claim), if present.
+    ///
+    /// Part of the `Claims` accessor surface; currently read only by tests and the
+    /// token-introspection helper, so allow it to be otherwise unused.
+    #[allow(dead_code)]
     pub fn client_id(&self) -> Option<&str> {
         self.raw.get("client_id").and_then(Value::as_str)
     }
@@ -100,6 +106,11 @@ impl Claims {
     /// Expiry (`exp`) as a Unix timestamp, if present and numeric.
     fn expires_at(&self) -> Option<u64> {
         self.raw.get("exp").and_then(Value::as_u64)
+    }
+
+    /// Not-before (`nbf`) as a Unix timestamp, if present and numeric.
+    fn not_before(&self) -> Option<u64> {
+        self.raw.get("nbf").and_then(Value::as_u64)
     }
 
     /// Audiences (`aud`), which may be a single string or an array of strings
@@ -125,6 +136,8 @@ pub enum AuthError {
     BadSignature,
     /// The token has expired (`exp` in the past).
     Expired,
+    /// The token is not yet valid (`nbf` in the future).
+    NotYetValid,
     /// The token's `aud` does not include this resource server.
     WrongAudience,
     /// The token is valid but lacks the scope the endpoint requires.
@@ -148,6 +161,10 @@ impl AuthError {
             }
             AuthError::Expired => {
                 r#"Bearer error="invalid_token", error_description="the access token expired""#
+                    .to_string()
+            }
+            AuthError::NotYetValid => {
+                r#"Bearer error="invalid_token", error_description="the access token is not yet valid""#
                     .to_string()
             }
             AuthError::WrongAudience => {
@@ -184,6 +201,11 @@ impl IntoResponse for AuthError {
                 StatusCode::UNAUTHORIZED,
                 "UNAUTHENTICATED",
                 "Request not authenticated: the access token has expired.".to_string(),
+            ),
+            AuthError::NotYetValid => (
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHENTICATED",
+                "Request not authenticated: the access token is not yet valid.".to_string(),
             ),
             AuthError::WrongAudience => (
                 StatusCode::UNAUTHORIZED,
@@ -270,6 +292,15 @@ pub fn verify_token(token: &str, expected_audience: &str, now: u64) -> Result<Cl
         Some(exp) if now < exp => {}
         Some(_) => return Err(AuthError::Expired),
         None => return Err(AuthError::Malformed),
+    }
+
+    // Not-before — optional for an `at+jwt` access token, but if present the token
+    // MUST NOT be accepted before it (RFC 7519 §4.1.5): valid only when the clock
+    // is at or after `nbf`.
+    if let Some(nbf) = claims.not_before() {
+        if now < nbf {
+            return Err(AuthError::NotYetValid);
+        }
     }
 
     // Audience — the token must be intended for this resource server.
@@ -365,6 +396,34 @@ mod tests {
     }
 
     #[test]
+    fn not_before_in_the_future_is_rejected() {
+        // Token valid until exp=2000 but not before nbf=1000; at now=500 it is
+        // correctly signed and unexpired yet must be rejected as not-yet-valid.
+        let mut c = claims(2_000, json!(AUD), "s1");
+        c["nbf"] = json!(1_000);
+        let token = mint(c);
+        assert_eq!(verify_token(&token, AUD, 500), Err(AuthError::NotYetValid));
+        assert_eq!(verify_token(&token, AUD, 999), Err(AuthError::NotYetValid));
+    }
+
+    #[test]
+    fn not_before_at_or_after_now_is_accepted() {
+        let mut c = claims(2_000, json!(AUD), "s1");
+        c["nbf"] = json!(1_000);
+        let token = mint(c);
+        // Valid exactly at nbf (the boundary is inclusive) and after it.
+        assert!(verify_token(&token, AUD, 1_000).is_ok());
+        assert!(verify_token(&token, AUD, 1_500).is_ok());
+    }
+
+    #[test]
+    fn absent_nbf_is_accepted() {
+        // The base `claims` helper sets no `nbf`; verification must not require it.
+        let token = mint(claims(1_000, json!(AUD), "s1"));
+        assert!(verify_token(&token, AUD, 500).is_ok());
+    }
+
+    #[test]
     fn missing_exp_is_malformed() {
         let token = mint(json!({ "aud": AUD, "scope": "" }));
         assert_eq!(verify_token(&token, AUD, 500), Err(AuthError::Malformed));
@@ -431,6 +490,8 @@ mod tests {
     fn error_responses_carry_www_authenticate_challenge() {
         assert_eq!(AuthError::Missing.challenge(), "Bearer");
         assert!(AuthError::Expired.challenge().contains("invalid_token"));
+        assert!(AuthError::NotYetValid.challenge().contains("invalid_token"));
+        assert!(AuthError::NotYetValid.challenge().contains("not yet valid"));
         assert!(AuthError::InsufficientScope("s".into())
             .challenge()
             .contains(r#"scope="s""#));
