@@ -16,9 +16,12 @@ info:
     issued here as an HTTP Bearer credential (RFC 6750), and the simulator verifies
     it before serving the request. The verification middleware checks:
 
-      - **Signature** — the JWT header `alg` must be exactly `RS256` (an `alg: none`
-        or HMAC token is rejected outright) and the signature must verify under the
-        public key published at `/oauth2/jwks`.
+      - **Header** — the JWT header `alg` must be exactly `RS256` (an `alg: none`
+        or HMAC token is rejected outright), and the `typ` must be the RFC 9068 §4
+        access-token type `at+jwt` (or `application/at+jwt`), so a JWT minted for
+        another purpose (an ID token, a `private_key_jwt` client assertion) is not
+        accepted here. The signature must then verify under the public key
+        published at `/oauth2/jwks`.
       - **Expiry** — `exp` is required and must be in the future.
       - **Not-before** — `nbf` is optional, but if present the token is rejected
         until the server clock reaches it (RFC 7519 §4.1.5).
@@ -28,8 +31,9 @@ info:
         scope (e.g. `dpv:FraudPreventionAndDetection#check-sim-swap`).
 
     On failure the response is the CAMARA error body (`CamaraError`) with an
-    RFC 6750 `WWW-Authenticate` challenge: a missing / malformed / bad-signature /
-    expired / not-yet-valid / wrong-audience token yields **401 `UNAUTHENTICATED`**;
+    RFC 6750 `WWW-Authenticate` challenge: a missing / malformed / wrong-type
+    (`typ` not `at+jwt`) / bad-signature / expired / not-yet-valid / wrong-audience
+    token yields **401 `UNAUTHENTICATED`**;
     a valid token lacking the required scope yields **403 `PERMISSION_DENIED`**. The reusable
     `securitySchemes.camaraOAuth`, `responses.Unauthenticated`, and
     `responses.PermissionDenied` below are referenced by the individual API specs.
@@ -462,14 +466,16 @@ components:
       description: |
         CAMARA OpenID Connect. Clients obtain an access token from `/oauth2/token`
         (see the token endpoint) and present it as `Authorization: Bearer <jwt>`.
-        The token is an RS256 JWT verifiable against `/oauth2/jwks`; the resource
-        server enforces signature, `exp`, `aud`, and the endpoint's required scope.
+        The token is an RS256 JWT with an `at+jwt` header, verifiable against
+        `/oauth2/jwks`; the resource server enforces the `typ`, signature, `exp`,
+        `aud`, and the endpoint's required scope.
       openIdConnectUrl: /.well-known/openid-configuration
   responses:
     Unauthenticated:
       description: |
-        The access token is missing, malformed, badly signed, expired, not yet
-        valid (`nbf`), or intended for a different audience. Carries an RFC 6750
+        The access token is missing, malformed, not an `at+jwt` access token,
+        badly signed, expired, not yet valid (`nbf`), or intended for a different
+        audience. Carries an RFC 6750
         `WWW-Authenticate: Bearer` challenge (with `error="invalid_token"` when a
         token was presented).
       headers:

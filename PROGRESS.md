@@ -50,6 +50,18 @@ Verified sub-items:
   module comment claiming no business endpoint consumes `Claims` corrected (60 do).
   Still to verify: `client_credentials`/`authorization_code`+PKCE/CIBA grant paths
   and scope/purpose mapping end to end.
+- ✅ Resource-server explicit typing (RFC 9068 §4): `verify_token`
+  (`src/auth/verify.rs`) now requires the JWT `typ` header be `at+jwt` (or
+  `application/at+jwt`, matched case-insensitively) — a well-formed but wrong-type
+  JWT (an ID token, a `private_key_jwt` client assertion) is rejected 401
+  `UNAUTHENTICATED` (`AuthError::WrongType`), closing the RFC 8725 §3.11
+  cross-JWT-confusion gap. The token endpoint already stamps `typ: at+jwt`, so no
+  issued token is affected. `specs/auth` middleware checklist + 401 description
+  updated in the same pass. 4 new tests. No new dependency. **Auth grant paths
+  (`client_credentials`, `authorization_code`+PKCE, CIBA) reviewed this pass and
+  found faithful & well-tested; scope/purpose *grammar* gating confirmed at all
+  three request points.** Remaining Phase 0 verify item: end-to-end scope→purpose
+  mapping documentation per endpoint.
 
 ### Phase 1 — Stateless, non-spatial (identity/number)
 - ✅ number-verification v1
@@ -140,6 +152,19 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-09-26 — Phase 0 auth pass: enforced RFC 9068 §4 explicit typing in the
+  resource-server verifier (`src/auth/verify.rs`). The verifier pinned `alg=RS256`
+  but never checked the JWT `typ`; it now requires `at+jwt` (or `application/at+jwt`,
+  case-insensitive) and rejects anything else 401 `UNAUTHENTICATED`
+  (new `AuthError::WrongType`), so a JWT minted for another purpose (an ID token, a
+  `private_key_jwt` client assertion) cannot be replayed as an access token
+  (RFC 8725 §3.11 cross-JWT confusion). All issued tokens already carry
+  `typ: at+jwt`, so none is affected. Updated the `specs/auth` middleware checklist,
+  the securityScheme note, and the 401 `Unauthenticated` description in the same
+  pass. Reviewed the three grant paths (`client_credentials`, `authorization_code`
+  +PKCE, CIBA) and the purpose-scope grammar gating — found faithful and
+  well-tested. 4 new tests. `cargo test` green: 3044 passed, 0 failed.
+  `cargo build --release` green; binary = 5,330,776 bytes (+192 B, no new dependency).
 - 2026-09-26 — Phase 0 auth pass: closed an OIDC discovery conformance gap.
   Discovery advertised `private_key_jwt` in `token_endpoint_auth_methods_supported`
   but omitted `token_endpoint_auth_signing_alg_values_supported`, which OIDC

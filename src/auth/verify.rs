@@ -10,10 +10,14 @@
 //!
 //! For a presented `Authorization: Bearer <jwt>`:
 //!
-//! 1. **Signature** — the JWT is `RS256`-signed by the simulator's key. The
-//!    header `alg` must be exactly `RS256` (an `alg: none` or HMAC token is
-//!    rejected outright), and the signature must verify under the public half of
-//!    the bundled key published at `/oauth2/jwks` ([`keys::verify_rs256`]).
+//! 1. **Header** — the JWT must be an RS256-signed access token. The header
+//!    `alg` must be exactly `RS256` (an `alg: none` or HMAC token is rejected
+//!    outright), and the `typ` must be the explicit access-token type RFC 9068
+//!    §4 mandates — `at+jwt` (or `application/at+jwt`), matched case-insensitively
+//!    — so a JWT minted for another purpose (an ID token, a `private_key_jwt`
+//!    client assertion) is not accepted as an access token here. The signature
+//!    must then verify under the public half of the bundled key published at
+//!    `/oauth2/jwks` ([`keys::verify_rs256`]).
 //! 2. **Expiry** — `exp` is required (RFC 9068 `at+jwt`) and must be in the
 //!    future relative to the server clock.
 //! 3. **Not-before** — `nbf` is optional, but if present the token must not be
@@ -34,7 +38,7 @@
 //! Failures map to the CAMARA error body `{ status, code, message }` with an
 //! RFC 6750 `WWW-Authenticate` challenge:
 //!
-//! - missing / malformed / bad-signature / expired / not-yet-valid /
+//! - missing / malformed / wrong-type / bad-signature / expired / not-yet-valid /
 //!   wrong-audience token → **401 `UNAUTHENTICATED`**;
 //! - valid token lacking the required scope → **403 `PERMISSION_DENIED`**.
 
@@ -132,6 +136,9 @@ pub enum AuthError {
     /// The credential is not a well-formed RS256 JWT (bad structure, non-RS256
     /// `alg`, undecodable segment, or a missing required claim).
     Malformed,
+    /// The JWT is well-formed but is not an access token: its `typ` header is not
+    /// the RFC 9068 `at+jwt` (or `application/at+jwt`) explicit type.
+    WrongType,
     /// The signature did not verify under the JWKS key.
     BadSignature,
     /// The token has expired (`exp` in the past).
@@ -153,6 +160,10 @@ impl AuthError {
             AuthError::Missing => "Bearer".to_string(),
             AuthError::Malformed => {
                 r#"Bearer error="invalid_token", error_description="malformed access token""#
+                    .to_string()
+            }
+            AuthError::WrongType => {
+                r#"Bearer error="invalid_token", error_description="not an at+jwt access token""#
                     .to_string()
             }
             AuthError::BadSignature => {
@@ -191,6 +202,12 @@ impl IntoResponse for AuthError {
                 StatusCode::UNAUTHORIZED,
                 "UNAUTHENTICATED",
                 "Request not authenticated: the access token is malformed.".to_string(),
+            ),
+            AuthError::WrongType => (
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHENTICATED",
+                "Request not authenticated: the credential is not an at+jwt access token."
+                    .to_string(),
             ),
             AuthError::BadSignature => (
                 StatusCode::UNAUTHORIZED,
@@ -246,6 +263,20 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     (!token.is_empty()).then_some(token)
 }
 
+/// Whether a JWT `typ` header value denotes an RFC 9068 access token: `at+jwt`,
+/// optionally with the `application/` prefix the media type may carry, matched
+/// case-insensitively (media types are case-insensitive, RFC 7515 §4.1.9).
+fn is_at_jwt_typ(typ: &str) -> bool {
+    let bare = match typ.split_once('/') {
+        // A media type with a `type/` prefix: only `application/` is meaningful.
+        Some((scheme, subtype)) if scheme.eq_ignore_ascii_case("application") => subtype,
+        Some(_) => return false,
+        // No prefix: the header carried just the subtype (the common case).
+        None => typ,
+    };
+    bare.eq_ignore_ascii_case("at+jwt")
+}
+
 /// Decode a base64url (no-pad) JWT segment as JSON.
 fn decode_segment(segment: &str) -> Option<Value> {
     let bytes = URL_SAFE_NO_PAD.decode(segment).ok()?;
@@ -272,6 +303,15 @@ pub fn verify_token(token: &str, expected_audience: &str, now: u64) -> Result<Cl
     let header = decode_segment(header_b64).ok_or(AuthError::Malformed)?;
     if header.get("alg").and_then(Value::as_str) != Some(keys::SIGNING_ALG) {
         return Err(AuthError::Malformed);
+    }
+
+    // Explicit typing (RFC 9068 §4): an access token MUST carry `typ: at+jwt`
+    // (or `application/at+jwt`). Rejecting anything else stops a JWT minted for a
+    // different purpose — an ID token, a `private_key_jwt` client assertion — from
+    // being replayed here as an access token (RFC 8725 §3.11).
+    match header.get("typ").and_then(Value::as_str) {
+        Some(typ) if is_at_jwt_typ(typ) => {}
+        _ => return Err(AuthError::WrongType),
     }
 
     // Signature over the exact `header.claims` bytes.
@@ -345,7 +385,16 @@ mod tests {
     /// Mint a token signed with the bundled key, exactly as the token endpoint
     /// does (RS256 / `at+jwt`), so verification exercises the real signature path.
     fn mint(claims: Value) -> String {
-        let header = json!({ "alg": "RS256", "typ": "at+jwt", "kid": keys::SIGNING_KID });
+        mint_with_typ(claims, Some("at+jwt"))
+    }
+
+    /// As [`mint`], but with a caller-chosen header `typ` (or none when `None`),
+    /// to exercise the RFC 9068 §4 explicit-typing check.
+    fn mint_with_typ(claims: Value, typ: Option<&str>) -> String {
+        let mut header = json!({ "alg": "RS256", "kid": keys::SIGNING_KID });
+        if let Some(t) = typ {
+            header["typ"] = json!(t);
+        }
         let h = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
         let c = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
         let signing_input = format!("{h}.{c}");
@@ -424,6 +473,47 @@ mod tests {
     }
 
     #[test]
+    fn typ_jwt_is_rejected_as_wrong_type() {
+        // A `typ: JWT` token (an ID token, or a private_key_jwt client assertion)
+        // is correctly signed and unexpired, but is not an at+jwt access token, so
+        // it must not be accepted at a protected endpoint (RFC 9068 §4).
+        let token = mint_with_typ(claims(1_000, json!(AUD), "s1"), Some("JWT"));
+        assert_eq!(verify_token(&token, AUD, 500), Err(AuthError::WrongType));
+    }
+
+    #[test]
+    fn missing_typ_is_rejected_as_wrong_type() {
+        let token = mint_with_typ(claims(1_000, json!(AUD), "s1"), None);
+        assert_eq!(verify_token(&token, AUD, 500), Err(AuthError::WrongType));
+    }
+
+    #[test]
+    fn application_prefixed_and_mixed_case_typ_are_accepted() {
+        // RFC 9068 permits `application/at+jwt`, and media-type matching is
+        // case-insensitive (RFC 7515 §4.1.9), so these all denote an access token.
+        for typ in ["application/at+jwt", "AT+JWT", "application/AT+JWT"] {
+            let token = mint_with_typ(claims(1_000, json!(AUD), ""), Some(typ));
+            assert!(
+                verify_token(&token, AUD, 500).is_ok(),
+                "typ {typ:?} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn is_at_jwt_typ_matches_only_the_rfc_9068_forms() {
+        assert!(is_at_jwt_typ("at+jwt"));
+        assert!(is_at_jwt_typ("AT+JWT"));
+        assert!(is_at_jwt_typ("application/at+jwt"));
+        assert!(is_at_jwt_typ("Application/at+jwt"));
+        // Not an access token type.
+        assert!(!is_at_jwt_typ("jwt"));
+        assert!(!is_at_jwt_typ("JWT"));
+        assert!(!is_at_jwt_typ("foo/at+jwt"));
+        assert!(!is_at_jwt_typ(""));
+    }
+
+    #[test]
     fn missing_exp_is_malformed() {
         let token = mint(json!({ "aud": AUD, "scope": "" }));
         assert_eq!(verify_token(&token, AUD, 500), Err(AuthError::Malformed));
@@ -489,6 +579,8 @@ mod tests {
     #[test]
     fn error_responses_carry_www_authenticate_challenge() {
         assert_eq!(AuthError::Missing.challenge(), "Bearer");
+        assert!(AuthError::WrongType.challenge().contains("invalid_token"));
+        assert!(AuthError::WrongType.challenge().contains("at+jwt"));
         assert!(AuthError::Expired.challenge().contains("invalid_token"));
         assert!(AuthError::NotYetValid.challenge().contains("invalid_token"));
         assert!(AuthError::NotYetValid.challenge().contains("not yet valid"));
