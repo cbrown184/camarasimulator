@@ -38,6 +38,12 @@ Verified sub-items:
   `client_secret_basic` → `client_secret_post` → `private_key_jwt`. Spec request
   bodies (`TokenRequest`, `BackchannelAuthenticationRequest`) gained
   `client_assertion`/`client_assertion_type`. 6 new tests. No new dependency.
+- ✅ Discovery advertises `token_endpoint_auth_signing_alg_values_supported`
+  (`["RS256"]`). OIDC Discovery 1.0 §3 makes this metadata entry mandatory once
+  `private_key_jwt` is listed in `token_endpoint_auth_methods_supported` (which it
+  is), and `none` MUST NOT appear. Added to `metadata()` (`src/auth/mod.rs`) and
+  the vendored `specs/auth` discovery example + `OpenIdConfiguration` schema in the
+  same pass. 1 new test. No new dependency.
 - ✅ Resource-server temporal validation (`src/auth/verify.rs`): `exp` enforced;
   `nbf` (not-before, RFC 7519 §4.1.5) now enforced when present → 401
   `UNAUTHENTICATED` (`AuthError::NotYetValid`), documented in `specs/auth`. Stale
@@ -134,6 +140,16 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-09-26 — Phase 0 auth pass: closed an OIDC discovery conformance gap.
+  Discovery advertised `private_key_jwt` in `token_endpoint_auth_methods_supported`
+  but omitted `token_endpoint_auth_signing_alg_values_supported`, which OIDC
+  Discovery 1.0 §3 REQUIRES whenever `private_key_jwt`/`client_secret_jwt` is
+  advertised (and where `none` MUST NOT appear). Added the field as `["RS256"]` to
+  `metadata()` (`src/auth/mod.rs`) — matching the bundled RS256 signing/verification
+  key — and updated the vendored `specs/auth` discovery example and the
+  `OpenIdConfiguration` schema in the same pass. 1 new test. `cargo test` green:
+  3040 passed, 0 failed. `cargo build --release` green; binary = 5,330,584 bytes
+  (+64 B, no new dependency).
 - 2026-09-26 — Bootstrap pass: `docs/AGENT.md` and `PROGRESS.md` were missing;
   reconstructed both from `docs/DESIGN.md`, `src/registry.rs`, and the on-disk
   layout. Inventoried 61 mounted APIs by phase. No code/spec behaviour changed.

@@ -84,7 +84,10 @@ pub fn base_url(headers: &HeaderMap) -> String {
 /// Advertises the full CAMARA auth surface from docs/DESIGN.md §6: the three
 /// grant types (`client_credentials`, `authorization_code`, CIBA), RS256 token
 /// signing, S256 PKCE, and CIBA poll delivery. Endpoints are absolute URLs under
-/// `base`. Later passes implement each advertised endpoint.
+/// `base`. Because `private_key_jwt` is an advertised client-auth method, the
+/// document also carries `token_endpoint_auth_signing_alg_values_supported`
+/// (`["RS256"]`), which OIDC Discovery 1.0 §3 makes mandatory in that case.
+/// Later passes implement each advertised endpoint.
 pub fn metadata(base: &str) -> Value {
     json!({
         "issuer": base,
@@ -103,6 +106,12 @@ pub fn metadata(base: &str) -> Value {
             "client_secret_post",
             "private_key_jwt"
         ],
+        // OIDC Discovery 1.0 §3 requires this whenever `private_key_jwt` (or
+        // `client_secret_jwt`) is advertised: the JWS algs the token endpoint
+        // accepts for a `client_assertion` signature. The simulator signs and
+        // verifies everything with its bundled RS256 key, and `none` MUST NOT
+        // appear here.
+        "token_endpoint_auth_signing_alg_values_supported": ["RS256"],
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["RS256"],
         "code_challenge_methods_supported": ["S256"],
@@ -196,6 +205,24 @@ mod tests {
             .unwrap()
             .iter()
             .any(|a| a == "S256"));
+    }
+
+    #[test]
+    fn metadata_advertises_token_auth_signing_algs_for_private_key_jwt() {
+        // OIDC Discovery 1.0 §3: token_endpoint_auth_signing_alg_values_supported
+        // MUST be present when private_key_jwt (or client_secret_jwt) is an
+        // advertised client-auth method, SHOULD list RS256, and MUST NOT list none.
+        let m = metadata("http://localhost:8080");
+        let methods = m["token_endpoint_auth_methods_supported"]
+            .as_array()
+            .unwrap();
+        assert!(methods.iter().any(|a| a == "private_key_jwt"));
+
+        let algs = m["token_endpoint_auth_signing_alg_values_supported"]
+            .as_array()
+            .expect("required when private_key_jwt is advertised");
+        assert!(algs.iter().any(|a| a == "RS256"));
+        assert!(!algs.iter().any(|a| a == "none"));
     }
 
     #[tokio::test]
