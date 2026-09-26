@@ -50,6 +50,17 @@ Verified sub-items:
   module comment claiming no business endpoint consumes `Claims` corrected (60 do).
   Still to verify: `client_credentials`/`authorization_code`+PKCE/CIBA grant paths
   and scope/purpose mapping end to end.
+- ✅ Resource-server issuer validation (RFC 9068 §4): `verify_token`
+  (`src/auth/verify.rs`) now requires the JWT `iss` claim to exactly match this
+  deployment's issuer identifier (the request-derived base URL, the same value the
+  token endpoint stamps as `iss` on every grant). A correctly signed, unexpired
+  token whose `aud` matches but whose `iss` is foreign or absent is rejected 401
+  `UNAUTHENTICATED` (`AuthError::WrongIssuer`) — the issuer check is orthogonal to
+  the audience check (`aud` = intended recipient, `iss` = trusted minter). The
+  extractor passes the base URL as both expected issuer and audience.
+  `verify_token` gained an `expected_issuer` parameter. `specs/auth` middleware
+  checklist, securityScheme note, and 401 `Unauthenticated` description updated in
+  the same pass. 3 new tests. No new dependency.
 - ✅ Resource-server explicit typing (RFC 9068 §4): `verify_token`
   (`src/auth/verify.rs`) now requires the JWT `typ` header be `at+jwt` (or
   `application/at+jwt`, matched case-insensitively) — a well-formed but wrong-type
@@ -152,6 +163,21 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-09-26 — Phase 0 auth pass: enforced RFC 9068 §4 issuer validation in the
+  resource-server verifier (`src/auth/verify.rs`). The verifier checked `alg`,
+  `typ`, signature, `exp`, `nbf`, and `aud` but never validated `iss`, the last
+  RFC 9068 §4 check missing. It now requires the JWT `iss` to exactly match the
+  deployment's issuer identifier (the request-derived base URL, the same value the
+  token endpoint stamps as `iss` on all three grants); a token whose `aud` matches
+  but whose `iss` is foreign or absent is rejected 401 `UNAUTHENTICATED`
+  (new `AuthError::WrongIssuer`). The check is orthogonal to the audience check —
+  `aud` proves intended recipient, `iss` proves trusted minter. `verify_token`
+  gained an `expected_issuer` parameter; the extractor passes the base URL as both
+  expected issuer and audience. Updated the `specs/auth` middleware checklist, the
+  securityScheme enforcement note, and the 401 `Unauthenticated` description in the
+  same pass. 3 new tests. `cargo test` green: 3047 passed, 0 failed.
+  `cargo build --release` green; binary = 5,330,648 bytes (−128 B vs. prior, no new
+  dependency).
 - 2026-09-26 — Phase 0 auth pass: enforced RFC 9068 §4 explicit typing in the
   resource-server verifier (`src/auth/verify.rs`). The verifier pinned `alg=RS256`
   but never checked the JWT `typ`; it now requires `at+jwt` (or `application/at+jwt`,

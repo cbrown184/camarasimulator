@@ -27,6 +27,12 @@
 //!    the issuer base URL derived from the request (the same value the token
 //!    endpoint stamps as `aud`), so a token minted for one host is not accepted
 //!    by another.
+//! 5. **Issuer** — `iss` must exactly match this deployment's issuer identifier,
+//!    the same base URL derived from the request (RFC 9068 §4). The token endpoint
+//!    stamps `iss` with that base URL on every grant, so a token minted by a
+//!    different issuer — even one carrying a matching `aud` — is rejected. This is
+//!    orthogonal to the audience check: `aud` proves the token was *intended for*
+//!    this resource server, `iss` proves it was *minted by* the issuer it trusts.
 //!
 //! **Scope** is enforced per-endpoint by the handler, not by the extractor: a
 //! protected handler calls [`Claims::require_scope`] with the scope its endpoint
@@ -39,7 +45,7 @@
 //! RFC 6750 `WWW-Authenticate` challenge:
 //!
 //! - missing / malformed / wrong-type / bad-signature / expired / not-yet-valid /
-//!   wrong-audience token → **401 `UNAUTHENTICATED`**;
+//!   wrong-audience / wrong-issuer token → **401 `UNAUTHENTICATED`**;
 //! - valid token lacking the required scope → **403 `PERMISSION_DENIED`**.
 
 // This is the resource-server surface: the mounted CAMARA business endpoints name
@@ -117,6 +123,11 @@ impl Claims {
         self.raw.get("nbf").and_then(Value::as_u64)
     }
 
+    /// Issuer (`iss`), if present and a string (RFC 7519 §4.1.1).
+    fn issuer(&self) -> Option<&str> {
+        self.raw.get("iss").and_then(Value::as_str)
+    }
+
     /// Audiences (`aud`), which may be a single string or an array of strings
     /// (RFC 7519 §4.1.3).
     fn audiences(&self) -> Vec<&str> {
@@ -147,6 +158,8 @@ pub enum AuthError {
     NotYetValid,
     /// The token's `aud` does not include this resource server.
     WrongAudience,
+    /// The token's `iss` does not match this deployment's issuer (RFC 9068 §4).
+    WrongIssuer,
     /// The token is valid but lacks the scope the endpoint requires.
     InsufficientScope(String),
 }
@@ -180,6 +193,10 @@ impl AuthError {
             }
             AuthError::WrongAudience => {
                 r#"Bearer error="invalid_token", error_description="token audience does not match this resource server""#
+                    .to_string()
+            }
+            AuthError::WrongIssuer => {
+                r#"Bearer error="invalid_token", error_description="token issuer does not match this deployment""#
                     .to_string()
             }
             AuthError::InsufficientScope(scope) => {
@@ -228,6 +245,12 @@ impl IntoResponse for AuthError {
                 StatusCode::UNAUTHORIZED,
                 "UNAUTHENTICATED",
                 "Request not authenticated: the access token audience does not match this server."
+                    .to_string(),
+            ),
+            AuthError::WrongIssuer => (
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHENTICATED",
+                "Request not authenticated: the access token issuer does not match this server."
                     .to_string(),
             ),
             AuthError::InsufficientScope(scope) => (
@@ -283,12 +306,20 @@ fn decode_segment(segment: &str) -> Option<Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Verify a bearer token against `expected_audience` at time `now`.
+/// Verify a bearer token issued by `expected_issuer` and intended for
+/// `expected_audience`, at time `now`.
 ///
 /// This is the pure core of the middleware: no I/O, no clock — the caller
 /// supplies `now` so the checks are deterministic under test. The extractor
-/// wraps this with the request headers and the server clock.
-pub fn verify_token(token: &str, expected_audience: &str, now: u64) -> Result<Claims, AuthError> {
+/// wraps this with the request headers and the server clock. In this single-node
+/// simulator the issuer and audience the resource server expects are the same
+/// value (its own base URL), but they are checked independently per RFC 9068 §4.
+pub fn verify_token(
+    token: &str,
+    expected_issuer: &str,
+    expected_audience: &str,
+    now: u64,
+) -> Result<Claims, AuthError> {
     // A JWS compact token is exactly three dot-separated segments.
     let mut segments = token.split('.');
     let (header_b64, claims_b64, sig_b64) =
@@ -348,6 +379,13 @@ pub fn verify_token(token: &str, expected_audience: &str, now: u64) -> Result<Cl
         return Err(AuthError::WrongAudience);
     }
 
+    // Issuer — the token must have been minted by the issuer this deployment
+    // trusts (RFC 9068 §4). Distinct from the audience check: a token with a
+    // matching `aud` but a foreign (or absent) `iss` is still rejected.
+    if claims.issuer() != Some(expected_issuer) {
+        return Err(AuthError::WrongIssuer);
+    }
+
     Ok(claims)
 }
 
@@ -360,8 +398,9 @@ fn unix_now() -> u64 {
 }
 
 /// [`Claims`] is an axum extractor: a protected handler names it to require a
-/// verified access token. The expected audience is the request's own base URL
-/// (the resource server's identifier), matching what the token endpoint stamps.
+/// verified access token. The expected issuer and audience are both the request's
+/// own base URL (the resource server's identifier), matching what the token
+/// endpoint stamps as `iss`/`aud`.
 #[axum::async_trait]
 impl<S> FromRequestParts<S> for Claims
 where
@@ -371,8 +410,11 @@ where
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let token = bearer_token(&parts.headers).ok_or(AuthError::Missing)?;
-        let audience = base_url(&parts.headers);
-        verify_token(token, &audience, unix_now())
+        // The resource server's own base URL is both the issuer it trusts and the
+        // audience it expects (single-node simulator; the token endpoint stamps
+        // both with this value).
+        let base = base_url(&parts.headers);
+        verify_token(token, &base, &base, unix_now())
     }
 }
 
@@ -417,7 +459,7 @@ mod tests {
     #[test]
     fn valid_token_verifies_and_exposes_claims() {
         let token = mint(claims(1_000, json!(AUD), "s1 s2"));
-        let c = verify_token(&token, AUD, 500).expect("valid token verifies");
+        let c = verify_token(&token, AUD, AUD, 500).expect("valid token verifies");
         assert_eq!(c.client_id(), Some("client-1"));
         assert_eq!(c.subject(), Some("client-1"));
         assert!(c.has_scope("s1"));
@@ -428,20 +470,56 @@ mod tests {
     #[test]
     fn audience_may_be_an_array_containing_this_server() {
         let token = mint(claims(1_000, json!(["other", AUD]), ""));
-        assert!(verify_token(&token, AUD, 500).is_ok());
+        assert!(verify_token(&token, AUD, AUD, 500).is_ok());
     }
 
     #[test]
     fn wrong_audience_is_rejected() {
         let token = mint(claims(1_000, json!("http://elsewhere"), ""));
-        assert_eq!(verify_token(&token, AUD, 500), Err(AuthError::WrongAudience));
+        assert_eq!(verify_token(&token, AUD, AUD, 500), Err(AuthError::WrongAudience));
+    }
+
+    #[test]
+    fn wrong_issuer_is_rejected() {
+        // A correctly signed, unexpired token whose `aud` matches this server but
+        // whose `iss` is a different issuer must be rejected (RFC 9068 §4): a
+        // matching audience does not excuse an untrusted issuer.
+        let mut c = claims(1_000, json!(AUD), "s1");
+        c["iss"] = json!("http://evil-issuer.example");
+        let token = mint(c);
+        assert_eq!(verify_token(&token, AUD, AUD, 500), Err(AuthError::WrongIssuer));
+    }
+
+    #[test]
+    fn absent_issuer_is_rejected() {
+        // `iss` is REQUIRED for an at+jwt access token (RFC 9068 §2.2); a token
+        // lacking it cannot match the expected issuer and is rejected.
+        let mut c = claims(1_000, json!(AUD), "s1");
+        c.as_object_mut().unwrap().remove("iss");
+        let token = mint(c);
+        assert_eq!(verify_token(&token, AUD, AUD, 500), Err(AuthError::WrongIssuer));
+    }
+
+    #[test]
+    fn issuer_check_is_independent_of_audience() {
+        // Both the issuer and audience the resource server expects are its own
+        // base URL, but they are matched against the token's own `iss`/`aud`
+        // independently: a token good on both passes; a mismatch on the expected
+        // issuer alone still fails.
+        let token = mint(claims(1_000, json!(AUD), "s1"));
+        assert!(verify_token(&token, AUD, AUD, 500).is_ok());
+        // Expecting a different issuer than the token carries → rejected.
+        assert_eq!(
+            verify_token(&token, "http://other-issuer", AUD, 500),
+            Err(AuthError::WrongIssuer)
+        );
     }
 
     #[test]
     fn expired_token_is_rejected() {
         let token = mint(claims(1_000, json!(AUD), ""));
-        assert_eq!(verify_token(&token, AUD, 1_000), Err(AuthError::Expired));
-        assert_eq!(verify_token(&token, AUD, 2_000), Err(AuthError::Expired));
+        assert_eq!(verify_token(&token, AUD, AUD, 1_000), Err(AuthError::Expired));
+        assert_eq!(verify_token(&token, AUD, AUD, 2_000), Err(AuthError::Expired));
     }
 
     #[test]
@@ -451,8 +529,8 @@ mod tests {
         let mut c = claims(2_000, json!(AUD), "s1");
         c["nbf"] = json!(1_000);
         let token = mint(c);
-        assert_eq!(verify_token(&token, AUD, 500), Err(AuthError::NotYetValid));
-        assert_eq!(verify_token(&token, AUD, 999), Err(AuthError::NotYetValid));
+        assert_eq!(verify_token(&token, AUD, AUD, 500), Err(AuthError::NotYetValid));
+        assert_eq!(verify_token(&token, AUD, AUD, 999), Err(AuthError::NotYetValid));
     }
 
     #[test]
@@ -461,15 +539,15 @@ mod tests {
         c["nbf"] = json!(1_000);
         let token = mint(c);
         // Valid exactly at nbf (the boundary is inclusive) and after it.
-        assert!(verify_token(&token, AUD, 1_000).is_ok());
-        assert!(verify_token(&token, AUD, 1_500).is_ok());
+        assert!(verify_token(&token, AUD, AUD, 1_000).is_ok());
+        assert!(verify_token(&token, AUD, AUD, 1_500).is_ok());
     }
 
     #[test]
     fn absent_nbf_is_accepted() {
         // The base `claims` helper sets no `nbf`; verification must not require it.
         let token = mint(claims(1_000, json!(AUD), "s1"));
-        assert!(verify_token(&token, AUD, 500).is_ok());
+        assert!(verify_token(&token, AUD, AUD, 500).is_ok());
     }
 
     #[test]
@@ -478,13 +556,13 @@ mod tests {
         // is correctly signed and unexpired, but is not an at+jwt access token, so
         // it must not be accepted at a protected endpoint (RFC 9068 §4).
         let token = mint_with_typ(claims(1_000, json!(AUD), "s1"), Some("JWT"));
-        assert_eq!(verify_token(&token, AUD, 500), Err(AuthError::WrongType));
+        assert_eq!(verify_token(&token, AUD, AUD, 500), Err(AuthError::WrongType));
     }
 
     #[test]
     fn missing_typ_is_rejected_as_wrong_type() {
         let token = mint_with_typ(claims(1_000, json!(AUD), "s1"), None);
-        assert_eq!(verify_token(&token, AUD, 500), Err(AuthError::WrongType));
+        assert_eq!(verify_token(&token, AUD, AUD, 500), Err(AuthError::WrongType));
     }
 
     #[test]
@@ -494,7 +572,7 @@ mod tests {
         for typ in ["application/at+jwt", "AT+JWT", "application/AT+JWT"] {
             let token = mint_with_typ(claims(1_000, json!(AUD), ""), Some(typ));
             assert!(
-                verify_token(&token, AUD, 500).is_ok(),
+                verify_token(&token, AUD, AUD, 500).is_ok(),
                 "typ {typ:?} should be accepted"
             );
         }
@@ -516,7 +594,7 @@ mod tests {
     #[test]
     fn missing_exp_is_malformed() {
         let token = mint(json!({ "aud": AUD, "scope": "" }));
-        assert_eq!(verify_token(&token, AUD, 500), Err(AuthError::Malformed));
+        assert_eq!(verify_token(&token, AUD, AUD, 500), Err(AuthError::Malformed));
     }
 
     #[test]
@@ -530,7 +608,7 @@ mod tests {
         );
         parts[1] = forged;
         let tampered = parts.join(".");
-        assert_eq!(verify_token(&tampered, AUD, 500), Err(AuthError::BadSignature));
+        assert_eq!(verify_token(&tampered, AUD, AUD, 500), Err(AuthError::BadSignature));
     }
 
     #[test]
@@ -540,15 +618,15 @@ mod tests {
         let payload =
             URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims(1_000, json!(AUD), "")).unwrap());
         let token = format!("{header}.{payload}.");
-        assert_eq!(verify_token(&token, AUD, 500), Err(AuthError::Malformed));
+        assert_eq!(verify_token(&token, AUD, AUD, 500), Err(AuthError::Malformed));
     }
 
     #[test]
     fn structurally_invalid_tokens_are_malformed() {
-        assert_eq!(verify_token("not-a-jwt", AUD, 500), Err(AuthError::Malformed));
-        assert_eq!(verify_token("a.b", AUD, 500), Err(AuthError::Malformed));
-        assert_eq!(verify_token("a.b.c.d", AUD, 500), Err(AuthError::Malformed));
-        assert_eq!(verify_token("$.$.$", AUD, 500), Err(AuthError::Malformed));
+        assert_eq!(verify_token("not-a-jwt", AUD, AUD, 500), Err(AuthError::Malformed));
+        assert_eq!(verify_token("a.b", AUD, AUD, 500), Err(AuthError::Malformed));
+        assert_eq!(verify_token("a.b.c.d", AUD, AUD, 500), Err(AuthError::Malformed));
+        assert_eq!(verify_token("$.$.$", AUD, AUD, 500), Err(AuthError::Malformed));
     }
 
     #[test]
@@ -584,6 +662,8 @@ mod tests {
         assert!(AuthError::Expired.challenge().contains("invalid_token"));
         assert!(AuthError::NotYetValid.challenge().contains("invalid_token"));
         assert!(AuthError::NotYetValid.challenge().contains("not yet valid"));
+        assert!(AuthError::WrongIssuer.challenge().contains("invalid_token"));
+        assert!(AuthError::WrongIssuer.challenge().contains("issuer"));
         assert!(AuthError::InsufficientScope("s".into())
             .challenge()
             .contains(r#"scope="s""#));

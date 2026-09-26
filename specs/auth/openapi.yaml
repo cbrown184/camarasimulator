@@ -27,13 +27,16 @@ info:
         until the server clock reaches it (RFC 7519 §4.1.5).
       - **Audience** — `aud` must contain the resource server's identifier (the
         issuer base URL), so a token minted for one host is not accepted by another.
+      - **Issuer** — `iss` must exactly match this deployment's issuer identifier
+        (the same base URL; RFC 9068 §4). Checked independently of the audience: a
+        token with a matching `aud` but a foreign or absent `iss` is rejected.
       - **Scope** — each endpoint additionally requires its own CAMARA purpose
         scope (e.g. `dpv:FraudPreventionAndDetection#check-sim-swap`).
 
     On failure the response is the CAMARA error body (`CamaraError`) with an
     RFC 6750 `WWW-Authenticate` challenge: a missing / malformed / wrong-type
     (`typ` not `at+jwt`) / bad-signature / expired / not-yet-valid / wrong-audience
-    token yields **401 `UNAUTHENTICATED`**;
+    / wrong-issuer token yields **401 `UNAUTHENTICATED`**;
     a valid token lacking the required scope yields **403 `PERMISSION_DENIED`**. The reusable
     `securitySchemes.camaraOAuth`, `responses.Unauthenticated`, and
     `responses.PermissionDenied` below are referenced by the individual API specs.
@@ -468,14 +471,14 @@ components:
         (see the token endpoint) and present it as `Authorization: Bearer <jwt>`.
         The token is an RS256 JWT with an `at+jwt` header, verifiable against
         `/oauth2/jwks`; the resource server enforces the `typ`, signature, `exp`,
-        `aud`, and the endpoint's required scope.
+        `nbf`, `aud`, `iss`, and the endpoint's required scope.
       openIdConnectUrl: /.well-known/openid-configuration
   responses:
     Unauthenticated:
       description: |
         The access token is missing, malformed, not an `at+jwt` access token,
-        badly signed, expired, not yet valid (`nbf`), or intended for a different
-        audience. Carries an RFC 6750
+        badly signed, expired, not yet valid (`nbf`), intended for a different
+        audience, or minted by a different issuer (`iss`). Carries an RFC 6750
         `WWW-Authenticate: Bearer` challenge (with `error="invalid_token"` when a
         token was presented).
       headers:
