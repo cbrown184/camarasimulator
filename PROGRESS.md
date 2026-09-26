@@ -120,7 +120,7 @@ Respect phase order. Preferred next work:
 - 2026-09-26 — Bootstrap pass: `docs/AGENT.md` and `PROGRESS.md` were missing;
   reconstructed both from `docs/DESIGN.md`, `src/registry.rs`, and the on-disk
   layout. Inventoried 61 mounted APIs by phase. No code/spec behaviour changed.
-  Baseline `cargo test` green: 3030 passed, 0 failed. Release binary size (from
-  `cargo build --release`) recorded in the follow-up commit on this branch.
-  Per-API completeness still to be audited in future passes.
+  Baseline `cargo test` green: 3030 passed, 0 failed. `cargo build --release`
+  green; release binary `target/release/camarasimulator` = 5,323,160 bytes
+  (5.1 MB). Per-API completeness still to be audited in future passes.
 </content>
