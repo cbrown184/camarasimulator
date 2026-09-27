@@ -159,9 +159,16 @@ Respect phase order. Preferred next work:
      is 403 at the endpoint. Previously all 60 business modules tested with
      `client_credentials` tokens only, so the issuance↔verification seam for the two
      interactive grants was never exercised past the token endpoint. 4 new tests, no
-     behaviour/spec change, no new dependency. *Remaining:* repeat the seam check on
-     at least one other three-legged/CIBA business API, and document end-to-end
-     scope→purpose mapping per endpoint.
+     behaviour/spec change, no new dependency.
+   - ✅ Seam check repeated on a second three-legged API, sim-swap v2
+     (`src/apis/sim_swap/v2.rs`): a token minted via the full
+     `authorization_code`+PKCE flow and via CIBA is accepted by `POST /check`
+     (200), a three-legged token granted only `openid` is 403 `PERMISSION_DENIED`
+     at the endpoint, and — with no `phoneNumber` in the body — the synthetic
+     `camarasim-user` subject survives issuance → verification and drives the
+     three-legged identifier fallback (no trailing digits → `swapped=false`). 4 new
+     tests, no behaviour/spec change, no new dependency. *Remaining:* document
+     end-to-end scope→purpose mapping per endpoint.
 2. **Audit Phase 1–3 stable APIs** one at a time: confirm the full CAMARA error
    set and the parameter-driven scenario convention (DESIGN §7) are implemented
    and documented in each endpoint's vendored spec, with contract tests.
@@ -173,6 +180,24 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-09-27 — Phase 0 auth pass: repeated the end-to-end grant→resource-server
+  seam check on a second three-legged API, sim-swap v2 (`src/apis/sim_swap/v2.rs`).
+  The seam was previously proven only on number-verification v1; every other
+  business module (incl. sim-swap) tested with `client_credentials` tokens, so the
+  two interactive grants were never exercised past the token endpoint here. Added 4
+  integration tests that drive both grants through the router (authorize→token with
+  the RFC 7636 PKCE vector; `/bc-authorize`→CIBA token grant), then call
+  `POST /sim-swap/v2/check`: a three-legged token and a CIBA token are accepted
+  (200, `swapped=true` for a recent-swap tail), a three-legged token granted only
+  `openid` is 403 `PERMISSION_DENIED` at the endpoint, and — with no `phoneNumber`
+  in the body — the synthetic `camarasim-user` subject survives issuance →
+  verification and drives sim-swap's three-legged identifier fallback (no trailing
+  digits → `swapped=false`). Test-only change: no behaviour/spec change, no new
+  dependency. `cargo test` green: 3055 passed, 0 failed (+4). `cargo build --release`
+  green; binary = 5,330,648 bytes (unchanged). *Note:* this session began on a
+  detached HEAD at the tip of prior work while local `main` lagged four commits
+  behind `origin/main`; synced local `main` to `origin/main` (which already carried
+  that work) before starting — no lost commits.
 - 2026-09-27 — Phase 0 auth pass: proved the end-to-end grant→resource-server seam.
   The three grant paths were unit-tested at the token endpoint, and business
   endpoints were tested with `client_credentials` tokens, but nothing wired the two
