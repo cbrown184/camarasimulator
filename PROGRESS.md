@@ -152,6 +152,16 @@ Respect phase order. Preferred next work:
 
 1. **Verify Phase 0 auth** end to end (grant types, PKCE, scope/purpose, expiry,
    JWKS, discovery) and record any gaps here as concrete sub-items.
+   - ✅ End-to-end grant→resource-server seam proven on number-verification v1: a
+     token minted via the full `authorization_code`+PKCE flow and via CIBA is now
+     tested to be accepted by a protected **business** endpoint (aud/iss/typ/scope
+     carried through the whole flow), and a three-legged token lacking the API scope
+     is 403 at the endpoint. Previously all 60 business modules tested with
+     `client_credentials` tokens only, so the issuance↔verification seam for the two
+     interactive grants was never exercised past the token endpoint. 4 new tests, no
+     behaviour/spec change, no new dependency. *Remaining:* repeat the seam check on
+     at least one other three-legged/CIBA business API, and document end-to-end
+     scope→purpose mapping per endpoint.
 2. **Audit Phase 1–3 stable APIs** one at a time: confirm the full CAMARA error
    set and the parameter-driven scenario convention (DESIGN §7) are implemented
    and documented in each endpoint's vendored spec, with contract tests.
@@ -163,6 +173,21 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-09-27 — Phase 0 auth pass: proved the end-to-end grant→resource-server seam.
+  The three grant paths were unit-tested at the token endpoint, and business
+  endpoints were tested with `client_credentials` tokens, but nothing wired the two
+  together — no test showed a token minted via the full `authorization_code`+PKCE
+  flow or CIBA being accepted by a protected business endpoint (its `aud`/`iss`/`typ`
+  /`scope` surviving issuance → resource-server verification). Added 4 integration
+  tests to number-verification v1 (`src/apis/number_verification/v1.rs`) that drive
+  both interactive grants through the router (authorize→token redemption with the
+  RFC 7636 PKCE vector; `/bc-authorize`→CIBA token grant), then call `POST /verify`
+  and `GET /device-phone-number`: a three-legged token and a CIBA token are accepted
+  (200), a three-legged token granted only `openid` is 403 `PERMISSION_DENIED` at the
+  endpoint, and the synthetic `camarasim-user` subject yields the default device
+  line. Test-only change: no behaviour/spec change, no new dependency. `cargo test`
+  green: 3051 passed, 0 failed (+4). `cargo build --release` green; binary =
+  5,330,648 bytes (unchanged).
 - 2026-09-26 — Phase 0 auth pass: enforced RFC 9068 §4 issuer validation in the
   resource-server verifier (`src/auth/verify.rs`). The verifier checked `alg`,
   `typ`, signature, `exp`, `nbf`, and `aud` but never validated `iss`, the last

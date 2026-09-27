@@ -518,4 +518,179 @@ mod tests {
             Some("corr-err")
         );
     }
+
+    // --- End-to-end grant → resource-server seam --------------------------
+    //
+    // Number Verification is a three-legged API (module docs): a real client
+    // presents a token obtained via `authorization_code`+PKCE or CIBA, not
+    // `client_credentials`. The tests above mint `client_credentials` tokens for
+    // brevity; the ones below drive the *full* interactive grants through the same
+    // router and then call the protected endpoint, proving the token the flow
+    // issues (its `aud`/`iss`/`typ`/`scope`) is actually accepted by the
+    // resource-server verifier — the seam between auth issuance and endpoint
+    // authorisation, exercised end to end.
+
+    /// Run the three-legged `authorization_code`+PKCE flow through the router and
+    /// return the issued access token. Front leg: `GET /oauth2/authorize`
+    /// auto-consents and redirects with a `code`; back leg: `POST /oauth2/token`
+    /// redeems it with the PKCE `code_verifier`. Host-pinned to [`HOST`] so the
+    /// token's `aud`/`iss` match the business endpoint's audience.
+    async fn mint_three_legged_token(scope: &str) -> String {
+        // Fixed PKCE pair (RFC 7636 Appendix B): verifier and its S256 challenge.
+        const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+        const REDIRECT: &str = "https://app.example/cb";
+
+        let query = serde_urlencoded::to_string([
+            ("response_type", "code"),
+            ("client_id", "nv-3l-client"),
+            ("redirect_uri", REDIRECT),
+            ("scope", scope),
+            ("code_challenge", CHALLENGE),
+            ("code_challenge_method", "S256"),
+        ])
+        .unwrap();
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/oauth2/authorize?{query}"))
+                    .header("host", HOST)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND, "authorize should redirect");
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .expect("authorize redirect Location")
+            .to_string();
+        let q = location.split_once('?').expect("redirect carries a query").1;
+        let pairs: Vec<(String, String)> = serde_urlencoded::from_str(q).unwrap();
+        let code = pairs
+            .into_iter()
+            .find(|(k, _)| k == "code")
+            .expect("redirect carries a code")
+            .1;
+
+        let body = serde_urlencoded::to_string([
+            ("grant_type", "authorization_code"),
+            ("code", &code),
+            ("client_id", "nv-3l-client"),
+            ("redirect_uri", REDIRECT),
+            ("code_verifier", VERIFIER),
+        ])
+        .unwrap();
+        access_token_from(body).await
+    }
+
+    /// Run the CIBA flow through the router and return the issued access token.
+    /// `POST /bc-authorize` (a `login_hint` with no `denied`/`pending` marker
+    /// auto-approves) yields an `auth_req_id`; the CIBA token grant redeems it.
+    /// Host-pinned to [`HOST`] so the token's `aud`/`iss` match the endpoint.
+    async fn mint_ciba_token(scope: &str) -> String {
+        let bc_body = serde_urlencoded::to_string([
+            ("scope", scope),
+            ("client_id", "nv-ciba-client"),
+            ("login_hint", "tel:+123456789012"),
+        ])
+        .unwrap();
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/bc-authorize")
+                    .header("host", HOST)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(bc_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "bc-authorize should succeed");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+        let auth_req_id = json["auth_req_id"]
+            .as_str()
+            .expect("bc-authorize returns an auth_req_id")
+            .to_string();
+
+        let token_body = serde_urlencoded::to_string([
+            ("grant_type", "urn:openid:params:grant-type:ciba"),
+            ("auth_req_id", &auth_req_id),
+            ("client_id", "nv-ciba-client"),
+        ])
+        .unwrap();
+        access_token_from(token_body).await
+    }
+
+    /// POST a urlencoded body to `/oauth2/token` and return the `access_token`.
+    async fn access_token_from(body: String) -> String {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth2/token")
+                    .header("host", HOST)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "token request should succeed");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+        json["access_token"]
+            .as_str()
+            .expect("token response carries an access_token")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn three_legged_token_is_accepted_by_verify() {
+        let token = mint_three_legged_token(VERIFY_SCOPE).await;
+        let (status, _, body) =
+            post_verify(Some(&token), r#"{"phoneNumber":"+123456789012"}"#, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["devicePhoneNumberVerified"], true);
+    }
+
+    #[tokio::test]
+    async fn ciba_token_is_accepted_by_verify() {
+        let token = mint_ciba_token(VERIFY_SCOPE).await;
+        let (status, _, body) =
+            post_verify(Some(&token), r#"{"phoneNumber":"+123456789012"}"#, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["devicePhoneNumberVerified"], true);
+    }
+
+    #[tokio::test]
+    async fn three_legged_token_without_the_scope_is_forbidden_at_verify() {
+        // The scope must survive the whole flow *and* be enforced at the endpoint:
+        // a three-legged token granted only `openid` is authenticated but lacks
+        // this API's scope → 403.
+        let token = mint_three_legged_token("openid").await;
+        let (status, _, body) =
+            post_verify(Some(&token), r#"{"phoneNumber":"+123456789012"}"#, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn three_legged_token_drives_device_phone_number_default_line() {
+        // A three-legged token's subject is the synthetic `camarasim-user`, which
+        // is not an E.164 number → the endpoint returns the default device line.
+        let token = mint_three_legged_token(DEVICE_PHONE_NUMBER_SCOPE).await;
+        let (status, _, body) = get_device_phone_number(Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["devicePhoneNumber"], DEFAULT_DEVICE_NUMBER);
+    }
 }
