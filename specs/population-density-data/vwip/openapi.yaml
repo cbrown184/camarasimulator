@@ -139,10 +139,10 @@ paths:
                         cellPopulationDensityData:
                           - geohash: "u4pruy"
                             dataType: DENSITY_ESTIMATION
-                            pplDensity: 4213
-                            minPplDensity: 3792
-                            maxPplDensity: 4634
-                          - geohash: "gbsuv"
+                            pplDensity: 2837
+                            minPplDensity: 2554
+                            maxPplDensity: 3120
+                          - geohash: "dr5bb"
                             dataType: NO_DATA
                     status: PART_OF_AREA_NOT_SUPPORTED
         "400":

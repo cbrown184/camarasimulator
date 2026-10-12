@@ -124,7 +124,17 @@ Verified sub-items:
   `specs/device-visit-location/vwip/openapi.yaml`; spec ↔ code ↔ module-doc
   consistent (success example, reserved-suffix mapping, and identifier-resolution
   422s all match), no drift found, no change needed.
-- 🔧 population-density-data
+- 🔧 population-density-data — verified 2026-10-12: the one modelled operation
+  (`retrievePopulationDensity`, `POST /population-density-data/vwip/retrieve`) is
+  implemented and well-tested. **Spec↔code drift found and fixed:** the vendored
+  `200` success example claimed `u4pruy` → `pplDensity 4213` (band 3792/4634) and
+  `gbsuv` → `NO_DATA` with status `PART_OF_AREA_NOT_SUPPORTED`, but the code's
+  deterministic FNV-1a mapping actually returns `u4pruy` → 2837 (2554/3120) and
+  `gbsuv` → `LOW_DENSITY` (so status `SUPPORTED_AREA`). Corrected the example to
+  the real values (`u4pruy` 2837, and `dr5bb` → `NO_DATA` to keep the illustration
+  partly-supported) and added a `vendored_success_example_matches_the_mapping` test
+  that pins it so it can't drift again. All error-case examples were already
+  byte-accurate.
 - 🔧 qos-booking
 - 🔧 media-streaming-rate
 - 🔧 network-health-assessment
@@ -224,6 +234,33 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-12 — Phase 5 vwip verification pass (population-density-data). Audited the
+  third vwip API in mount order and found **spec↔code drift in the vendored `200`
+  success example** (`specs/population-density-data/vwip/openapi.yaml`). The example
+  claimed `u4pruy` → `DENSITY_ESTIMATION` `pplDensity 4213` (band 3792/4634), `gbsuv`
+  → `NO_DATA`, overall `status PART_OF_AREA_NOT_SUPPORTED`. But the code's
+  deterministic FNV-1a mapping (`cell_for`/`area_status`,
+  `src/apis/population_density_data/vwip.rs`) actually yields `u4pruy` → 2837
+  (2554/3120) and `gbsuv` → `LOW_DENSITY` — i.e. a consumer running the documented
+  request would get different numbers, a different `dataType`, and `SUPPORTED_AREA`
+  (not partly-unsupported). A real, consumer-visible defect, not cosmetic. Fixed the
+  example to the true values and swapped the second cell to `dr5bb` (a genuine
+  `NO_DATA` geohash) so the "partlySupported" illustration stays valid, and added a
+  `vendored_success_example_matches_the_mapping` unit test that pins the exact
+  documented `u4pruy`/`dr5bb` cells and the `PART_OF_AREA_NOT_SUPPORTED` status so
+  the example can never silently drift again. Spot-checked the rest of the spec: all
+  `400`/`422` error-case example messages already match the handler byte-for-byte, and
+  the request/response schemas agree with the Rust types — only the success example
+  had drifted. This advances the vwip audit cursor to the next API (qos-booking).
+  Spec + test change (no behaviour/response change — the handler's output was already
+  correct; the spec was wrong); no new dependency. `cargo test` green: 3056 passed, 0
+  failed (+1, the new pinning test). `cargo build --release` green; binary =
+  5,430,424 bytes (unchanged vs. the prior two passes on rustc 1.97.0 — the fix
+  touches only the spec and test code, not the release path). *Backlog banner still
+  stands:* net-new feature backlog remains exhausted and the human decision
+  (authorise stateful infra, name an increment, or pause the routine) is still open —
+  this is the sanctioned per-API vwip verification (backlog item 3), and this pass it
+  caught a genuine documentation defect.
 - 2026-10-12 — Phase 5 vwip verification pass (device-visit-location). Audited the
   second vwip API in mount order. Unlike device-data-volume (prior pass, stale doc
   found), this one is **clean**: the single modelled operation

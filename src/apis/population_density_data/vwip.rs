@@ -486,6 +486,34 @@ mod tests {
     }
 
     #[test]
+    fn vendored_success_example_matches_the_mapping() {
+        // The vendored spec's `partlySupported` success example
+        // (`specs/population-density-data/vwip/openapi.yaml`) pins concrete
+        // geohashes, densities, dataTypes, and the overall status. This test keeps
+        // that example from drifting from the deterministic mapping the code
+        // actually produces — update both together or not at all.
+        assert_eq!(
+            cell_for("u4pruy"),
+            json!({
+                "geohash": "u4pruy",
+                "dataType": "DENSITY_ESTIMATION",
+                "pplDensity": 2837,
+                "minPplDensity": 2554,
+                "maxPplDensity": 3120,
+            })
+        );
+        assert_eq!(
+            cell_for("dr5bb"),
+            json!({ "geohash": "dr5bb", "dataType": "NO_DATA" })
+        );
+        // One density cell + one NO_DATA cell → a partly-unsupported area.
+        assert_eq!(
+            area_status(&["u4pruy".to_string(), "dr5bb".to_string()]),
+            "PART_OF_AREA_NOT_SUPPORTED"
+        );
+    }
+
+    #[test]
     fn density_cells_carry_an_ordered_band() {
         // Every DENSITY_ESTIMATION cell must satisfy min ≤ ppl ≤ max, all ≥ 0.
         const LETTERS: &[u8] = b"bcdefghjkmnpqrstuvwxyz";
