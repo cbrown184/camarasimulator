@@ -159,7 +159,17 @@ Verified sub-items:
   success examples (`…000`→0 bps, `…002`→2 Mbps) and the 400/UNNECESSARY_IDENTIFIER
   examples already matched. Spec + test change (no behaviour change — the handler
   was already correct).
-- 🔧 network-health-assessment
+- 🔧 network-health-assessment — verified 2026-10-12: the one modelled operation
+  (`getHealthScores`, `GET /network-health-assessment/vwip/health-scores`) is
+  implemented, tested, and documented in
+  `specs/network-health-assessment/vwip/openapi.yaml`; spec ↔ code ↔ module-docs
+  consistent (both success examples `…950`/NET→95.0 and `…950`/NET_CORE→92.0 and
+  the `…000`→null no-data example match the `score = clamp(d/10 − moduleIndex, 0,
+  100)` mapping, already pinned by tests; the reserved-suffix set the spec lists
+  — 400/401/403/404/409/422/429/500/503 — matches `scenarios::RESERVED_ERROR_SUFFIXES`
+  exactly). No drift found. Added one test pinning the vendored 400
+  `invalidArgument` example message bytes (the one spec example no test guarded)
+  so it can't drift from the handler.
 - 🔧 network-traffic-analysis
 - 🔧 optimal-edge-discovery
 - 🔧 verified-caller
@@ -256,6 +266,37 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-12 — Phase 5 vwip verification pass (network-health-assessment).
+  Audited the sixth vwip API in mount order. The single modelled operation
+  `getHealthScores` (`GET /network-health-assessment/vwip/health-scores`) is
+  fully implemented (`src/apis/network_health_assessment/vwip.rs`), routed, and
+  tested, and both module docs (`network_health_assessment.rs` parent + `vwip.rs`)
+  agree with the code. **No spec↔code↔doc drift found** (like device-visit-location
+  two passes earlier, this one is clean): the vendored spec's three 200 success
+  examples — `…950`/NET → `score 95.0`, `…950`/NET_CORE → `92.0` (module shift),
+  `…000` → `score null`/`scoringTime null` — all match the deterministic mapping
+  `score = clamp(d/10 − moduleIndex, 0, 100)` (moduleIndex NET=0/WIRELESS=1/
+  TRANSPORT=2/CORE=3) and are already pinned byte-for-byte by
+  `trailing_digits_set_the_score_band`, `net_type_shifts_the_score_per_module`,
+  and `zero_tail_is_the_no_data_case`. Confirmed the spec's declared
+  reserved-error suffix set (400/401/403/404/409/422/429/500/503) matches the
+  shared `scenarios::RESERVED_ERROR_SUFFIXES` exactly, and that
+  `trailing_three_digits` reads a UUID's trailing three decimal digits as the
+  control plane as documented. **Small tested increment:** the one vendored spec
+  example that no test guarded was the 400 `invalidArgument` message; added
+  `vendored_invalid_argument_example_matches_the_handler`, which drives a non-UUID
+  `networkId` and pins the exact `status`/`code`/`message` bytes against the
+  handler, closing the same drift class the media-streaming-rate pass caught
+  retroactively. This advances the vwip audit cursor to the next API
+  (network-traffic-analysis). Test + docs change (no behaviour/response/spec
+  change — the handler and spec were already correct and mutually consistent); no
+  new dependency. `cargo test` green: 3058 passed, 0 failed (+1, the new pinning
+  test). `cargo build --release` green; binary = 5,430,424 bytes (unchanged vs.
+  the prior four passes on rustc 1.97.0 — the new test is `#[cfg(test)]`, outside
+  the release path). *Backlog banner still stands:* the net-new feature backlog
+  remains exhausted and the human decision (authorise stateful infra, name an
+  increment, or pause the routine) is still open — this is the sanctioned per-API
+  vwip verification (backlog item 3).
 - 2026-10-12 — Phase 5 vwip verification pass (media-streaming-rate). Audited the
   fifth vwip API in mount order. The single modelled operation
   `retrieveMaximumDownstreamMediaRate`

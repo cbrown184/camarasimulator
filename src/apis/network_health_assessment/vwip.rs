@@ -442,6 +442,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vendored_invalid_argument_example_matches_the_handler() {
+        // Pins the exact `status`/`code`/`message` bytes of the vendored 400
+        // `invalidArgument` example (specs/network-health-assessment/vwip/
+        // openapi.yaml) against the handler, so that spec example can never
+        // silently drift from the code (cf. the media-streaming-rate error-
+        // example drift caught a prior pass). A non-UUID `networkId` selects
+        // this exact message.
+        let (status, _, body) = scores_ok("networkId=not-a-uuid&netType=NET").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            body["message"],
+            "`networkId` must be a UUID (e.g. 123e4567-e89b-12d3-a456-426614174000)."
+        );
+    }
+
+    #[tokio::test]
     async fn missing_net_type_is_rejected() {
         let (status, _, body) = scores_ok(&format!("networkId={}", nid("950"))).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
