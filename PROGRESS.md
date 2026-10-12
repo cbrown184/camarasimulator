@@ -135,7 +135,15 @@ Verified sub-items:
   partly-supported) and added a `vendored_success_example_matches_the_mapping` test
   that pins it so it can't drift again. All error-case examples were already
   byte-accurate.
-- 🔧 qos-booking
+- 🔧 qos-booking — verified 2026-10-12: all four modelled operations
+  (`createBooking`, `getBooking`, `deleteBooking`, `retrieveBookingByDevice`)
+  are implemented, tested, and documented in `specs/qos-booking/vwip/openapi.yaml`;
+  spec ↔ code consistent (create `…012`/`…013`/`…000` examples match the
+  ACTIVATED/SCHEDULED/REQUESTED derivation, which dedicated tests already pin;
+  all 400/409/422 error examples byte-match the handler). **Stale parent
+  module doc fixed:** `src/apis/qos_booking.rs` claimed "First slice:
+  `createBooking`" though all four operations ship — corrected to list them
+  (same trap as device-data-volume's "later slice" doc).
 - 🔧 media-streaming-rate
 - 🔧 network-health-assessment
 - 🔧 network-traffic-analysis
@@ -234,6 +242,40 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-12 — Phase 5 vwip verification pass (qos-booking). Audited the fourth
+  vwip API in mount order. The vendored spec (`specs/qos-booking/vwip/openapi.yaml`,
+  1128 lines) and the code (`src/apis/qos_booking/vwip.rs`) are **consistent**: all
+  four modelled operations — `createBooking`, `getBooking`, `deleteBooking`,
+  `retrieveBookingByDevice` — are fully implemented, routed, and tested, and the
+  spec's examples match the handlers. Spot-checked the deterministic planes and found
+  no drift: the three `createBooking` 201 examples encode the identifier-tail
+  derivation (phoneNumber `…012` → ACTIVATED with `startedAt`, `…013` → SCHEDULED,
+  `…000` → REQUESTED) that dedicated tests (`create_activated_and_echoes_the_request`,
+  `odd_identifier_tail_is_scheduled_without_start_time`,
+  `triple_zero_identifier_is_requested_without_start_time`) already pin; the
+  `activated` example's `startedAt` is an illustrative timestamp (the handler stamps
+  `now`), not deterministic drift; and every 400/409/422 error example
+  (`INVALID_ARGUMENT`/`OUT_OF_RANGE`/`QOS_BOOKING.DURATION_OUT_OF_RANGE`/`INVALID_SINK`,
+  `CONFLICT`, the 422 catalog) byte-matches the `create_booking` handler. **One
+  genuine defect found and fixed:** the top-level module doc
+  (`src/apis/qos_booking.rs`) still said the vwip module's "First slice" was only
+  `POST /device-qos-bookings` (`createBooking`), though `getBooking`,
+  `deleteBooking`, and `retrieveBookingByDevice` are all implemented and tested —
+  the identical stale-doc trap caught earlier on device-data-volume ("`/check` is a
+  later slice"), which had already misdirected a pass toward re-implementing an
+  existing endpoint. Corrected the parent doc to list all four operations (the
+  `vwip.rs` module doc was already accurate). Docs-only correction (one module doc +
+  this journal + the inventory bullet); no behaviour change, no spec change, no new
+  dependency; qos-booking vwip verified complete for all four modelled operations.
+  This advances the vwip audit cursor to the next API (media-streaming-rate).
+  `cargo test` green: 3056 passed, 0 failed (unchanged — nothing to test in a doc
+  comment; the derivation the examples encode is already tested). `cargo build
+  --release` green; binary = 5,430,424 bytes (unchanged vs. the prior three passes on
+  rustc 1.97.0 — a doc-only change does not alter the release path). *Backlog banner
+  still stands:* the net-new feature backlog remains exhausted and the human decision
+  (authorise stateful infra, name an increment, or pause the routine) is still open —
+  this is the sanctioned per-API vwip verification (backlog item 3), and this pass it
+  caught a genuine documentation defect.
 - 2026-10-12 — Phase 5 vwip verification pass (population-density-data). Audited the
   third vwip API in mount order and found **spec↔code drift in the vendored `200`
   success example** (`specs/population-density-data/vwip/openapi.yaml`). The example

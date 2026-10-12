@@ -13,8 +13,11 @@
 //! One submodule per major version (docs/DESIGN.md §5, §9). So far:
 //! - [`vwip`] — mounted at `/qos-booking/vwip` (CAMARA qos-booking, `wip` — no
 //!   released version yet, so mounted at its canonical `vwip` base path like the
-//!   other work-in-progress APIs, DESIGN §9). First slice: `POST /device-qos-bookings`
-//!   (`createBooking`).
+//!   other work-in-progress APIs, DESIGN §9). Models all four operations:
+//!   `POST /device-qos-bookings` (`createBooking`),
+//!   `GET /device-qos-bookings/{bookingId}` (`getBooking`),
+//!   `DELETE /device-qos-bookings/{bookingId}` (`deleteBooking`), and
+//!   `POST /retrieve-device-qos-bookings` (`retrieveBookingByDevice`).
 
 pub mod notifications;
 pub mod store;
