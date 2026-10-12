@@ -114,7 +114,10 @@ Verified sub-items:
 - ✅ in-home-device-management v1
 
 ### Phase 5 — Remaining APIs (CAMARA `vwip` — deepen scenarios/errors/contracts)
-- 🔧 device-data-volume
+- 🔧 device-data-volume — verified 2026-10-12: both operations
+  (`retrieveDataVolume`, `checkDataVolume`) implemented, tested, and documented in
+  `specs/device-data-volume/vwip/openapi.yaml`; stale "`/check` is a later slice"
+  module doc corrected.
 - 🔧 device-visit-location
 - 🔧 population-density-data
 - 🔧 qos-booking
@@ -216,6 +219,29 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-12 — Phase 5 vwip verification pass (device-data-volume). Audited the
+  first vwip API in mount order and found the top-level module doc
+  (`src/apis/device_data_volume.rs`) **stale**: it claimed only `POST /retrieve`
+  (`retrieveDataVolume`) was modelled and that `POST /check` (`checkDataVolume`)
+  was "a later slice". In fact `check` is fully implemented and tested in
+  `src/apis/device_data_volume/vwip.rs` (handler, routes, request schema, ~15
+  dedicated tests) and both operations are documented in the vendored spec
+  (`specs/device-data-volume/vwip/openapi.yaml`, operationIds
+  `retrieveDataVolume` / `checkDataVolume`) — the doc was the only drift.
+  Corrected the comment to state both operations are modelled. **This removes a
+  trap:** the stale "later slice" wording had already misdirected this pass toward
+  re-implementing an existing endpoint and would mislead future automated passes
+  the same way. Docs-only correction (one module comment); no behaviour change, no
+  spec change, no new dependency; device-data-volume vwip verified complete for
+  both modelled operations. `cargo test` green: 3055 passed, 0 failed (unchanged —
+  no test added, nothing to test in a comment). `cargo build --release` green;
+  binary = 5,430,424 bytes (built on rustc 1.97.0; not comparable to the prior
+  5,330,648 B recorded on an earlier toolchain — the doc-only change does not alter
+  the binary). *Note on the backlog banner:* this was **not** an idle pass — a
+  genuine factual defect was found and fixed — but the banner's broader point
+  stands: the productive net-new feature backlog remains essentially exhausted and
+  a human decision is still needed (authorise stateful infra, name an increment, or
+  pause the routine).
 - 2026-09-27 — Backlog reality check (no code change; docs-only). Started from a
   detached HEAD at 162c3a3 while `origin/main` had just been **force-reset** from
   bf4899a back to 162c3a3, discarding a prior lineage's honest journal (its subjects:

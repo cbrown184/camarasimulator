@@ -12,8 +12,10 @@
 //!   Device Visit Location / Population Density Data — its canonical base path is
 //!   literally `vwip`.
 //!
-//! Only the `POST /retrieve` operation (`retrieveDataVolume`) is modelled so far;
-//! the companion `POST /check` (`checkDataVolume`) is a later slice.
+//! Both CAMARA operations are modelled: `POST /retrieve` (`retrieveDataVolume`)
+//! reports the device's *consumed* data-volume category, and `POST /check`
+//! (`checkDataVolume`) answers a boolean threshold query against the device's
+//! *remaining* volume. See [`vwip`] for the per-operation functional cases.
 
 pub mod vwip;
 
