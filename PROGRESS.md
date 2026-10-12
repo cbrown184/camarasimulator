@@ -181,7 +181,20 @@ Verified sub-items:
   added a `vendored_success_example_matches_the_mapping` test pinning the exact
   documented records + `totalCount: 3` so it can't drift again. All 400 error
   examples already matched the handler.
-- 🔧 optimal-edge-discovery
+- 🔧 optimal-edge-discovery — verified 2026-10-12: both modelled operations
+  (`discoverOptimalEdge`, `POST …/retrieve-optimal-edge-cloud-zones`; `getRegions`,
+  `GET …/regions`) implemented, routed, and well-tested. **Spec↔code drift found
+  and fixed in three vendored examples** (`specs/optimal-edge-discovery/vwip/openapi.yaml`):
+  (1) the 200 `single`/`ranked` examples carried placeholder `edgeCloudZoneId`s
+  (`00000000-…`, `11111111-…`) though the handler emits deterministic SHA-256-derived
+  ids (`d0581b5b-…`, `e3a79eed-…`, `a03b2bf0-…`); (2) the 404 example said "…was not
+  found." but `CamaraError::for_status(404)` emits "…is not found." (same drift as
+  media-streaming-rate); (3) the 422 `missingIdentifier` example carried the truncated
+  "The device cannot be identified." but the handler emits the full "…: supply a
+  `device` or use a token…". Corrected all three and added
+  `vendored_examples_match_the_handler` pinning the exact bytes. The success schemas,
+  the `getRegions` catalog example, and the 400/`unnecessaryIdentifier` examples
+  already matched.
 - 🔧 verified-caller
 - 🔧 application-profiles
 - 🔧 subscription-status
@@ -276,6 +289,46 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-12 — Phase 5 vwip verification pass (optimal-edge-discovery). Audited the
+  eighth vwip API in mount order. Both modelled operations — `discoverOptimalEdge`
+  (`POST /optimal-edge-discovery/vwip/retrieve-optimal-edge-cloud-zones`) and the
+  read-only `getRegions` (`GET /optimal-edge-discovery/vwip/regions`) — are fully
+  implemented (`src/apis/optimal_edge_discovery/vwip.rs`), routed, and tested, and
+  both module docs agree with the code. **Spec↔code drift found and fixed in three
+  vendored examples** (`specs/optimal-edge-discovery/vwip/openapi.yaml`): (1) the 200
+  `single` and `ranked` success examples carried placeholder `edgeCloudZoneId`s — the
+  nil-ish `00000000-0000-0000-0000-000000000000` and `11111111-…` — but the handler's
+  `zone_id` derives a deterministic SHA-256-shaped id per zone, so a consumer running
+  the documented `…000`/`…013` requests gets `d0581b5b-fa7d-50f5-bfbe-7f11c70e6e15`
+  (eu-west-1), `e3a79eed-dfd9-9955-f1b0-61eb9503e139` (eu-central-1) and
+  `a03b2bf0-fb61-e587-91e3-a750a7affa41` (us-east-1) — a real, consumer-visible defect
+  (the nil-UUID placeholder is especially misleading); (2) the 404 `notFound` example
+  said `message: "The specified resource was not found."` but the shared
+  `CamaraError::for_status(404)` emits "…**is** not found." (the identical was→is drift
+  the media-streaming-rate pass caught two APIs back); (3) the 422 `missingIdentifier`
+  example carried the truncated "The device cannot be identified." but
+  `resolve_identifier` emits the full "The device cannot be identified: supply a
+  `device` or use a token that identifies a device." Corrected all three examples to
+  the real bytes and added a `vendored_examples_match_the_handler` test that drives the
+  documented `single`/`ranked`/404/422 requests through the router and pins the exact
+  zone ids and messages (the 200 ids are asserted both as literals and against
+  `zone_id(EDGE_ZONES[i])`, so the literal is self-validating) so the examples can never
+  silently drift again. Spot-checked the rest of the spec and found no other drift: the
+  400 `invalidArgument` and 422 `unnecessaryIdentifier` example messages already matched
+  the handler, the `getRegions` region-catalog example matches `distinct_regions`
+  byte-for-byte (already pinned by `distinct_regions_are_the_tables_regions_in_order`),
+  and the request/response schemas (`OptimalEdgeDiscoveryInfo`, `Device`,
+  `EdgeDiscoveryResponse`, `EdgeCloudZone`, `GetEdgeCloudRegionsResponse`, the reserved
+  error set) agree with the Rust types. This advances the vwip audit cursor to the next
+  API (verified-caller). Spec + test change (no behaviour/response change — the
+  handler's output was already correct; only the spec examples were wrong); no new
+  dependency. `cargo test` green: 3060 passed, 0 failed (+1, the new pinning test).
+  `cargo build --release` green; binary = 5,430,424 bytes (unchanged vs. the prior seven
+  passes on rustc 1.97.0 — the fix touches only the spec and `#[cfg(test)]` code, not
+  the release path). *Backlog banner still stands:* the net-new feature backlog remains
+  exhausted and the human decision (authorise stateful infra, name an increment, or
+  pause the routine) is still open — this is the sanctioned per-API vwip verification
+  (backlog item 3), and this pass it caught a genuine documentation defect.
 - 2026-10-12 — Phase 5 vwip verification pass (network-traffic-analysis). Audited
   the seventh vwip API in mount order. The single modelled operation
   `getTrafficAnalysis` (`GET /network-traffic-analysis/vwip/traffic-analysis`) is

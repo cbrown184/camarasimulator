@@ -1045,4 +1045,84 @@ mod tests {
             Some("corr-err")
         );
     }
+
+    // --- Vendored-spec examples pinned to the handler ----------------------
+
+    /// Drive the exact requests the vendored `openapi.yaml` examples document and
+    /// pin the exact response bytes (zone ids, messages) so the spec examples can
+    /// never silently drift from the handler again. Guards the three drifts this
+    /// verification pass corrected: the `single`/`ranked` 200 examples carried
+    /// placeholder (nil-ish) `edgeCloudZoneId`s, the 404 example said "…was not
+    /// found." (handler emits "…is not found."), and the 422 `missingIdentifier`
+    /// example carried the truncated "The device cannot be identified."
+    #[tokio::test]
+    async fn vendored_examples_match_the_handler() {
+        // 200 `single` example: …000 phone → one zone at index 0, device echoed.
+        let body = format!(
+            r#"{{"applicationProfileId":"{APP_PROFILE}","device":{{"phoneNumber":"+123456789000"}}}}"#
+        );
+        let (status, _, body) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::OK);
+        let zones = body["edgeCloudZones"].as_array().unwrap();
+        assert_eq!(zones.len(), 1);
+        // The documented id is the real SHA-256-derived one, not a placeholder.
+        assert_eq!(zones[0]["edgeCloudZoneId"], "d0581b5b-fa7d-50f5-bfbe-7f11c70e6e15");
+        assert_eq!(zones[0]["edgeCloudZoneId"], zone_id(EDGE_ZONES[0].0));
+        assert_eq!(zones[0]["edgeCloudZoneName"], "camarasim-edge-eu-west-1");
+        assert_eq!(zones[0]["edgeCloudProvider"], "CamaraSim Edge");
+        assert_eq!(zones[0]["edgeCloudRegion"], "eu-west-1");
+        assert_eq!(zones[0]["edgeCloudZoneStatus"], "active");
+        assert_eq!(body["applicationProfileId"], APP_PROFILE);
+        assert_eq!(body["device"]["phoneNumber"], "+123456789000");
+
+        // 200 `ranked` example: …013 phone → two zones from index 1.
+        let body = format!(
+            r#"{{"applicationProfileId":"{APP_PROFILE}","device":{{"phoneNumber":"+123456789013"}}}}"#
+        );
+        let (status, _, body) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::OK);
+        let zones = body["edgeCloudZones"].as_array().unwrap();
+        assert_eq!(zones.len(), 2);
+        assert_eq!(zones[0]["edgeCloudZoneId"], "e3a79eed-dfd9-9955-f1b0-61eb9503e139");
+        assert_eq!(zones[0]["edgeCloudZoneId"], zone_id(EDGE_ZONES[1].0));
+        assert_eq!(zones[0]["edgeCloudZoneName"], "camarasim-edge-eu-central-1");
+        assert_eq!(zones[0]["edgeCloudZoneStatus"], "active");
+        assert_eq!(zones[1]["edgeCloudZoneId"], "a03b2bf0-fb61-e587-91e3-a750a7affa41");
+        assert_eq!(zones[1]["edgeCloudZoneId"], zone_id(EDGE_ZONES[2].0));
+        assert_eq!(zones[1]["edgeCloudZoneName"], "camarasim-edge-us-east-1");
+        assert_eq!(zones[1]["edgeCloudZoneStatus"], "inactive");
+
+        // 404 `notFound` example: unknown region → the shared 404 message.
+        let body = format!(
+            r#"{{"applicationProfileId":"{APP_PROFILE}","edgeCloudRegion":"zz-nowhere-9","device":{{"phoneNumber":"+123456789012"}}}}"#
+        );
+        let (status, _, body) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+        assert_eq!(body["message"], "The specified resource is not found.");
+
+        // 422 `missingIdentifier` example: no device, non-line subject → the full
+        // handler message, not the truncated one the spec used to document.
+        let body = format!(r#"{{"applicationProfileId":"{APP_PROFILE}"}}"#);
+        let (status, _, body) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "MISSING_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "The device cannot be identified: supply a `device` or use a token that identifies a device."
+        );
+
+        // 422 `unnecessaryIdentifier` example: device resubmitted on a line token.
+        let token = mint_token_with_client(READ_SCOPE, "+123456789012").await;
+        let body = format!(
+            r#"{{"applicationProfileId":"{APP_PROFILE}","device":{{"phoneNumber":"+123456789012"}}}}"#
+        );
+        let (status, _, body) = post_retrieve(Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "The device is already identified by the access token."
+        );
+    }
 }
