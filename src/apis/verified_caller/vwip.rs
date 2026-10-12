@@ -643,6 +643,47 @@ mod tests {
         );
     }
 
+    /// Pins the vendored `201` success example
+    /// (`specs/verified-caller/vwip/openapi.yaml`, the `created` example): the
+    /// documented `BRAND_DISPLAY` request from `+123456789111` to
+    /// `+123456789012` must return exactly the `preAnnouncementId` the spec
+    /// shows, so the example can never silently drift from the handler's
+    /// deterministic id again (it once carried the Swagger placeholder
+    /// `3fa85f64-…`, which no request could ever produce). The literal is
+    /// self-validating: it is also asserted equal to `pre_announcement_id` built
+    /// directly from the same request, so if the id derivation ever changes this
+    /// test fails rather than silently blessing a new value.
+    #[tokio::test]
+    async fn vendored_success_example_matches_the_handler() {
+        const DOCUMENTED_ID: &str = "e2640459-fc76-4e90-8296-216995d9e7f4";
+
+        // Drive the exact request the vendored `created` example documents.
+        let (status, _, body) = call_ok(
+            r#"{"callingParticipant":"+123456789111","calledParticipant":"+123456789012","strategy":"BRAND_DISPLAY"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            body["preAnnouncementId"].as_str(),
+            Some(DOCUMENTED_ID),
+            "the 201 example's preAnnouncementId must match the handler's deterministic id"
+        );
+
+        // Self-validate the literal against the id function directly, so the
+        // documented value is pinned to the derivation itself, not just to the
+        // router's current output.
+        let req = CreatePreAnnouncementRequest {
+            calling_participant: "+123456789111".into(),
+            called_participant: "+123456789012".into(),
+            strategy: Some(Strategy::BrandDisplay),
+            time_to_live: None,
+            registration_id: None,
+            dynamic_display_name: None,
+            call_reason: None,
+        };
+        assert_eq!(pre_announcement_id(&req), DOCUMENTED_ID);
+    }
+
     /// Parse the RFC 3339 UTC shape this module emits back to a Unix timestamp
     /// (test-only inverse of [`rfc3339_utc`]).
     fn parse_rfc3339_secs(s: &str) -> i64 {

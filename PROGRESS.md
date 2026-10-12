@@ -195,7 +195,24 @@ Verified sub-items:
   `vendored_examples_match_the_handler` pinning the exact bytes. The success schemas,
   the `getRegions` catalog example, and the 400/`unnecessaryIdentifier` examples
   already matched.
-- 🔧 verified-caller
+- 🔧 verified-caller — verified 2026-10-12: the one modelled operation
+  (`createPreAnnouncement`, `POST /verified-caller/vwip/pre-announce`) is
+  implemented, tested, and documented in `specs/verified-caller/vwip/openapi.yaml`.
+  **Spec↔code drift found and fixed in the vendored `201` success example:** the
+  `created` example carried the Swagger placeholder `preAnnouncementId`
+  `3fa85f64-5717-4562-b3fc-2c963f66afa6`, but the handler derives the id
+  deterministically (SHA-256 over callingParticipant + calledParticipant +
+  strategy) — the documented `BRAND_DISPLAY` request `+123456789111` →
+  `+123456789012` actually yields `e2640459-fc76-4e90-8296-216995d9e7f4` (same
+  placeholder-UUID drift class as optimal-edge-discovery). Bound the example to that
+  concrete request, corrected the id, and clarified that `expiresAt` is illustrative
+  (now + timeToLive, wall-clock dependent; the shown `14:29:08Z` = the module's
+  `rfc3339_utc` test epoch `14:27:08Z` + default 120 s). Added a self-validating
+  `vendored_success_example_matches_the_handler` test pinning the id both through
+  the router and against `pre_announcement_id` directly. The `400`
+  invalidArgument/outOfRange example messages, the reserved-suffix set
+  (400/401/403/404/409/422/429/500/503 = `scenarios::RESERVED_ERROR_SUFFIXES`), and
+  the request/response schemas already matched the Rust types.
 - 🔧 application-profiles
 - 🔧 subscription-status
 - 🔧 device-authenticity
@@ -289,6 +306,57 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-12 — Phase 5 vwip verification pass (verified-caller). Audited the
+  ninth vwip API in mount order. The single modelled operation
+  `createPreAnnouncement` (`POST /verified-caller/vwip/pre-announce`) is fully
+  implemented (`src/apis/verified_caller/vwip.rs`), routed, and well-tested (20
+  test fns before this pass), and both module docs agree with the code.
+  **Spec↔code drift found and fixed in the vendored `201` `created` success
+  example** (`specs/verified-caller/vwip/openapi.yaml`): the example carried the
+  canonical Swagger placeholder `preAnnouncementId`
+  `3fa85f64-5717-4562-b3fc-2c963f66afa6`, but the handler derives the id
+  deterministically (SHA-256 over `callingParticipant` + `calledParticipant` +
+  `strategy`, version/variant nibbles forced to a v4 shape), and the schema +
+  API description both *promise* it is "deterministic … derived from the
+  participants and strategy". A consumer could not reproduce the documented id
+  from any input — the same consumer-visible placeholder-UUID defect the
+  optimal-edge-discovery pass caught two cursors back ("the nil-UUID placeholder
+  is especially misleading"). Bound the example to a concrete documented request
+  — `BRAND_DISPLAY` from `+123456789111` to `+123456789012`, default
+  `timeToLive` 120 s — whose real id is `e2640459-fc76-4e90-8296-216995d9e7f4`
+  (verified independently and by the handler), and clarified in the example
+  summary that `expiresAt` is illustrative: it is `now + timeToLive` and so
+  wall-clock dependent (the shown `2024-01-01T14:29:08Z` is the module's
+  `rfc3339_utc` test epoch `14:27:08Z` + the default 120 s, so the illustration
+  is internally consistent — same accepted "illustrative timestamp" posture as
+  qos-booking's `startedAt`). Added `vendored_success_example_matches_the_handler`,
+  which drives the documented request through the router and pins the exact id,
+  and also asserts that literal equals `pre_announcement_id(&req)` built directly
+  (self-validating, so a future change to the derivation fails the test rather
+  than silently blessing a new value). Spot-checked the rest of the spec and
+  found no other drift: the `400` `invalidArgument`/`outOfRange` example messages
+  byte-match the handler, the documented reserved-suffix set
+  (400/401/403/404/409/422/429/500/503) equals `scenarios::RESERVED_ERROR_SUFFIXES`
+  exactly, and the request/response schemas (`CreatePreAnnouncementRequest`,
+  `AnnouncementInfo`, `VerifiedCallerError`, `PhoneNumber`) agree with the Rust
+  types. This advances the vwip audit cursor to the next API (application-profiles).
+  Spec + test change (no behaviour/response change — the handler's output was
+  already correct; only the spec example was wrong); no new dependency.
+  `cargo test` green: 3061 passed, 0 failed (+1, the new pinning test).
+  `cargo build --release` green; binary = 5,430,424 bytes (unchanged vs. the
+  prior eight passes on rustc 1.97.0 — the fix touches only the spec and
+  `#[cfg(test)]` code, not the release path). *Backlog banner still stands:* the
+  net-new feature backlog remains exhausted and the human decision (authorise
+  stateful infra, name an increment, or pause the routine) is still open — this
+  is the sanctioned per-API vwip verification (backlog item 3), and this pass it
+  caught a genuine documentation defect. **Integration note:** the container
+  started on a detached HEAD at `ea67dca` (the optimal-edge-discovery tip) while
+  the local `origin/main` remote-tracking ref was a stale `93a23ca`; a
+  `git fetch` confirmed the remote had in fact already advanced to `ea67dca`, so
+  the eight prior vwip-verification passes (device-data-volume …
+  optimal-edge-discovery) were pushed and are on the remote — only this
+  container's cached ref lagged. This pass builds on that chain and pushes a
+  single new commit to `origin/main`.
 - 2026-10-12 — Phase 5 vwip verification pass (optimal-edge-discovery). Audited the
   eighth vwip API in mount order. Both modelled operations — `discoverOptimalEdge`
   (`POST /optimal-edge-discovery/vwip/retrieve-optimal-edge-cloud-zones`) and the
