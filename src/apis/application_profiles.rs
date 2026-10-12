@@ -15,7 +15,9 @@
 //!   application-profiles, work-in-progress — no released version yet, so mounted
 //!   at its canonical `vwip` base path like Device Visit Location / Media
 //!   Streaming Rate / Optimal Edge Discovery / Verified Caller, DESIGN §9).
-//!   First slice: `POST /application-profiles` + `GET /application-profiles/{id}`.
+//!   Full CRUD set: `POST /application-profiles` (create),
+//!   `GET` / `PATCH` / `DELETE` on `/application-profiles/{id}` (read / full-set
+//!   update / delete).
 
 pub mod store;
 pub mod vwip;

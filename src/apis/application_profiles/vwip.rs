@@ -1048,4 +1048,59 @@ mod tests {
             patch_profile(None, "00000000-0000-4000-8000-000000000000", &body, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
+
+    // --- Vendored-spec example pinning -------------------------------------
+
+    /// The four distinct `message` strings used in the vendored spec's 400
+    /// examples (`specs/application-profiles/vwip/openapi.yaml`) are exercised by
+    /// tests above only for their `code`; this pins the exact `message` bytes
+    /// against the handler so a spec example can never silently drift from what
+    /// the endpoint returns (the drift class the media-streaming-rate /
+    /// network-health-assessment passes closed retroactively). The 201 `created`
+    /// example's `applicationProfileId` is intentionally NOT pinned: the id is
+    /// minted from an internal counter + clock (`store::mint_uuid`), not from the
+    /// request, so it is opaque to a consumer and the example id is illustrative.
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // create — `invalidArgument` (anyOf) example.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, err) = post_profile(Some(&create), "{}", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err["message"],
+            "At least one of `networkQualityThresholds` or `computeResources` is required."
+        );
+
+        // create — `outOfRange` (targetMinDownstreamRate) example.
+        let body = json!({
+            "networkQualityThresholds": { "targetMinDownstreamRate": { "value": 2048, "unit": "Mbps" } }
+        })
+        .to_string();
+        let (status, _, err) = post_profile(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err["message"],
+            "`targetMinDownstreamRate.value` must be in 0..=1024."
+        );
+
+        // read / delete — malformed-id `invalidArgument` example.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, err) = get_profile(Some(&read), "not-a-uuid", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["message"], "`applicationProfileId` must be a UUID.");
+
+        // patch — `outOfRange` (targetMinUpstreamRate) example, on a stored id.
+        let id = create_and_get_id().await;
+        let upd = mint_token(UPDATE_SCOPE).await;
+        let body = json!({
+            "networkQualityThresholds": { "targetMinUpstreamRate": { "value": 2048, "unit": "Mbps" } }
+        })
+        .to_string();
+        let (status, _, err) = patch_profile(Some(&upd), &id, &body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err["message"],
+            "`targetMinUpstreamRate.value` must be in 0..=1024."
+        );
+    }
 }

@@ -4,13 +4,13 @@
 //! Application Profiles is a **stateful, resource-oriented** API:
 //! `POST /application-profiles` creates a profile and mints an
 //! `applicationProfileId`, and later requests
-//! (`GET /application-profiles/{applicationProfileId}`, and — in later passes —
-//! `PATCH` / `DELETE`) address that resource by its id. This module is the state
-//! that bridges those requests. It mirrors
-//! [`crate::apis::qos_provisioning::store`] (opaque UUID keys, single node),
-//! trimmed to what the create + read-by-id slice needs — no device echo and no
-//! sink-credential side-store (this API carries no `device` and, for this slice,
-//! no `sink`).
+//! (`GET` / `PATCH` / `DELETE` on
+//! `/application-profiles/{applicationProfileId}`) address that resource by its
+//! id — read ([`get`]), full-set update ([`replace`]), and delete ([`remove`])
+//! are all served from this module. This module is the state that bridges those
+//! requests. It mirrors [`crate::apis::qos_provisioning::store`] (opaque UUID
+//! keys, single node), trimmed to what this API needs — no device echo and no
+//! sink-credential side-store (this API carries no `device` and no `sink`).
 //!
 //! ## Simulator constraints
 //!

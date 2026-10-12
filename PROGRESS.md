@@ -213,7 +213,21 @@ Verified sub-items:
   invalidArgument/outOfRange example messages, the reserved-suffix set
   (400/401/403/404/409/422/429/500/503 = `scenarios::RESERVED_ERROR_SUFFIXES`), and
   the request/response schemas already matched the Rust types.
-- 🔧 application-profiles
+- 🔧 application-profiles — verified 2026-10-12: all four modelled CRUD operations
+  (`createApplicationProfile`, `readApplicationProfile`, `updateApplicationProfile`,
+  `deleteApplicationProfile`) are implemented (`src/apis/application_profiles/vwip.rs`
+  + `store.rs`), routed, and well-tested, and the vendored
+  `specs/application-profiles/vwip/openapi.yaml` is consistent (full CRUD set, scopes,
+  error model, scenarios; the 201 `created` example's `applicationProfileId` is
+  legitimately illustrative — ids are minted from an internal counter + clock, not
+  the request, so a consumer cannot reproduce them, unlike the deterministic ids in
+  verified-caller / optimal-edge-discovery). **Two stale "first slice / later passes"
+  module docs fixed** (same trap class as device-data-volume / qos-booking):
+  `application_profiles.rs` parent doc said "First slice: POST + GET {id}" (omitting
+  PATCH + DELETE) and `store.rs` said PATCH/DELETE were "in later passes" though
+  `replace`/`remove` ship in that same file. Added
+  `vendored_error_example_messages_match_the_handler` pinning the four distinct 400
+  example `message` bytes (no prior test guarded them, only `code`).
 - 🔧 subscription-status
 - 🔧 device-authenticity
 - 🔧 session-insights
@@ -306,6 +320,53 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-12 — Phase 5 vwip verification pass (application-profiles). Audited the
+  tenth vwip API in mount order (first of the stateful `vwip` resources). All four
+  modelled CRUD operations — `createApplicationProfile` (`POST
+  /application-profiles/vwip/application-profiles`), `readApplicationProfile` (`GET
+  …/{applicationProfileId}`), `updateApplicationProfile` (`PATCH …`, full-set
+  replacement), and `deleteApplicationProfile` (`DELETE …`, single-use eviction) —
+  are fully implemented (`src/apis/application_profiles/vwip.rs` + an in-memory
+  `store.rs` with `insert`/`get`/`replace`/`remove`), routed, and well-tested (35
+  test fns before this pass), and the vendored
+  `specs/application-profiles/vwip/openapi.yaml` is consistent with the code: the
+  full CRUD set, per-operation scopes (`application-profiles:{create,read,update,
+  delete}`), the `anyOf`/`minProperties`/range validation driving
+  `400 INVALID_ARGUMENT` / `400 OUT_OF_RANGE`, and the store-keyed `200`/`404`/`204`
+  planes all match the handlers. **Checked the placeholder-UUID drift class that
+  bit verified-caller and optimal-edge-discovery and found it does NOT apply here:**
+  the 201 `created` example's `applicationProfileId`
+  (`3fa85f64-5717-4562-b3fc-2c963f66afa6`) is legitimately *illustrative* because
+  `store::mint_uuid` derives the id from an internal monotonic counter + wall clock
+  (not from the request body), so no consumer can reproduce it — unlike those two
+  APIs' SHA-256-over-request ids, pinning a concrete value here would be wrong.
+  **Two genuine defects found and fixed, both the stale "first slice / later
+  passes" module-doc trap** (identical to device-data-volume's "`/check` is a later
+  slice" and qos-booking's "First slice: createBooking", which had each misdirected
+  a pass toward re-implementing an existing endpoint): (1) the parent doc
+  `src/apis/application_profiles.rs` said "First slice: `POST /application-profiles`
+  + `GET /application-profiles/{id}`", omitting the shipped PATCH + DELETE —
+  corrected to the full CRUD set; (2) the `store.rs` module doc said `PATCH` /
+  `DELETE` were "in later passes" though `replace`/`remove` are defined and used in
+  that very file — corrected to state read/update/delete are all served now.
+  **Small tested increment:** the four distinct `message` strings in the vendored
+  spec's 400 examples (create `anyOf` + `outOfRange`, read/delete malformed-id,
+  patch `outOfRange`) were exercised by existing tests only for their `code`, never
+  their `message` bytes; added `vendored_error_example_messages_match_the_handler`
+  driving all four through the router and pinning the exact message bytes so the
+  spec examples can never silently drift from the handler (the same drift class the
+  media-streaming-rate / network-health-assessment passes closed retroactively).
+  This advances the vwip audit cursor to the next API (subscription-status).
+  Docs + test change (no behaviour/response/spec change — the handlers and spec were
+  already correct and mutually consistent; only two module docs were stale and one
+  spec-example family was unguarded); no new dependency. `cargo test` green: 3062
+  passed, 0 failed (+1, the new pinning test). `cargo build --release` green; binary
+  = 5,430,424 bytes (unchanged vs. the prior nine passes on rustc 1.97.0 — the
+  change touches only module docs and `#[cfg(test)]` code, not the release path).
+  *Backlog banner still stands:* the net-new feature backlog remains exhausted and
+  the human decision (authorise stateful infra, name an increment, or pause the
+  routine) is still open — this is the sanctioned per-API vwip verification (backlog
+  item 3), and this pass it caught two genuine documentation defects.
 - 2026-10-12 — Phase 5 vwip verification pass (verified-caller). Audited the
   ninth vwip API in mount order. The single modelled operation
   `createPreAnnouncement` (`POST /verified-caller/vwip/pre-announce`) is fully
