@@ -721,6 +721,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vendored_success_example_matches_the_mapping() {
+        // Pins the vendored `200` `success` example
+        // (specs/network-traffic-analysis/vwip/openapi.yaml) to the handler's
+        // deterministic output for the documented request — the `…012` tail over
+        // a one-day DAY window — so the spec example can never silently drift from
+        // the code again (the `…012` tail yields THREE applications, not two).
+        let (status, _, body) =
+            ta_ok(&format!("networkId={}&{ONE_DAY}", nid("012"))).await;
+        assert_eq!(status, StatusCode::OK);
+        let records = body["records"].as_array().unwrap();
+        // d = 12 → (12 % 5) + 1 = 3 apps; one DAY slot → 3 records.
+        assert_eq!(records.len(), 3);
+        let expected = [
+            (
+                "whatsapp",
+                "202.112.17.101",
+                "A free cross-platform app for messaging, calls, and media sharing.",
+                13i64,
+                13312i64,
+                26624i64,
+                39936i64,
+            ),
+            (
+                "wechat",
+                "202.112.17.102",
+                "A multi-purpose messaging, social media and mobile payment app.",
+                26,
+                26624,
+                53248,
+                79872,
+            ),
+            (
+                "netflix",
+                "202.112.17.103",
+                "A subscription-based video streaming service.",
+                39,
+                39936,
+                79872,
+                119808,
+            ),
+        ];
+        for (r, (app, ipv4, description, count, up, down, flow)) in
+            records.iter().zip(expected)
+        {
+            assert_eq!(r["app"], app);
+            assert_eq!(r["ipv4Address"], ipv4);
+            assert_eq!(r["description"], description);
+            assert_eq!(r["accessCount"].as_i64().unwrap(), count);
+            assert_eq!(r["accessUpFlow"].as_i64().unwrap(), up);
+            assert_eq!(r["accessDownFlow"].as_i64().unwrap(), down);
+            assert_eq!(r["accessFlow"].as_i64().unwrap(), flow);
+            assert_eq!(r["startDate"], "2024-06-01T00:00:00Z");
+            assert_eq!(r["endDate"], "2024-06-02T00:00:00Z");
+            assert_eq!(r["accessDate"], "2024-06-01");
+        }
+        assert_eq!(body["pagination"]["page"], 1);
+        assert_eq!(body["pagination"]["perPage"], 20);
+        assert_eq!(body["pagination"]["totalCount"], 3);
+        assert_eq!(body["pagination"]["totalPages"], 1);
+    }
+
+    #[tokio::test]
     async fn zero_tail_is_the_no_data_case() {
         let (status, _, body) =
             ta_ok(&format!("networkId={}&{ONE_DAY}", nid("000"))).await;

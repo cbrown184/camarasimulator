@@ -170,7 +170,17 @@ Verified sub-items:
   exactly). No drift found. Added one test pinning the vendored 400
   `invalidArgument` example message bytes (the one spec example no test guarded)
   so it can't drift from the handler.
-- 🔧 network-traffic-analysis
+- 🔧 network-traffic-analysis — verified 2026-10-12: the one modelled operation
+  (`getTrafficAnalysis`, `GET /network-traffic-analysis/vwip/traffic-analysis`) is
+  implemented and well-tested. **Spec↔code drift found and fixed:** the vendored
+  `200` `success` example claimed a `…012` tail yields **two** applications
+  (whatsapp + wechat, `totalCount: 2`), but the code's deterministic mapping
+  `n_apps = ((d % 5) + 1)` gives `d=12 → 3` apps — the example was missing the
+  third record (netflix, `accessCount 39`, flows 39936/79872/119808) and had the
+  wrong `totalCount`. Corrected the example to the real three-record output and
+  added a `vendored_success_example_matches_the_mapping` test pinning the exact
+  documented records + `totalCount: 3` so it can't drift again. All 400 error
+  examples already matched the handler.
 - 🔧 optimal-edge-discovery
 - 🔧 verified-caller
 - 🔧 application-profiles
@@ -266,6 +276,44 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-12 — Phase 5 vwip verification pass (network-traffic-analysis). Audited
+  the seventh vwip API in mount order. The single modelled operation
+  `getTrafficAnalysis` (`GET /network-traffic-analysis/vwip/traffic-analysis`) is
+  fully implemented (`src/apis/network_traffic_analysis/vwip.rs`), routed, and
+  tested, and both module docs agree with the code. **Spec↔code drift found and
+  fixed in the vendored `200` `success` example**
+  (`specs/network-traffic-analysis/vwip/openapi.yaml`): the example was summarised
+  "Two applications, one DAY slot (`…012` tail)" and listed only whatsapp + wechat
+  with `pagination.totalCount: 2`. But the handler's deterministic app-count plane
+  is `n_apps = ((d % 5) + 1)` where `d` is the `networkId`'s trailing three digits,
+  so a `…012` tail → `d=12` → `(12 % 5) + 1 = 3` applications. A consumer running
+  the documented request would get THREE records (whatsapp `accessCount 13`, wechat
+  `26`, **netflix `39`** / flows 39936/79872/119808), not two — a real,
+  consumer-visible doc defect (same class as the population-density-data success
+  example two cursors back). The code is correct and already pinned by
+  `returns_records_and_pagination` and
+  `access_flow_is_up_plus_down_and_records_scale_with_the_identifier` (both assert
+  3 records for `…012`); only the spec example had drifted. Added the missing
+  netflix record, corrected `totalCount` to 3 and the summary to "Three
+  applications", and added a `vendored_success_example_matches_the_mapping` test
+  that drives the documented request and pins the exact three records (app,
+  ipv4Address, description, accessCount, the three flow fields, dates) plus the
+  pagination envelope, so the example can never silently drift from the mapping
+  again. Spot-checked the rest of the spec and found no other drift: the `noData`
+  (`…000`) example, the 400 `invalidArgument`/`outOfRange` example messages, and
+  the request/response schemas (`TrafficRecord`, `Pagination`,
+  `TrafficAnalysisResponse`, `NetworkId`, `Frequency`, the reserved-error set) all
+  match the Rust types and handler. This advances the vwip audit cursor to the next
+  API (optimal-edge-discovery). Spec + test change (no behaviour/response change —
+  the handler's output was already correct; only the spec example was wrong); no
+  new dependency. `cargo test` green: 3059 passed, 0 failed (+1, the new pinning
+  test). `cargo build --release` green; binary = 5,430,424 bytes (unchanged vs. the
+  prior six passes on rustc 1.97.0 — the fix touches only the spec and
+  `#[cfg(test)]` code, not the release path). *Backlog banner still stands:* the
+  net-new feature backlog remains exhausted and the human decision (authorise
+  stateful infra, name an increment, or pause the routine) is still open — this is
+  the sanctioned per-API vwip verification (backlog item 3), and this pass it
+  caught a genuine documentation defect.
 - 2026-10-12 — Phase 5 vwip verification pass (network-health-assessment).
   Audited the sixth vwip API in mount order. The single modelled operation
   `getHealthScores` (`GET /network-health-assessment/vwip/health-scores`) is

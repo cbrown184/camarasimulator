@@ -171,7 +171,7 @@ paths:
                 $ref: "#/components/schemas/TrafficAnalysisResponse"
               examples:
                 success:
-                  summary: Two applications, one DAY slot (`…012` tail)
+                  summary: Three applications, one DAY slot (`…012` tail)
                   value:
                     records:
                       - app: whatsapp
@@ -194,10 +194,20 @@ paths:
                         startDate: "2024-06-01T00:00:00Z"
                         endDate: "2024-06-02T00:00:00Z"
                         accessDate: "2024-06-01"
+                      - app: netflix
+                        ipv4Address: "202.112.17.103"
+                        description: A subscription-based video streaming service.
+                        accessCount: 39
+                        accessUpFlow: 39936
+                        accessDownFlow: 79872
+                        accessFlow: 119808
+                        startDate: "2024-06-01T00:00:00Z"
+                        endDate: "2024-06-02T00:00:00Z"
+                        accessDate: "2024-06-01"
                     pagination:
                       page: 1
                       perPage: 20
-                      totalCount: 2
+                      totalCount: 3
                       totalPages: 1
                 noData:
                   summary: No data available (`…000` tail)
