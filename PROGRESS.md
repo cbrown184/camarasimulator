@@ -144,7 +144,21 @@ Verified sub-items:
   module doc fixed:** `src/apis/qos_booking.rs` claimed "First slice:
   `createBooking`" though all four operations ship — corrected to list them
   (same trap as device-data-volume's "later slice" doc).
-- 🔧 media-streaming-rate
+- 🔧 media-streaming-rate — verified 2026-10-12: the one modelled operation
+  (`retrieveMaximumDownstreamMediaRate`,
+  `POST /media-streaming-rate/vwip/retrieve-maximum-downstream-media-rate`) is
+  implemented and well-tested. **Spec↔code drift found and fixed in two vendored
+  error examples** (`specs/media-streaming-rate/vwip/openapi.yaml`): the `404`
+  example claimed `message: "The specified resource was not found."` but
+  `CamaraError::for_status(404)` emits "…is not found." (was→is), and the `422`
+  `missingIdentifier` example claimed the truncated "The device cannot be
+  identified." but the handler emits "The device cannot be identified: supply a
+  `device` or use a token that identifies a device." Corrected both examples to
+  the real messages and added a `vendored_error_example_messages_match_the_handler`
+  test pinning the exact 400/404/422 message bytes so they can't drift again. The
+  success examples (`…000`→0 bps, `…002`→2 Mbps) and the 400/UNNECESSARY_IDENTIFIER
+  examples already matched. Spec + test change (no behaviour change — the handler
+  was already correct).
 - 🔧 network-health-assessment
 - 🔧 network-traffic-analysis
 - 🔧 optimal-edge-discovery
@@ -242,6 +256,41 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-12 — Phase 5 vwip verification pass (media-streaming-rate). Audited the
+  fifth vwip API in mount order. The single modelled operation
+  `retrieveMaximumDownstreamMediaRate`
+  (`POST /media-streaming-rate/vwip/retrieve-maximum-downstream-media-rate`) is
+  fully implemented (`src/apis/media_streaming_rate/vwip.rs`), routed, and tested,
+  and the module doc agrees with the code. **Spec↔code drift found and fixed in two
+  vendored error-example messages** (`specs/media-streaming-rate/vwip/openapi.yaml`):
+  (1) the `404` example claimed `message: "The specified resource was not found."`
+  but the shared `CamaraError::for_status(404)` (src/errors.rs) emits "The specified
+  resource **is** not found." (was→is); (2) the `422` `missingIdentifier` example
+  claimed the truncated "The device cannot be identified." but the handler
+  (`resolve_identifier`) emits the fuller "The device cannot be identified: supply a
+  `device` or use a token that identifies a device." A consumer reading the spec
+  would have expected different `message` bytes than the endpoint returns — a real,
+  consumer-visible doc defect, not cosmetic (same class as the
+  population-density-data success-example drift two passes back). Corrected both
+  examples to the true messages and added a
+  `vendored_error_example_messages_match_the_handler` test that drives the endpoint
+  and pins the exact 400/404/422 message bytes so the examples can never silently
+  drift again. Spot-checked the rest of the spec and found no other drift: the two
+  200 success examples (`…000`→`0 bps` floor with device echoed, `…002`→`2 Mbps`)
+  match `max_downstream_rate`, the 400 `INVALID_ARGUMENT` and 422
+  `UNNECESSARY_IDENTIFIER` example messages already byte-matched the handler, and
+  the request/response schemas (`MediaStreamingRateRequest`/`Response`, `Device`,
+  `BitRateUnitEnum`, `DeviceResponse`) agree with the Rust types. This advances the
+  vwip audit cursor to the next API (network-health-assessment). Spec + test change
+  (no behaviour/response change — the handler's output was already correct; only the
+  spec examples were wrong); no new dependency. `cargo test` green: 3057 passed, 0
+  failed (+1, the new pinning test). `cargo build --release` green; binary =
+  5,430,424 bytes (unchanged vs. the prior four passes on rustc 1.97.0 — the fix
+  touches only the spec and `#[cfg(test)]` code, not the release path). *Backlog
+  banner still stands:* the net-new feature backlog remains exhausted and the human
+  decision (authorise stateful infra, name an increment, or pause the routine) is
+  still open — this is the sanctioned per-API vwip verification (backlog item 3),
+  and this pass it caught a genuine documentation defect.
 - 2026-10-12 — Phase 5 vwip verification pass (qos-booking). Audited the fourth
   vwip API in mount order. The vendored spec (`specs/qos-booking/vwip/openapi.yaml`,
   1128 lines) and the code (`src/apis/qos_booking/vwip.rs`) are **consistent**: all

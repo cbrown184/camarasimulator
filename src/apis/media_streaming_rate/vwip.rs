@@ -585,6 +585,46 @@ mod tests {
     // --- Validation & auth -------------------------------------------------
 
     #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // Pins the exact `message` strings the vendored spec's error examples
+        // claim against what the handler actually returns, so the examples in
+        // `specs/media-streaming-rate/vwip/openapi.yaml` cannot silently drift
+        // again (two had: the 404 "was"→"is" and the truncated 422 message).
+
+        // 404 — reserved `…404` suffix (shared CamaraError::for_status).
+        let (status, _, body) = call_ok(r#"{"device":{"phoneNumber":"+123456789404"}}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+        assert_eq!(body["message"], "The specified resource is not found.");
+
+        // 422 MISSING_IDENTIFIER — no device, non-line subject.
+        let (status, _, body) = call_ok("{}").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "MISSING_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "The device cannot be identified: supply a `device` or use a token that identifies a device."
+        );
+
+        // 422 UNNECESSARY_IDENTIFIER — device resubmitted on a line token.
+        let token = mint_token_with_client(RETRIEVE_SCOPE, "+123456789012").await;
+        let (status, _, body) =
+            post_retrieve(Some(&token), r#"{"device":{"phoneNumber":"+123456789012"}}"#, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "The device is already identified by the access token."
+        );
+
+        // 400 INVALID_ARGUMENT — empty `device` (the vendored 400 example).
+        let (status, _, body) = call_ok(r#"{"device":{}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["message"], "`device` must contain at least one identifier.");
+    }
+
+    #[tokio::test]
     async fn empty_device_object_is_rejected() {
         let (status, _, body) = call_ok(r#"{"device":{}}"#).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
