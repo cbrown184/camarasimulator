@@ -118,7 +118,12 @@ Verified sub-items:
   (`retrieveDataVolume`, `checkDataVolume`) implemented, tested, and documented in
   `specs/device-data-volume/vwip/openapi.yaml`; stale "`/check` is a later slice"
   module doc corrected.
-- 🔧 device-visit-location
+- 🔧 device-visit-location — verified 2026-10-12: the one modelled operation
+  (`retrieveDeviceVisitLocation`, `POST /device-visit-location/vwip/retrieve`) is
+  implemented, tested (~25 test fns), and documented in
+  `specs/device-visit-location/vwip/openapi.yaml`; spec ↔ code ↔ module-doc
+  consistent (success example, reserved-suffix mapping, and identifier-resolution
+  422s all match), no drift found, no change needed.
 - 🔧 population-density-data
 - 🔧 qos-booking
 - 🔧 media-streaming-rate
@@ -219,6 +224,29 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-12 — Phase 5 vwip verification pass (device-visit-location). Audited the
+  second vwip API in mount order. Unlike device-data-volume (prior pass, stale doc
+  found), this one is **clean**: the single modelled operation
+  `retrieveDeviceVisitLocation` (`POST /device-visit-location/vwip/retrieve`) is
+  fully implemented (`src/apis/device_visit_location/vwip.rs`), the module doc and
+  the vendored spec (`specs/device-visit-location/vwip/openapi.yaml`) agree with the
+  code, and ~25 tests cover every control plane (success geoCodeList, `…000`
+  DATA_NOT_FOUND, reserved-suffix errors, INVALID_END_DATE, malformed/missing time,
+  the two-legged/three-legged identifier-resolution 422s, auth, x-correlator echo).
+  Spot-checked for drift and found none: the spec's `…012` success example
+  (US/GB/DE postal codes 01651/02622/03593) matches `visited_geocodes`/`postal_code`
+  byte-for-byte, and the reserved-suffix mapping the spec cites (422 →
+  SERVICE_NOT_APPLICABLE, etc.) matches `CamaraError::for_status`. No code/spec/doc
+  change needed — this advances the vwip audit cursor to the next API
+  (population-density-data) so a future pass does not re-audit this one. Docs-only
+  (PROGRESS.md inventory bullet + this entry). `cargo test` green: 3055 passed, 0
+  failed (unchanged — nothing to test in a verification with no behaviour change).
+  `cargo build --release` green; binary = 5,430,424 bytes (unchanged vs. the prior
+  pass on rustc 1.97.0; no code changed). *Backlog banner still stands:* the
+  net-new feature backlog remains exhausted and the human decision (authorise
+  stateful infra, name an increment, or pause the routine) is still open — this
+  pass is the sanctioned per-API vwip verification (backlog item 3), not net-new
+  feature work.
 - 2026-10-12 — Phase 5 vwip verification pass (device-data-volume). Audited the
   first vwip API in mount order and found the top-level module doc
   (`src/apis/device_data_volume.rs`) **stale**: it claimed only `POST /retrieve`
