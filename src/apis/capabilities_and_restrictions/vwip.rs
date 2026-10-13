@@ -694,6 +694,78 @@ mod tests {
         assert_eq!(body["code"], "UNAUTHENTICATED");
     }
 
+    // --- Vendored-example pinning (spec ↔ code) ---------------------------
+
+    #[tokio::test]
+    async fn vendored_success_example_matches_the_handler() {
+        // The vendored `201` `info` example is bound to the request example's
+        // `phoneNumber: "+123456789012"` (trailing digits 012 = 12 → bitmap
+        // 12 % 8 = 4). Drive the documented request through the real router and
+        // pin every deterministic field the example shows so it can't drift
+        // from the handler again.
+        let (status, _, body) = call_ok(&query_body(Some("+123456789012"))).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let details = body["details"].as_array().unwrap();
+        assert_eq!(details.len(), 1);
+        let d = &details[0];
+        assert_eq!(d["name"], json!("camarasim-capability-set"));
+        assert_eq!(d["version"], json!("1.0.0"));
+        assert_eq!(d["mappingVersion"], json!("1.0.0"));
+        // The documented, deterministic active bitmap.
+        assert_eq!(d["camaraCapabilitiesBitmap"], json!(4));
+        // Echoed context.
+        assert_eq!(d["overlayExtends"], json!([OVERLAY]));
+        assert_eq!(d["resourceScopes"], json!([{ "phoneNumber": "+123456789012" }]));
+        // The whole catalogue is enumerated; key "0" matches the documented set.
+        let caps = d["bitmapCapabilities"].as_object().unwrap();
+        assert_eq!(caps.len(), CATALOGUE_SIZE);
+        assert_eq!(
+            d["bitmapCapabilities"]["0"],
+            json!({
+                "name": "rr-accepted-device-identifiers",
+                "version": "1.0.0",
+                "restrictions": [{
+                    "name": "org.camaraproject.capability.v0.object-instance-restriction.rr-accepted-device-identifiers",
+                    "version": "0.0.1",
+                    "extends": OVERLAY,
+                    "actions": [{
+                        "target": "$.components.schemas['Device'].properties['ipv4Address']",
+                        "remove": true
+                    }],
+                }],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // The two inline `400` examples are the only error responses not `$ref`ing
+        // the shared catalog; existing tests guard only their `code`. Pin the
+        // exact status/code/message bytes each emits through the router.
+        let (status, _, body) = call_ok(r#"{"queries":[{}]}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], json!(400));
+        assert_eq!(body["code"], json!("INVALID_ARGUMENT"));
+        assert_eq!(
+            body["message"],
+            json!("Each query requires a non-empty `overlayExtends`.")
+        );
+
+        let overlays = (0..21)
+            .map(|i| format!(r#""https://x/{i}.yaml""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let (status, _, body) =
+            call_ok(&format!(r#"{{"queries":[{{"overlayExtends":[{overlays}]}}]}}"#)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], json!(400));
+        assert_eq!(body["code"], json!("OUT_OF_RANGE"));
+        assert_eq!(
+            body["message"],
+            json!("`overlayExtends` must contain at most 20 entries.")
+        );
+    }
+
     #[tokio::test]
     async fn x_correlator_is_echoed_on_201_and_error() {
         let token = mint_token(READ_SCOPE).await;

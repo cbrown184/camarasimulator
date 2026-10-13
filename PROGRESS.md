@@ -575,7 +575,39 @@ Verified sub-items:
   cursor to the next API (capabilities-and-restrictions). Spec + doc + test
   change (no behaviour/response change — the handlers were already correct; only
   the example ids/MACs were placeholders); no new dependency.
-- 🔧 capabilities-and-restrictions
+- 🔧 capabilities-and-restrictions — verified 2026-10-13: the one modelled
+  operation (`postServiceCapability`, `POST
+  /capabilities-and-restrictions/vwip/retrieve`) is implemented
+  (`src/apis/capabilities_and_restrictions/vwip.rs`), routed, and well-tested
+  (23 test fns before this pass), and the module docs agree with the code and
+  the vendored `specs/capabilities-and-restrictions/vwip/openapi.yaml`: the
+  reserved-error-suffix plane on the first query's first `phoneNumber`
+  (`…404` = "No Capability API found"), the context-derived
+  `camaraCapabilitiesBitmap` (queried phone number's trailing three digits, else
+  an FNV-1a hash of `overlayExtends`, `% 2^CATALOGUE_SIZE`), the three-entry
+  synthetic restriction catalogue, the `overlayExtends`/`resourceScopes` echo,
+  and the validation plane (400 `INVALID_ARGUMENT`/`OUT_OF_RANGE`) all match.
+  **Spec↔code drift found and fixed — the deterministic-value class** (as on
+  network-access-devices / click-to-dial / verified-caller): the vendored `201`
+  `info` success example, bound to the request example's `phoneNumber
+  "+123456789012"`, claimed `camaraCapabilitiesBitmap: 5`, but the handler
+  derives it from the trailing three digits — `012` = 12, `12 % 8 = 4` — so the
+  value is `4` (the `5` was evidently copied from the `…005` unit-test
+  scenario). Corrected the example to `4` (with a derivation comment) and added
+  `vendored_success_example_matches_the_handler`, which drives the documented
+  request through the real router and pins the bitmap, the echoed
+  `overlayExtends`/`resourceScopes`, the full three-key `bitmapCapabilities`
+  map, and key `"0"`'s exact restriction block. **Small tested increment:** the
+  two inline `400` examples (the only error responses not `$ref`ing the shared
+  catalog) were guarded by existing tests only for `code`; added
+  `vendored_error_example_messages_match_the_handler` pinning the exact
+  `status`/`code`/`message` bytes of the `invalidArgument` and `outOfRange`
+  examples through the router. The restriction-catalogue blocks, the request
+  example, and the shared-`$ref` 401/403/404/409/422/429/500/503 responses
+  already matched. This advances the vwip audit cursor to the next API
+  (dedicated-network-profiles). Spec + `#[cfg(test)]` change (no
+  behaviour/response change — the handler was already correct; only the one
+  success-example bitmap was wrong); no new dependency.
 - 🔧 dedicated-network-profiles
 - 🔧 dedicated-network
 - 🔧 dedicated-network-accesses
@@ -654,6 +686,36 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-13 — Phase 5 vwip verification pass (capabilities-and-restrictions).
+  Audited the twenty-fourth vwip API in mount order. The one modelled operation
+  (`postServiceCapability`, `POST /capabilities-and-restrictions/vwip/retrieve`)
+  is implemented (`src/apis/capabilities_and_restrictions/vwip.rs`), routed, and
+  well-tested (23 test fns before this pass). Verified the control planes match
+  the handler: the reserved-error suffix on the first query's first `phoneNumber`
+  (`…404` = "No Capability API found"); the context-derived
+  `camaraCapabilitiesBitmap` (trailing three digits of the queried phone number,
+  else an FNV-1a hash of `overlayExtends`, `% 2^CATALOGUE_SIZE`=8); the
+  three-entry synthetic restriction catalogue; the `overlayExtends`/
+  `resourceScopes` echo; and the 400 `INVALID_ARGUMENT`/`OUT_OF_RANGE` validation
+  plane. **Spec↔code drift found and fixed — the deterministic-value class** (as
+  on network-access-devices / click-to-dial / verified-caller): the `201` `info`
+  success example, bound to the request example's `phoneNumber "+123456789012"`,
+  claimed `camaraCapabilitiesBitmap: 5`, but the handler derives it from the
+  trailing three digits (`012` = 12, `12 % 8 = 4`), so the value is `4` (the `5`
+  was evidently copied from the `…005` unit-test scenario). Corrected the example
+  to `4` and added `vendored_success_example_matches_the_handler`, driving the
+  documented request through the real router to pin the bitmap, the echoed
+  `overlayExtends`/`resourceScopes`, the full three-key `bitmapCapabilities` map,
+  and key `"0"`'s exact restriction block. Also added
+  `vendored_error_example_messages_match_the_handler` pinning the exact
+  `status`/`code`/`message` bytes of the two inline `400` examples
+  (`invalidArgument`, `outOfRange` — the only error responses not `$ref`ing the
+  shared catalog, previously guarded only for `code`). All other examples and the
+  shared-`$ref` 401/403/404/409/422/429/500/503 responses already matched. Green:
+  `cargo test` 3079 passed (0 failed), `cargo build --release` ok, release binary
+  5,434,520 bytes (unchanged — spec-example + `#[cfg(test)]` change only, no
+  runtime code touched; no new dependency). This advances the vwip audit cursor
+  to the next API (dedicated-network-profiles).
 - 2026-10-13 — Phase 5 vwip verification pass (network-access-devices). Audited
   the twenty-third vwip API in mount order (device listing + a stateful
   reboot-request resource lifecycle). All **five** modelled operations —

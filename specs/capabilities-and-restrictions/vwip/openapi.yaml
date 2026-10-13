@@ -123,7 +123,8 @@ paths:
                         createdAt: "2025-05-09T14:25:38Z"
                         lastModifiedAt: "2025-05-09T14:25:38Z"
                         mappingVersion: "1.0.0"
-                        camaraCapabilitiesBitmap: 5
+                        # Derived: trailing three digits of +123456789012 (012 = 12) % 8 = 4.
+                        camaraCapabilitiesBitmap: 4
                         overlayExtends:
                           - "https://github.com/camaraproject/QualityOnDemand/blob/r2.2/code/API_definitions/quality-on-demand.yaml"
                         resourceScopes:
