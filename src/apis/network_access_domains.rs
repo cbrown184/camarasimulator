@@ -11,13 +11,15 @@
 //!   yet, so mounted at its canonical `vwip` base path like Network Access Devices
 //!   and the other pre-1.0 wip APIs).
 //!
-//! Implemented so far: the read-only provider-level
-//! `GET /trust-domains/capabilities` leg, the `GET /services` catalog
-//! (`getServices`), the single-service `GET /services/{serviceId}` read
-//! (`getService`), and the first **stateful** Trust Domain leg
-//! `POST /trust-domains` (`createTrustDomain`, backed by the in-memory
-//! [`store`]). The remaining Trust Domain read/update/delete legs and the Trust
-//! Domain Device CRUD resource are later slices.
+//! Implemented: the full Network Access Domains vwip surface (13 operations) —
+//! the read-only provider-level `GET /trust-domains/capabilities` leg
+//! (`getTrustDomainCapabilities`); the `GET /services` catalog (`getServices`)
+//! and single-service `GET /services/{serviceId}` read (`getService`); the
+//! **stateful** Trust Domain CRUD lifecycle (`createTrustDomain`,
+//! `getTrustDomains`, `getTrustDomain`, `updateTrustDomain`, `deleteTrustDomain`,
+//! backed by the in-memory [`store`]); and the Trust Domain Device sub-resource
+//! CRUD (`createTrustDomainDevice`, `getTrustDomainDevices`,
+//! `getTrustDomainDevice`, `updateTrustDomainDevice`, `deleteTrustDomainDevice`).
 
 pub mod store;
 pub mod vwip;

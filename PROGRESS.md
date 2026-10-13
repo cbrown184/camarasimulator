@@ -809,7 +809,54 @@ Verified sub-items:
   (network-access-domains, the last unaudited vwip API). Spec + doc + `#[cfg(test)]`
   change (no behaviour/response change — the handlers were already correct; only
   the examples carried placeholders); no new dependency.
-- 🔧 network-access-domains
+- 🔧 network-access-domains — verified 2026-10-13: all **thirteen** modelled
+  operations across the full surface — the read-only `getTrustDomainCapabilities`
+  (`GET /trust-domains/capabilities`); the subject-keyed `getServices`
+  (`GET /services`) and `getService` (`GET /services/{serviceId}`); the stateful
+  Trust Domain CRUD (`createTrustDomain`, `getTrustDomains`, `getTrustDomain`,
+  `updateTrustDomain`, `deleteTrustDomain`); and the Trust Domain **Device**
+  sub-resource CRUD (`createTrustDomainDevice`, `getTrustDomainDevices`,
+  `getTrustDomainDevice`, `updateTrustDomainDevice`, `deleteTrustDomainDevice`) —
+  are implemented (`src/apis/network_access_domains/vwip.rs` + an in-memory
+  `store.rs` with disjoint Trust Domain and device maps), routed, and well-tested
+  (~90 test fns before this pass), and the vendored
+  `specs/network-access-domains/vwip/openapi.yaml` is consistent with the code (the
+  subject reserved-suffix / request-validation / store-state / parent-existence
+  control planes, the advertised-access-type gate, the write-only password/credential
+  stripping, and the `(serviceId, name)` / `(trustDomainId, deviceName)` →
+  deterministic-v5-id duplicate-409 derivation all match). **Spec↔code drift found
+  and fixed — the deterministic-id / placeholder class, this spec's whole success-example
+  set** (the same class caught on verified-caller / click-to-dial /
+  network-access-devices / edge-application-management / esim-remote-management):
+  *every* 200/201 success example carried Swagger placeholder ids and none was bound to
+  a concrete input. The four Trust Domain examples (createTrustDomain `created`,
+  getTrustDomains `one`, getTrustDomain/updateTrustDomain `trustDomain`) all showed
+  `id: b1e0f6a2-…`, but `trust_domain_id("3fa85f64-…", "Primary WiFi Network")` is
+  `950925b2-55e7-5330-8f22-93fef8f82784`; the four device examples showed
+  `c2f1a7b3-…`/`d3a2b8c4-…`, but `trust_domain_device_id` of that Trust Domain yields
+  `0cc7f47a-…` (Alice's Laptop) and `542bfe03-…` (Alice's Phone); and the getServices
+  `twoServices` + getService `service` examples carried placeholder service/site ids
+  (`3fa85f64-…`, `123e4567-…`) and real-city geo points (Bonn/Zurich) though all are
+  SHA-256-derived from the token subject — for subject `nad-005` (trailing 005 → 2
+  services) the real ids are `d161db25-…`/`8daaa955-…` (lat 67.55459 / long −110.31266)
+  and `fe6a3242-…`/`eefceeba-…` (lat 70.88075 / long −115.6466). Bound each example to
+  its concrete input, corrected all ids/geo to the handler's derived values (keeping
+  the audit stamps `createdAt`/`modifiedAt` + subject-derived `createdBy`/`modifiedBy`
+  explicitly illustrative, the network-access-devices posture), and added
+  `vendored_success_examples_match_the_handler`, which drives createTrustDomain +
+  getTrustDomain, createTrustDomainDevice, and getServices + getService through the real
+  router (and pins `trust_domain_id`/`trust_domain_device_id` directly) so the examples
+  can't drift back to placeholders. There are **no inline error examples** (every 4xx/5xx
+  `$ref`s the shared catalog, as on dedicated-network-accesses), so none to pin. **Two
+  stale "later slices" module docs fixed** (the stale-slice-doc trap caught on
+  device-data-volume / qos-booking / dedicated-network-* / esim-remote-management): the
+  parent `network_access_domains.rs` doc and the `vwip.rs` header both presented the
+  Trust Domain read/update/delete legs and the whole device sub-resource as future work
+  (the header listed only 5 of 13 operations) though all thirteen ship and are tested —
+  corrected both to the complete surface. **This was the last unaudited vwip API: the
+  per-API vwip verification sweep (backlog item 3) is now complete across all 🔧 APIs.**
+  Spec + doc + `#[cfg(test)]` change (no behaviour/response change — the handlers were
+  already correct; only the success examples carried placeholders); no new dependency.
 
 ## Backlog (unclaimed, top-first)
 
@@ -881,6 +928,61 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-13 — Phase 5 vwip verification pass (network-access-domains) — **the
+  last unaudited vwip API; the per-API vwip sweep (backlog item 3) is now
+  complete.** Audited the thirty-first and final vwip API in mount order (the
+  NetworkAccessManagement Trust Domain surface). All **thirteen** modelled
+  operations — `getTrustDomainCapabilities`; `getServices`/`getService`; the Trust
+  Domain CRUD (`createTrustDomain`/`getTrustDomains`/`getTrustDomain`/
+  `updateTrustDomain`/`deleteTrustDomain`); and the Trust Domain Device CRUD
+  (`createTrustDomainDevice`/`getTrustDomainDevices`/`getTrustDomainDevice`/
+  `updateTrustDomainDevice`/`deleteTrustDomainDevice`) — are implemented
+  (`src/apis/network_access_domains/vwip.rs` + an in-memory `store.rs`), routed, and
+  well-tested (~90 test fns before this pass). Verified the control planes match the
+  handler: the token-subject reserved-suffix plane (createTrustDomain/
+  createTrustDomainDevice/getServices/getService), request validation, parent Trust
+  Domain existence (device legs), the store-state duplicate-409 keyed on the
+  deterministic `(serviceId, name)` / `(trustDomainId, deviceName)` v5-UUID, the
+  advertised-access-type gate, and the write-only WPA-password / deviceCredential
+  stripping. **Spec↔code drift found and fixed — the deterministic-id / placeholder
+  class, covering this spec's ENTIRE success-example set** (the same class caught on
+  verified-caller / click-to-dial / network-access-devices /
+  edge-application-management / esim-remote-management): every 200/201 example carried
+  Swagger placeholder ids and none was bound to a concrete input. Corrected the four
+  Trust Domain examples' `id` (`b1e0f6a2-…` → `trust_domain_id("3fa85f64-…","Primary
+  WiFi Network")` = `950925b2-55e7-5330-8f22-93fef8f82784`), the four device examples'
+  `id` (`c2f1a7b3-…`/`d3a2b8c4-…` → the real `trust_domain_device_id` values
+  `0cc7f47a-…` Alice's Laptop / `542bfe03-…` Alice's Phone), and the
+  getServices/getService examples' service+site ids and geo points (placeholder
+  `3fa85f64-…`/`123e4567-…` + Bonn/Zurich coords → the SHA-256-derived values for the
+  now-stated token subject `nad-005`: `d161db25-…`/`8daaa955-…` lat 67.55459/long
+  −110.31266 and `fe6a3242-…`/`eefceeba-…` lat 70.88075/long −115.6466). Bound each
+  example to its concrete input (keeping the audit stamps `createdAt`/`modifiedAt` +
+  subject-derived `createdBy`/`modifiedBy` explicitly illustrative, the
+  network-access-devices posture) and added `vendored_success_examples_match_the_handler`,
+  which drives createTrustDomain + getTrustDomain, createTrustDomainDevice, and
+  getServices + getService through the real router and pins
+  `trust_domain_id`/`trust_domain_device_id` directly so the examples can't drift back
+  to placeholders. No inline error examples exist (every 4xx/5xx `$ref`s the shared
+  catalog, as on dedicated-network-accesses), so none to pin. **Two stale "later
+  slices" module docs fixed** (the stale-slice-doc trap caught on device-data-volume /
+  qos-booking / dedicated-network-* / esim-remote-management): the parent
+  `network_access_domains.rs` doc and the `vwip.rs` header both presented the Trust
+  Domain read/update/delete legs and the whole device sub-resource as future work (the
+  header listed only 5 of 13 operations) though all thirteen ship — corrected both to
+  the complete surface. `cargo test` green (3088 → 3089 tests) and `cargo build
+  --release` green; release binary 5,446,808 bytes (byte-identical to the prior esim
+  pass — the spec example edits were size-neutral within the same page; the module-doc
+  edits are not embedded in the binary). Spec + doc + `#[cfg(test)]` change only (no
+  behaviour/response change — the handlers were already correct; only the success
+  examples carried placeholders); no new dependency. *Backlog banner still stands:* the
+  net-new feature backlog remains exhausted and the human decision (authorise stateful
+  infra, name an increment, or pause the routine) is still open. With the vwip sweep
+  now complete, future idle passes have no remaining per-API verification target — an
+  idle pass should confirm nothing changed and **stop without committing** per the
+  decision-point banner. **Integration note:** on entry the local checkout == `origin/main`
+  at `b9936f1` (esim-remote-management); this pass branches off it, rebases on main, and
+  pushes one commit on top.
 - 2026-10-13 — Phase 5 vwip verification pass (esim-remote-management). Audited
   the thirtieth vwip API in mount order (the CMP-envelope eSIM profile-management
   surface). All four modelled operations — the stateless read legs `profileList`

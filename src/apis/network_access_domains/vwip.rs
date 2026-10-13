@@ -1,7 +1,7 @@
 //! Network Access Domains **vwip** (CAMARA NetworkAccessManagement / Network
 //! Access Domains, wip).
 //!
-//! Endpoints so far:
+//! Endpoints (the complete vwip surface — 13 operations):
 //! - `GET /network-access-domains/vwip/trust-domains/capabilities` — the
 //!   provider-level Trust Domain capabilities document (operationId
 //!   `getTrustDomainCapabilities`).
@@ -10,11 +10,18 @@
 //!   account relationships the authenticated identity holds.
 //! - `GET /network-access-domains/vwip/services/{serviceId}` — a single
 //!   **Service** from that catalog by id (operationId `getService`).
-//! - `POST /network-access-domains/vwip/trust-domains` — the first **stateful**
-//!   leg: create a Trust Domain (operationId `createTrustDomain`), persisted in
-//!   the in-memory [`store`].
-//! - `GET /network-access-domains/vwip/trust-domains` — list every created Trust
-//!   Domain (operationId `getTrustDomains`), a store-only scan of [`store`].
+//! - The **stateful** Trust Domain CRUD lifecycle, persisted in the in-memory
+//!   [`store`]: `POST /trust-domains` (`createTrustDomain`), `GET /trust-domains`
+//!   (`getTrustDomains`, a store-only scan), `GET /trust-domains/{trustDomainId}`
+//!   (`getTrustDomain`), `PATCH /trust-domains/{trustDomainId}`
+//!   (`updateTrustDomain`), and `DELETE /trust-domains/{trustDomainId}`
+//!   (`deleteTrustDomain`).
+//! - The Trust Domain **Device** sub-resource CRUD, persisted alongside its owning
+//!   Trust Domain in [`store`]: `POST /trust-domains/{trustDomainId}/devices`
+//!   (`createTrustDomainDevice`), `GET …/devices` (`getTrustDomainDevices`),
+//!   `GET …/devices/{deviceId}` (`getTrustDomainDevice`), `PATCH …/devices/{deviceId}`
+//!   (`updateTrustDomainDevice`), and `DELETE …/devices/{deviceId}`
+//!   (`deleteTrustDomainDevice`).
 //!
 //! ## What they do
 //!
@@ -1777,6 +1784,120 @@ mod tests {
         Router::new()
             .merge(crate::auth::routes())
             .merge(crate::apis::routes())
+    }
+
+    /// Every vendored success example in this spec is reproducible from its
+    /// documented input (the response ids are deterministic: `trustDomainId` and
+    /// `deviceId` are v5 UUIDs over the resource identity, and the `Service` /
+    /// `serviceSite` ids + `geographicPoint` are SHA-256-derived from the token
+    /// subject). Pin each documented example against the real router + the pure
+    /// derivation so the spec examples can't silently drift back to the Swagger
+    /// placeholders they once carried (the deterministic-id/placeholder drift
+    /// class caught across the vwip audit).
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        // --- createTrustDomain `created` (the trustDomainId is reused verbatim by
+        //     the getTrustDomains/getTrustDomain/updateTrustDomain examples) -----
+        let service_id = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+        let td_name = "Primary WiFi Network";
+        let expected_td_id = "950925b2-55e7-5330-8f22-93fef8f82784";
+        // The documented id is reproducible from (serviceId, name) alone (no store).
+        assert_eq!(trust_domain_id(service_id, td_name), expected_td_id);
+
+        let token = mint_token_as("nad-ex", TRUST_DOMAINS_SCOPE).await;
+        let create_body = json!({
+            "serviceId": service_id,
+            "name": td_name,
+            "description": "Primary home WiFi Network for all devices",
+            "enabled": true,
+            "accessDetails": [{
+                "accessType": "Wi-Fi:WPA_PERSONAL",
+                "ssid": "my-ssid",
+                "securityMode": { "password": "my-password", "securityModeType": "WPA3-Personal" }
+            }]
+        });
+        let (status, _, td) = post_trust_domain(Some(&token), Some(&create_body), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(td["id"], json!(expected_td_id));
+        assert_eq!(td["serviceId"], json!(service_id));
+        assert_eq!(td["name"], json!(td_name));
+        assert_eq!(td["enabled"], json!(true));
+        // The write-only WPA password is stripped from the echoed accessDetails.
+        let detail = &td["accessDetails"][0];
+        assert_eq!(detail["accessType"], json!("Wi-Fi:WPA_PERSONAL"));
+        assert_eq!(detail["ssid"], json!("my-ssid"));
+        assert_eq!(detail["securityMode"]["securityModeType"], json!("WPA3-Personal"));
+        assert!(detail["securityMode"].get("password").is_none());
+
+        // getTrustDomain serves the same id back (the `trustDomain` example body).
+        let (status, _, got) = get_trust_domain_req(Some(&token), expected_td_id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(got["id"], json!(expected_td_id));
+        assert_eq!(got["name"], json!(td_name));
+
+        // --- createTrustDomainDevice `created` (the deviceId is reused by the
+        //     getTrustDomainDevices/getTrustDomainDevice/updateTrustDomainDevice
+        //     examples; the two list ids come from the same derivation) ----------
+        let laptop_id = "0cc7f47a-d123-5434-8f02-2ea93c978f0e";
+        let phone_id = "542bfe03-336b-5b49-8ab3-39f8c7b23ee6";
+        assert_eq!(trust_domain_device_id(expected_td_id, "Alice's Laptop"), laptop_id);
+        assert_eq!(trust_domain_device_id(expected_td_id, "Alice's Phone"), phone_id);
+
+        let dev_token = mint_token_as("nad-ex", DEVICES_SCOPE).await;
+        let dev_body = json!({
+            "deviceName": "Alice's Laptop",
+            "deviceType": "LAPTOP",
+            "enabled": true,
+            "hardwareAddress": { "hardwareAddressType": "EUI-48", "value": "00:11:22:33:44:55" }
+        });
+        let (status, _, dev) =
+            post_device(Some(&dev_token), expected_td_id, Some(&dev_body), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(dev["id"], json!(laptop_id));
+        assert_eq!(dev["deviceName"], json!("Alice's Laptop"));
+        assert_eq!(dev["deviceType"], json!("LAPTOP"));
+        assert_eq!(dev["enabled"], json!(true));
+        assert_eq!(dev["connected"], json!(false));
+        assert_eq!(dev["associated"], json!(false));
+        assert_eq!(dev["hardwareAddress"]["value"], json!("00:11:22:33:44:55"));
+
+        // --- getServices `twoServices` + getService `service` (token subject
+        //     "nad-005", trailing digits 005 → 2 services) — store-free, so the
+        //     whole body is pinned exactly. --------------------------------------
+        let svc_token = mint_token_as("nad-005", SERVICES_SCOPE).await;
+        let expected_services = json!([
+            {
+                "id": "d161db25-5c94-e4da-77cf-944badbab1fc",
+                "name": "Main Home Internet",
+                "description": "Internet subscription for primary residence",
+                "serviceSite": {
+                    "id": "8daaa955-d938-9f5b-747a-4c1dad3b5751",
+                    "name": "Primary Residence",
+                    "description": "123 Main Street",
+                    "location": { "geographicPoint": { "latitude": 67.55459, "longitude": -110.31266 } }
+                }
+            },
+            {
+                "id": "fe6a3242-a592-dca7-907f-6f4921a96e3c",
+                "name": "Vacation Home Internet",
+                "description": "Internet subscription for vacation home",
+                "serviceSite": {
+                    "id": "eefceeba-7197-b863-1612-e1d74ca70150",
+                    "name": "Vacation Home",
+                    "description": "45 Lakeside Road",
+                    "location": { "geographicPoint": { "latitude": 70.88075, "longitude": -115.6466 } }
+                }
+            }
+        ]);
+        let (status, _, list) = get_services_req(Some(&svc_token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list, expected_services);
+
+        // getService returns that identity's first service — the documented body.
+        let (status, _, svc) =
+            get_service_req("d161db25-5c94-e4da-77cf-944badbab1fc", Some(&svc_token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(svc, expected_services[0]);
     }
 
     /// Mint an access token via `client_credentials` with the given scope.

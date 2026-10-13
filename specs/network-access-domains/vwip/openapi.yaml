@@ -415,8 +415,12 @@ paths:
               examples:
                 created:
                   summary: The created Trust Domain (write-only password omitted)
+                  # id = trust_domain_id(serviceId, name), a v5 UUID over the
+                  # (serviceId, name) pair, so it is reproducible from this request.
+                  # createdAt/modifiedAt (wall-clock) and createdBy/modifiedBy
+                  # (derived from the token subject) are illustrative.
                   value:
-                    id: "b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b"
+                    id: "950925b2-55e7-5330-8f22-93fef8f82784"
                     serviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
                     name: "Primary WiFi Network"
                     description: "Primary home WiFi Network for all devices"
@@ -516,7 +520,7 @@ paths:
                 one:
                   summary: One created Trust Domain (write-only password omitted)
                   value:
-                    - id: "b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b"
+                    - id: "950925b2-55e7-5330-8f22-93fef8f82784"
                       serviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
                       name: "Primary WiFi Network"
                       description: "Primary home WiFi Network for all devices"
@@ -604,7 +608,7 @@ paths:
                 trustDomain:
                   summary: A stored Trust Domain (write-only password omitted)
                   value:
-                    id: "b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b"
+                    id: "950925b2-55e7-5330-8f22-93fef8f82784"
                     serviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
                     name: "Primary WiFi Network"
                     description: "Primary home WiFi Network for all devices"
@@ -724,7 +728,7 @@ paths:
                 trustDomain:
                   summary: The updated Trust Domain (write-only password omitted)
                   value:
-                    id: "b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b"
+                    id: "950925b2-55e7-5330-8f22-93fef8f82784"
                     serviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
                     name: "Guest WiFi Network"
                     enabled: false
@@ -904,7 +908,7 @@ paths:
                 two:
                   summary: A Trust Domain with two registered devices
                   value:
-                    - id: "c2f1a7b3-8d4e-5f6a-9b0c-1d2e3f4a5b6c"
+                    - id: "0cc7f47a-d123-5434-8f02-2ea93c978f0e"
                       deviceName: "Alice's Laptop"
                       deviceType: "LAPTOP"
                       enabled: true
@@ -914,7 +918,7 @@ paths:
                       createdBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
                       modifiedAt: "2024-01-01T09:00:00Z"
                       modifiedBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
-                    - id: "d3a2b8c4-9e5f-6a7b-0c1d-2e3f4a5b6c7d"
+                    - id: "542bfe03-336b-5b49-8ab3-39f8c7b23ee6"
                       deviceName: "Alice's Phone"
                       deviceType: "SMARTPHONE"
                       enabled: true
@@ -1044,8 +1048,12 @@ paths:
               examples:
                 created:
                   summary: The created device (write-only deviceCredential omitted)
+                  # id = trust_domain_device_id(trustDomainId, deviceName), a v5 UUID
+                  # over the (trustDomainId, deviceName) pair — here the parent is the
+                  # Trust Domain 950925b2-… created above, so it is reproducible.
+                  # createdAt/modifiedAt and createdBy/modifiedBy are illustrative.
                   value:
-                    id: "c2f1a7b3-8d4e-5f6a-9b0c-1d2e3f4a5b6c"
+                    id: "0cc7f47a-d123-5434-8f02-2ea93c978f0e"
                     deviceName: "Alice's Laptop"
                     deviceType: "LAPTOP"
                     enabled: true
@@ -1162,7 +1170,7 @@ paths:
                 device:
                   summary: A stored device (write-only deviceCredential omitted)
                   value:
-                    id: "c2f1a7b3-8d4e-5f6a-9b0c-1d2e3f4a5b6c"
+                    id: "0cc7f47a-d123-5434-8f02-2ea93c978f0e"
                     deviceName: "Alice's Laptop"
                     deviceType: "LAPTOP"
                     enabled: true
@@ -1295,7 +1303,7 @@ paths:
                 device:
                   summary: The updated device (write-only deviceCredential omitted)
                   value:
-                    id: "c2f1a7b3-8d4e-5f6a-9b0c-1d2e3f4a5b6c"
+                    id: "0cc7f47a-d123-5434-8f02-2ea93c978f0e"
                     deviceName: "Alice's Old Laptop"
                     deviceType: "LAPTOP"
                     enabled: false
@@ -1479,30 +1487,33 @@ paths:
                 $ref: "#/components/schemas/ServiceList"
               examples:
                 twoServices:
-                  summary: An identity with two services
+                  summary: An identity (token subject "nad-005", trailing digits 005 → 2 services) with two services
+                  # All ids and geographicPoints are deterministic from the token
+                  # subject (SHA-256-derived), so this example is bound to subject
+                  # "nad-005" and the values are the handler's real output for it.
                   value:
-                    - id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    - id: "d161db25-5c94-e4da-77cf-944badbab1fc"
                       name: "Main Home Internet"
                       description: "Internet subscription for primary residence"
                       serviceSite:
-                        id: "123e4567-e89b-12d3-a456-426614174000"
+                        id: "8daaa955-d938-9f5b-747a-4c1dad3b5751"
                         name: "Primary Residence"
                         description: "123 Main Street"
                         location:
                           geographicPoint:
-                            latitude: 50.735851
-                            longitude: 7.10066
-                    - id: "123e4567-e89b-12d3-a456-426614174001"
+                            latitude: 67.55459
+                            longitude: -110.31266
+                    - id: "fe6a3242-a592-dca7-907f-6f4921a96e3c"
                       name: "Vacation Home Internet"
                       description: "Internet subscription for vacation home"
                       serviceSite:
-                        id: "123e4567-e89b-12d3-a456-426614174002"
+                        id: "eefceeba-7197-b863-1612-e1d74ca70150"
                         name: "Vacation Home"
                         description: "45 Lakeside Road"
                         location:
                           geographicPoint:
-                            latitude: 47.36667
-                            longitude: 8.55
+                            latitude: 70.88075
+                            longitude: -115.6466
                 empty:
                   summary: An identity with no associated services
                   value: []
@@ -1583,19 +1594,22 @@ paths:
                 $ref: "#/components/schemas/Service"
               examples:
                 service:
-                  summary: A single service
+                  summary: A single service (token subject "nad-005", its first service)
+                  # Deterministic from the token subject, so bound to subject
+                  # "nad-005": this is that identity's first service (the id the
+                  # caller passes as {serviceId}), the handler's real output.
                   value:
-                    id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    id: "d161db25-5c94-e4da-77cf-944badbab1fc"
                     name: "Main Home Internet"
                     description: "Internet subscription for primary residence"
                     serviceSite:
-                      id: "123e4567-e89b-12d3-a456-426614174000"
+                      id: "8daaa955-d938-9f5b-747a-4c1dad3b5751"
                       name: "Primary Residence"
                       description: "123 Main Street"
                       location:
                         geographicPoint:
-                          latitude: 50.735851
-                          longitude: 7.10066
+                          latitude: 67.55459
+                          longitude: -110.31266
         "400":
           $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
         "401":
@@ -1987,7 +2001,7 @@ components:
         characters. CamaraSim mints server-assigned ids (the `trustDomainId`
         and the audit `createdBy`/`modifiedBy`) as deterministic, name-based
         version-5 UUIDs.
-      example: "b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b"
+      example: "950925b2-55e7-5330-8f22-93fef8f82784"
 
     DateTime:
       type: string
