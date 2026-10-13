@@ -726,7 +726,44 @@ Verified sub-items:
   This advances the vwip audit cursor to the next API (edge-application-management).
   Spec + `#[cfg(test)]` change (no behaviour/response change — the handler was
   already correct; only the one success-example id was wrong); no new dependency.
-- 🔧 edge-application-management
+- 🔧 edge-application-management — verified 2026-10-13: all **fifteen** modelled
+  operations across the full surface — the `edge-cloud-zones` + `clusters`
+  read-only catalogs, the `apps` CRUD (`submitApp`/`getApp`/`getApps`/`deleteApp`),
+  the `app-instances` CRUD (`createAppInstance`/`getAppInstance`/`getAppInstances`/
+  `deleteAppInstance`), and the `deployments` lifecycle (`createAppDeployment`/
+  `getAppDeployment`/`getAppDeployments`/`updateAppDeployment` (merge-patch)/
+  `deleteAppDeployment`) — are implemented (`src/apis/edge_application_management/
+  vwip.rs` + `store.rs`/`instance_store.rs`/`deployment_store.rs`), routed, and
+  well-tested (~90 test fns before this pass). **Spec↔code drift found and fixed —
+  the deterministic-value / placeholder-UUID class** (as on
+  application-endpoint-discovery / network-access-devices / click-to-dial): the
+  two reproducible catalog 200 examples carried Swagger placeholder ids — the
+  getEdgeCloudZones `catalog` example claimed "the full zone catalog" but showed
+  only 1 of 6 zones with `edgeCloudZoneId: 6ec0bd7f-…`, and the getClusters
+  `catalog` example carried `clusterRef: 642f6105-…` (not even v5-shaped, so
+  `cluster_ref` can never emit it) and the same placeholder zone id — though both
+  ids are deterministic v5 UUIDs (`zone_id`/`cluster_ref`, SHA-256 over the
+  name). Completed both to the real full catalogs (6 zones, 4 clusters) with the
+  handler's derived ids (e.g. `camarasim-edge-eu-west-1` →
+  `6c7adb07-5cdc-58a3-b049-918bcd741d7b`, `camarasim-cluster-eu-west-1a` →
+  `48397420-b675-506a-a94f-cf6ea9f6c885`), and corrected the name-paired
+  `EdgeCloudZone` schema example's id to its derived value too. Added
+  `vendored_success_examples_match_the_handler`, which drives both no-filter GETs
+  through the real router and pins every documented zone/cluster id both as the
+  literal and against `zone_id`/`cluster_ref` so they can't drift again (the bare
+  illustrative UUID schema examples — appInstanceId, appDeploymentId, Location
+  headers, request-body ids — stay illustrative, the application-profiles
+  posture). **Two stale "later passes" module docs fixed** (the stale-slice-doc
+  trap caught on device-data-volume / qos-booking / dedicated-network-*): the
+  parent `edge_application_management.rs` doc and the `vwip.rs` header both
+  presented the app-instance read/list/delete legs and the deployment/cluster
+  resources as future work and the header's endpoint list omitted `getClusters`,
+  `getAppDeployments`, `deleteAppDeployment`, though all fifteen ship — corrected
+  both to describe the complete surface. This advances the vwip audit cursor to
+  the next API (esim-remote-management). Spec + doc + `#[cfg(test)]` change (no
+  behaviour/response change — the handlers were already correct; only the two
+  catalog examples and one schema example carried placeholders); no new
+  dependency.
 - 🔧 esim-remote-management
 - 🔧 network-access-domains
 
@@ -800,6 +837,57 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-13 — Phase 5 vwip verification pass (edge-application-management).
+  Audited the twenty-ninth vwip API in mount order (the management counterpart to
+  the EdgeCloud discovery family: two read-only catalogs plus three stateful
+  resource lifecycles). All **fifteen** modelled operations — `getEdgeCloudZones`,
+  `getClusters`, the `apps` CRUD, the `app-instances` CRUD, and the `deployments`
+  create/read/list/update(merge-patch)/delete lifecycle — are implemented
+  (`src/apis/edge_application_management/vwip.rs` + `store.rs` / `instance_store.rs`
+  / `deployment_store.rs`), routed, and well-tested (~90 test fns before this
+  pass). Verified the control planes match the handler: the two catalogs are
+  pure fixed tables filtered by query params (no device identifier → no
+  reserved-error plane); the stateful legs mint deterministic v5-UUID ids from
+  their identity (`app_id` from name+version+provider, `instance_id` from
+  app+zone, `deployment_id` from app+name+sorted-zones) so duplicates 409, and
+  the zone/cluster ids are v5 UUIDs derived from the name (`zone_id`/`cluster_ref`).
+  **Spec↔code drift found and fixed — the deterministic-value / placeholder-UUID
+  class** (as on application-endpoint-discovery / network-access-devices /
+  click-to-dial): the two reproducible catalog 200 examples carried Swagger
+  placeholders — getEdgeCloudZones `catalog` claimed "the full zone catalog" but
+  showed 1 of 6 zones with `edgeCloudZoneId: 6ec0bd7f-…`, and getClusters
+  `catalog` carried `clusterRef: 642f6105-…` (version-4 shaped, so `cluster_ref`,
+  which forces v5, can never emit it) plus the same placeholder zone id. Completed
+  both to the real full catalogs (6 zones / 4 clusters) with the handler's derived
+  ids (e.g. `camarasim-edge-eu-west-1` → `6c7adb07-5cdc-58a3-b049-918bcd741d7b`;
+  `camarasim-cluster-eu-west-1a` → `48397420-b675-506a-a94f-cf6ea9f6c885`), and
+  corrected the name-paired `EdgeCloudZone` schema example id to its derived value.
+  Added `vendored_success_examples_match_the_handler`, which drives both no-filter
+  GETs through the real router and pins each documented zone/cluster id both as the
+  literal and against `zone_id`/`cluster_ref` so they can't silently drift (the
+  bare illustrative UUID schema examples — appInstanceId/appDeploymentId/Location/
+  request-body ids — are left illustrative, the application-profiles posture).
+  **Two stale "later passes" module docs fixed** (the stale-slice-doc trap caught
+  on device-data-volume / qos-booking / dedicated-network-*): the parent
+  `edge_application_management.rs` doc and the `vwip.rs` header both framed the
+  app-instance read/list/delete legs and the deployment/cluster resources as
+  future work, and the header's endpoint list omitted `getClusters`,
+  `getAppDeployments`, `deleteAppDeployment` though all fifteen ship — corrected
+  both to the complete surface. `cargo test` green (3086 → 3087 tests) and
+  `cargo build --release` green; release binary 5,442,712 bytes (~5.19 MiB, up
+  4,096 bytes / one page from the prior 5,438,616 — the embedded vendored spec
+  grew with the completed catalog examples; no runtime-code change). This advances
+  the vwip audit cursor to the next API (esim-remote-management). Spec + doc +
+  `#[cfg(test)]` change only (no behaviour/response change — the handlers were
+  already correct; only the two catalog examples and one schema example carried
+  placeholders); no new dependency. *Backlog banner still stands:* the net-new
+  feature backlog remains exhausted and the human decision (authorise stateful
+  infra, name an increment, or pause the routine) is still open — this is the
+  sanctioned per-API vwip verification (backlog item 3). **Integration note:** on
+  entry the local checkout was a detached HEAD at `e421bcb`
+  (dedicated-network-areas) == `origin/main`; local `main` was stale (`f15d2f9`)
+  and was fast-forwarded. This pass branches off `e421bcb`, rebases on main, and
+  pushes one commit on top.
 - 2026-10-13 — Phase 5 vwip verification pass (dedicated-network-areas). Audited
   the twenty-eighth vwip API in mount order (the geographical catalog sibling of
   dedicated-network-profiles / -network / -network-accesses). Both modelled

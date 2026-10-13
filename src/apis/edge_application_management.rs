@@ -8,13 +8,16 @@
 //! discovery *finds* the right edge zone for a device; Edge Application
 //! Management *places workloads* onto those zones.
 //!
-//! CamaraSim serves the read-only zone-catalog leg (the `edge-cloud-zones` a
-//! provider deploys onto, reusing the fixed EdgeCloud zone table shape shared
+//! CamaraSim serves the full modelled surface: the read-only `edge-cloud-zones`
+//! and `clusters` catalogs (reusing the fixed EdgeCloud zone table shape shared
 //! across the EdgeCloud family — docs/DESIGN.md §7), the stateful `apps` CRUD
-//! (onboard/read/list/delete), and the `createAppInstance` leg — instantiating
-//! an onboarded app onto a specific zone (in-memory [`instance_store`]). The
-//! remaining app-instance read/list/delete legs, and the deployment / cluster
-//! resources, are later passes.
+//! (onboard/read/list/delete), the `app-instances` CRUD (create/read/list/delete,
+//! in-memory [`instance_store`]), and the `deployments` lifecycle
+//! (create/read/list/update via JSON Merge Patch/delete, in-memory
+//! [`deployment_store`]). Documented cuts remain per leg (e.g. the live
+//! `componentEndpointInfo`, the async `202`/`DELETE_REQUESTED` delete form, and
+//! the `subscriptionRequest` status-change callbacks) — see the [`vwip`] module
+//! docs and the vendored spec's `x-camarasim-scenarios`.
 //!
 //! One submodule per major version (docs/DESIGN.md §5, §9). So far:
 //! - [`vwip`] — mounted at `/edge-application-management/vwip` (CAMARA

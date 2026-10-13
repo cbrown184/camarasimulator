@@ -807,12 +807,41 @@ paths:
               examples:
                 catalog:
                   summary: The full zone catalog (no filter)
+                  description: >-
+                    Each `edgeCloudZoneId` is the stable RFC 4122 v5 UUID derived
+                    from the zone name (SHA-256; see the handler's `zone_id`), so a
+                    consumer that calls this endpoint sees exactly these ids.
                   value:
-                    - edgeCloudZoneId: 6ec0bd7f-11c0-53da-975e-2a8ad9ebae0b
+                    - edgeCloudZoneId: 6c7adb07-5cdc-58a3-b049-918bcd741d7b
                       edgeCloudZoneName: camarasim-edge-eu-west-1
                       edgeCloudZoneStatus: active
                       edgeCloudProvider: CamaraSim Edge
                       edgeCloudRegion: eu-west-1
+                    - edgeCloudZoneId: 257b51eb-115e-511c-946b-703127c5b0a4
+                      edgeCloudZoneName: camarasim-edge-eu-central-1
+                      edgeCloudZoneStatus: active
+                      edgeCloudProvider: CamaraSim Edge
+                      edgeCloudRegion: eu-central-1
+                    - edgeCloudZoneId: 1eca184c-1481-547f-829e-3e54d161497e
+                      edgeCloudZoneName: camarasim-edge-us-east-1
+                      edgeCloudZoneStatus: active
+                      edgeCloudProvider: CamaraSim Edge
+                      edgeCloudRegion: us-east-1
+                    - edgeCloudZoneId: 1ec825bd-d946-5689-be6f-a65e4182aa5e
+                      edgeCloudZoneName: camarasim-edge-us-west-2
+                      edgeCloudZoneStatus: inactive
+                      edgeCloudProvider: Partner Cloud
+                      edgeCloudRegion: us-west-2
+                    - edgeCloudZoneId: f6f4c4f9-cc7b-5c44-b026-7b697947d81b
+                      edgeCloudZoneName: camarasim-edge-ap-south-1
+                      edgeCloudZoneStatus: unknown
+                      edgeCloudProvider: Partner Cloud
+                      edgeCloudRegion: ap-south-1
+                    - edgeCloudZoneId: 0b0ad434-cb37-58a0-abe2-354ad52a20b2
+                      edgeCloudZoneName: camarasim-edge-ap-northeast-1
+                      edgeCloudZoneStatus: active
+                      edgeCloudProvider: CamaraSim Edge
+                      edgeCloudRegion: ap-northeast-1
                 empty:
                   summary: No zone matches the filter
                   value: []
@@ -906,13 +935,58 @@ paths:
                   $ref: "#/components/schemas/ClusterInfo"
               examples:
                 catalog:
-                  summary: A cluster in the catalog
+                  summary: The full cluster catalog (no filter)
+                  description: >-
+                    Each `clusterRef` is the stable RFC 4122 v5 UUID derived from
+                    the cluster name (SHA-256; see the handler's `cluster_ref`) and
+                    each `edgeCloudZoneId` is the derived id of the cluster's
+                    hosting zone (cross-referencing `getEdgeCloudZones`), so a
+                    consumer that calls this endpoint sees exactly these ids.
                   value:
                     - name: camarasim-cluster-eu-west-1a
                       provider: CamaraSimEdge
-                      clusterRef: 642f6105-7015-4af1-a4d1-e1ecb8437abc
-                      edgeCloudZoneId: 6ec0bd7f-11c0-53da-975e-2a8ad9ebae0b
+                      clusterRef: 48397420-b675-506a-a94f-cf6ea9f6c885
+                      edgeCloudZoneId: 6c7adb07-5cdc-58a3-b049-918bcd741d7b
                       edgeCloudRegion: eu-west-1
+                      version: 1.29.4
+                      nodePools:
+                        - name: default-pool
+                          numNodes: 3
+                          scalable: true
+                          nodeResources:
+                            numCPU: 4
+                            memory: 8192
+                    - name: camarasim-cluster-eu-central-1a
+                      provider: CamaraSimEdge
+                      clusterRef: dd9697f4-f5aa-5268-9a9b-dfc85e371e23
+                      edgeCloudZoneId: 257b51eb-115e-511c-946b-703127c5b0a4
+                      edgeCloudRegion: eu-central-1
+                      version: 1.30.1
+                      nodePools:
+                        - name: default-pool
+                          numNodes: 3
+                          scalable: true
+                          nodeResources:
+                            numCPU: 4
+                            memory: 8192
+                    - name: camarasim-cluster-us-east-1a
+                      provider: CamaraSimEdge
+                      clusterRef: 7c81ef4b-1529-5fdf-bbb7-82a696fdb1a5
+                      edgeCloudZoneId: 1eca184c-1481-547f-829e-3e54d161497e
+                      edgeCloudRegion: us-east-1
+                      version: 1.28.9
+                      nodePools:
+                        - name: default-pool
+                          numNodes: 3
+                          scalable: true
+                          nodeResources:
+                            numCPU: 4
+                            memory: 8192
+                    - name: camarasim-cluster-ap-northeast-1a
+                      provider: PartnerCloud
+                      clusterRef: a3515290-5a47-5e09-ac32-fedf20823a02
+                      edgeCloudZoneId: 0b0ad434-cb37-58a0-abe2-354ad52a20b2
+                      edgeCloudRegion: ap-northeast-1
                       version: 1.29.4
                       nodePools:
                         - name: default-pool
@@ -1431,7 +1505,8 @@ components:
           pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
           minLength: 36
           maxLength: 36
-          example: 6ec0bd7f-11c0-53da-975e-2a8ad9ebae0b
+          # The id is the stable v5 UUID derived from the name below (zone_id).
+          example: 6c7adb07-5cdc-58a3-b049-918bcd741d7b
         edgeCloudZoneName:
           type: string
           maxLength: 64

@@ -1,9 +1,13 @@
 //! Edge Application Management **vwip** (CAMARA EdgeApplicationManagement `wip`).
 //!
-//! Endpoints so far:
+//! Endpoints (the full EdgeApplicationManagement surface CamaraSim models):
 //! - `GET /edge-application-management/vwip/edge-cloud-zones` — list the edge
 //!   cloud zones the operator offers for application placement (operationId
 //!   `getEdgeCloudZones`, scope `edge-application-management:edge-cloud-zones:read`).
+//! - `GET /edge-application-management/vwip/clusters` — list the operator's
+//!   Kubernetes clusters available to host deployments (operationId
+//!   `getClusters`, scope `edge-application-management:clusters:read`). See
+//!   [`get_clusters`].
 //! - `POST /edge-application-management/vwip/apps` — submit (onboard) an
 //!   application, minting an `appId` (operationId `submitApp`, scope
 //!   `edge-application-management:apps:write`). The first **stateful** leg — see
@@ -36,6 +40,10 @@
 //!   `appDeploymentId` (operationId `createAppDeployment`, scope
 //!   `edge-application-management:deployments:write`). See
 //!   [`create_app_deployment`].
+//! - `GET /edge-application-management/vwip/deployments` — list every
+//!   application deployment as an array of `AppDeploymentInfo` (operationId
+//!   `getAppDeployments`, scope `edge-application-management:deployments:read`).
+//!   See [`get_app_deployments`].
 //! - `GET /edge-application-management/vwip/deployments/{appDeploymentId}` — read
 //!   back an application deployment (operationId `getAppDeployment`, scope
 //!   `edge-application-management:deployments:read`). See [`get_app_deployment`].
@@ -43,6 +51,10 @@
 //!   update an application deployment in place via JSON Merge Patch (operationId
 //!   `updateAppDeployment`, scope `edge-application-management:deployments:update`).
 //!   See [`update_app_deployment`].
+//! - `DELETE /edge-application-management/vwip/deployments/{appDeploymentId}` —
+//!   delete (undeploy) an application deployment (operationId
+//!   `deleteAppDeployment`, scope `edge-application-management:deployments:delete`).
+//!   See [`delete_app_deployment`].
 //!
 //! ## What it does
 //!
@@ -2953,6 +2965,83 @@ mod tests {
             assert!(pool["scalable"].is_boolean());
             assert!(pool["nodeResources"]["numCPU"].is_number());
             assert!(pool["nodeResources"]["memory"].is_number());
+        }
+    }
+
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        // The vendored getEdgeCloudZones `catalog` and getClusters `catalog` 200
+        // examples claim to be the full no-filter responses and carry the derived
+        // v5 UUID ids (zone_id / cluster_ref). An earlier revision carried Swagger
+        // placeholder ids (6ec0bd7f-… / 642f6105-…, the latter not even v5-shaped)
+        // and showed only one zone/cluster. Drive both no-filter GETs through the
+        // real router and pin the exact documented bodies so they can't drift.
+
+        // --- getEdgeCloudZones: the full six-zone catalog, documented ids -------
+        let (status, _, body) = get_zones_ok("").await;
+        assert_eq!(status, StatusCode::OK);
+        let zones = body.as_array().unwrap();
+        assert_eq!(zones.len(), 6, "the no-filter catalog is the whole EDGE_ZONES");
+        // (edgeCloudZoneName, documented edgeCloudZoneId, status, provider, region)
+        let expected_zones = [
+            ("camarasim-edge-eu-west-1", "6c7adb07-5cdc-58a3-b049-918bcd741d7b", "active", "CamaraSim Edge", "eu-west-1"),
+            ("camarasim-edge-eu-central-1", "257b51eb-115e-511c-946b-703127c5b0a4", "active", "CamaraSim Edge", "eu-central-1"),
+            ("camarasim-edge-us-east-1", "1eca184c-1481-547f-829e-3e54d161497e", "active", "CamaraSim Edge", "us-east-1"),
+            ("camarasim-edge-us-west-2", "1ec825bd-d946-5689-be6f-a65e4182aa5e", "inactive", "Partner Cloud", "us-west-2"),
+            ("camarasim-edge-ap-south-1", "f6f4c4f9-cc7b-5c44-b026-7b697947d81b", "unknown", "Partner Cloud", "ap-south-1"),
+            ("camarasim-edge-ap-northeast-1", "0b0ad434-cb37-58a0-abe2-354ad52a20b2", "active", "CamaraSim Edge", "ap-northeast-1"),
+        ];
+        for (name, id, st, provider, region) in expected_zones {
+            // The documented literal is exactly what zone_id derives…
+            assert_eq!(zone_id(name), id, "documented zone id for {name}");
+            // …and exactly what the router emits for that zone.
+            let z = zones
+                .iter()
+                .find(|z| z["edgeCloudZoneName"] == name)
+                .unwrap_or_else(|| panic!("zone {name} present in the catalog"));
+            assert_eq!(z["edgeCloudZoneId"], id);
+            assert_eq!(z["edgeCloudZoneStatus"], st);
+            assert_eq!(z["edgeCloudProvider"], provider);
+            assert_eq!(z["edgeCloudRegion"], region);
+        }
+
+        // --- getClusters: the full four-cluster catalog, documented ids --------
+        let (status, _, body) = get_clusters_ok("").await;
+        assert_eq!(status, StatusCode::OK);
+        let clusters = body.as_array().unwrap();
+        assert_eq!(clusters.len(), 4, "the no-filter catalog is the whole CLUSTERS");
+        // (name, provider, documented clusterRef, hosting-zone name, documented
+        // edgeCloudZoneId, region, version)
+        let expected_clusters = [
+            ("camarasim-cluster-eu-west-1a", "CamaraSimEdge", "48397420-b675-506a-a94f-cf6ea9f6c885", "camarasim-edge-eu-west-1", "6c7adb07-5cdc-58a3-b049-918bcd741d7b", "eu-west-1", "1.29.4"),
+            ("camarasim-cluster-eu-central-1a", "CamaraSimEdge", "dd9697f4-f5aa-5268-9a9b-dfc85e371e23", "camarasim-edge-eu-central-1", "257b51eb-115e-511c-946b-703127c5b0a4", "eu-central-1", "1.30.1"),
+            ("camarasim-cluster-us-east-1a", "CamaraSimEdge", "7c81ef4b-1529-5fdf-bbb7-82a696fdb1a5", "camarasim-edge-us-east-1", "1eca184c-1481-547f-829e-3e54d161497e", "us-east-1", "1.28.9"),
+            ("camarasim-cluster-ap-northeast-1a", "PartnerCloud", "a3515290-5a47-5e09-ac32-fedf20823a02", "camarasim-edge-ap-northeast-1", "0b0ad434-cb37-58a0-abe2-354ad52a20b2", "ap-northeast-1", "1.29.4"),
+        ];
+        for (name, provider, cref, zone_name, zid, region, version) in expected_clusters {
+            // The documented literals are exactly what cluster_ref / zone_id derive…
+            assert_eq!(cluster_ref(name), cref, "documented clusterRef for {name}");
+            assert_eq!(zone_id(zone_name), zid, "documented edgeCloudZoneId for {name}");
+            // …and exactly what the router emits for that cluster.
+            let c = clusters
+                .iter()
+                .find(|c| c["name"] == name)
+                .unwrap_or_else(|| panic!("cluster {name} present in the catalog"));
+            assert_eq!(c["provider"], provider);
+            assert_eq!(c["clusterRef"], cref);
+            assert_eq!(c["edgeCloudZoneId"], zid);
+            assert_eq!(c["edgeCloudRegion"], region);
+            assert_eq!(c["version"], version);
+            // The fixed representative node pool the example documents.
+            assert_eq!(
+                c["nodePools"],
+                json!([{
+                    "name": "default-pool",
+                    "numNodes": 3,
+                    "scalable": true,
+                    "nodeResources": { "numCPU": 4, "memory": 8192 },
+                }])
+            );
         }
     }
 
