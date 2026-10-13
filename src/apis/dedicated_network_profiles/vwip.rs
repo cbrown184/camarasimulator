@@ -809,4 +809,112 @@ mod tests {
             Some("corr-list")
         );
     }
+
+    // --- Vendored-example pinning ------------------------------------------
+
+    // The vendored `firstPage` (GET /profiles) and `iotMassive`
+    // (GET /profiles/{id}) success examples must be exactly what the router
+    // emits. The `firstPage` example had previously shown only the first of the
+    // four catalog items while its own pagination claimed totalCount 4 /
+    // totalPages 1 / perPage 10 — an incomplete page that could not come back
+    // from the router; this pins the whole four-item body so it can't drift
+    // again.
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        // GET /profiles (no params) → the whole catalog on page 1.
+        let (status, body) = list_ok("").await;
+        assert_eq!(status, StatusCode::OK);
+        let expected_items = json!([
+            {
+                "id": "00000000-0000-4000-8000-000000000000",
+                "name": "enterprise-campus",
+                "maxNumberOfDevices": 5000,
+                "aggregatedUlThroughput": { "value": 200, "unit": "Mbps" },
+                "aggregatedDlThroughput": { "value": 500, "unit": "Mbps" },
+                "qosProfiles": ["voice", "video", "low-latency"],
+                "defaultQosProfile": "video"
+            },
+            {
+                "id": "00000000-0000-4000-8000-000000000001",
+                "name": "iot-massive",
+                "maxNumberOfDevices": 100000,
+                "aggregatedUlThroughput": { "value": 10, "unit": "Mbps" },
+                "aggregatedDlThroughput": { "value": 10, "unit": "Mbps" },
+                "qosProfiles": ["standard", "low-latency"],
+                "defaultQosProfile": "standard"
+            },
+            {
+                "id": "00000000-0000-4000-8000-000000000002",
+                "name": "public-safety",
+                "maxNumberOfDevices": 2000,
+                "aggregatedUlThroughput": { "value": 100, "unit": "Mbps" },
+                "aggregatedDlThroughput": { "value": 100, "unit": "Mbps" },
+                "qosProfiles": ["voice", "low-latency"],
+                "defaultQosProfile": "voice"
+            },
+            {
+                "id": "00000000-0000-4000-8000-000000000003",
+                "name": "media-production",
+                "maxNumberOfDevices": 500,
+                "aggregatedUlThroughput": { "value": 1, "unit": "Gbps" },
+                "aggregatedDlThroughput": { "value": 1, "unit": "Gbps" },
+                "qosProfiles": ["video", "low-latency"],
+                "defaultQosProfile": "low-latency"
+            }
+        ]);
+        assert_eq!(body["items"], expected_items, "firstPage items");
+        assert_eq!(
+            body["pagination"],
+            json!({ "page": 1, "perPage": 10, "totalCount": 4, "totalPages": 1 }),
+            "firstPage pagination"
+        );
+
+        // GET /profiles/{…001} → the `iotMassive` by-id example, byte for byte.
+        let (status, _, body) = get_ok("00000000-0000-4000-8000-000000000001").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({
+                "id": "00000000-0000-4000-8000-000000000001",
+                "name": "iot-massive",
+                "maxNumberOfDevices": 100000,
+                "aggregatedUlThroughput": { "value": 10, "unit": "Mbps" },
+                "aggregatedDlThroughput": { "value": 10, "unit": "Mbps" },
+                "qosProfiles": ["standard", "low-latency"],
+                "defaultQosProfile": "standard"
+            }),
+            "iotMassive by-id example"
+        );
+    }
+
+    // The two inline error examples (the only error responses not `$ref`ing the
+    // shared catalog) must byte-match the handler's `{status, code, message}` —
+    // the list `outOfRange` and the by-id `invalidArgument`. Existing tests
+    // guarded only the `code`, so this pins the exact message bytes too.
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // readNetworkProfiles 400 outOfRange (perPage below the minimum).
+        let (status, body) = list_ok("perPage=0").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            json!({
+                "status": 400,
+                "code": "OUT_OF_RANGE",
+                "message": "`perPage` must be greater than or equal to 1."
+            })
+        );
+
+        // readNetworkProfile 400 invalidArgument (malformed profileId).
+        let (status, _, body) = get_ok("not-a-uuid").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            json!({
+                "status": 400,
+                "code": "INVALID_ARGUMENT",
+                "message": "`profileId` must be a UUID."
+            })
+        );
+    }
 }

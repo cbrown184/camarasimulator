@@ -608,7 +608,33 @@ Verified sub-items:
   (dedicated-network-profiles). Spec + `#[cfg(test)]` change (no
   behaviour/response change — the handler was already correct; only the one
   success-example bitmap was wrong); no new dependency.
-- 🔧 dedicated-network-profiles
+- 🔧 dedicated-network-profiles — verified 2026-10-13: both modelled operations
+  (`readNetworkProfiles`, `GET /profiles`; `readNetworkProfile`,
+  `GET /profiles/{profileId}`) are implemented
+  (`src/apis/dedicated_network_profiles/vwip.rs`), routed, and well-tested
+  (21 test fns before this pass), and the module docs agree with the code and
+  the vendored `specs/dedicated-network-profiles/vwip/openapi.yaml`: the fixed
+  four-template catalog (enterprise-campus/iot-massive/public-safety/
+  media-production), the `profileId` three-layer control plane (malformed → 400
+  `INVALID_ARGUMENT`; reserved trailing suffix → the canonical CAMARA error;
+  else `d % 4` template with the requested id echoed), and the list control
+  planes (exact-match `name` filter, `page`/`perPage` window, no identifier so
+  no reserved plane) all match the handler. **Spec↔code drift found and fixed in
+  the vendored `200` `firstPage` list example:** it showed only the *first* of
+  the four catalog items while its own pagination claimed `totalCount 4` /
+  `totalPages 1` / `perPage 10` — an incomplete page that can't come back from
+  the router (`GET /profiles` with no params returns all four on page 1).
+  Completed the `firstPage` example to the real four-item body. The by-id
+  `iotMassive` example (`…001` → iot-massive) and both inline 400 error examples
+  were already byte-accurate. Added `vendored_success_examples_match_the_handler`
+  (drives the router for `GET /profiles` and pins the full four-item items array
+  + pagination, and the `…001` by-id body) and
+  `vendored_error_example_messages_match_the_handler` (pins the list `outOfRange`
+  and by-id `invalidArgument` `{status,code,message}` bytes, which existing tests
+  guarded only for `code`). This advances the vwip audit cursor to the next API
+  (dedicated-network). Spec + `#[cfg(test)]` change (no behaviour/response change
+  — the handlers were already correct; only the one list example was
+  incomplete); no new dependency.
 - 🔧 dedicated-network
 - 🔧 dedicated-network-accesses
 - 🔧 dedicated-network-areas
@@ -686,6 +712,40 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-13 — Phase 5 vwip verification pass (dedicated-network-profiles).
+  Audited the twenty-fifth vwip API in mount order (the first of the
+  DedicatedNetworks family). Both modelled operations — `readNetworkProfiles`
+  (`GET /profiles`, a paginated `NetworkProfilesPage`) and `readNetworkProfile`
+  (`GET /profiles/{profileId}`) — are implemented
+  (`src/apis/dedicated_network_profiles/vwip.rs`), routed, and well-tested
+  (21 test fns before this pass). Verified the control planes match the handler:
+  the fixed four-template catalog (enterprise-campus/iot-massive/public-safety/
+  media-production); the `profileId` three-layer plane (non-UUID → 400
+  `INVALID_ARGUMENT`; reserved trailing suffix → the canonical CAMARA error; else
+  the trailing-three-digits `d % 4` template with the requested id echoed); and
+  the list planes (exact-match `name` filter → empty page on a miss, never a 404;
+  the `page`/`perPage` window; no device/line identifier so no reserved plane).
+  **Spec↔code drift found and fixed in the vendored `200` `firstPage` list
+  example:** it carried only the *first* of the four catalog items while its own
+  pagination claimed `totalCount 4` / `totalPages 1` / `perPage 10` — an
+  incomplete page that can't come back from the router, which returns all four on
+  page 1 for `GET /profiles` with no params (the first incomplete-list-example
+  drift class, distinct from the deterministic-value and truncated-message
+  classes of earlier passes). Completed the example to the real four-item body
+  (each item's id = `template_id(i)`, its canonical catalog-index UUID). The by-id
+  `iotMassive` example (`…001` → iot-massive, byte-accurate) and both inline 400
+  error examples (list `outOfRange`, by-id `invalidArgument`) were already
+  correct. Added `vendored_success_examples_match_the_handler` (drives the real
+  router for `GET /profiles` and pins the full four-item items array + pagination,
+  and the `…001` by-id body) and `vendored_error_example_messages_match_the_handler`
+  (pins both inline 400 examples' exact `{status,code,message}` bytes, which the
+  existing error tests guarded only for `code`). `cargo test` green (3079 → 3081
+  tests) and `cargo build --release` green; release binary 5,438,616 bytes
+  (~5.2 MiB; the only non-test change is the enlarged embedded spec example).
+  This advances the vwip audit cursor to the next API
+  (dedicated-network). Spec + `#[cfg(test)]` change only (no behaviour/response
+  change — the handlers were already correct; only the one list example was
+  incomplete); no new dependency.
 - 2026-10-13 — Phase 5 vwip verification pass (capabilities-and-restrictions).
   Audited the twenty-fourth vwip API in mount order. The one modelled operation
   (`postServiceCapability`, `POST /capabilities-and-restrictions/vwip/retrieve`)

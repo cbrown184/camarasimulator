@@ -131,7 +131,13 @@ paths:
                 $ref: "#/components/schemas/NetworkProfilesPage"
               examples:
                 firstPage:
-                  summary: The first page of the catalog
+                  summary: The first (and only) page of the fixed catalog
+                  description: >-
+                    `GET /profiles` with no query parameters: the whole
+                    four-profile catalog fits on page 1 (perPage 10). Each item
+                    carries the canonical id `template_id(i)` (a UUID whose
+                    trailing three digits are its catalog index), so
+                    `GET /profiles/{id}` returns the same profile.
                   value:
                     items:
                       - id: "00000000-0000-4000-8000-000000000000"
@@ -141,6 +147,27 @@ paths:
                         aggregatedDlThroughput: { value: 500, unit: Mbps }
                         qosProfiles: [voice, video, low-latency]
                         defaultQosProfile: video
+                      - id: "00000000-0000-4000-8000-000000000001"
+                        name: iot-massive
+                        maxNumberOfDevices: 100000
+                        aggregatedUlThroughput: { value: 10, unit: Mbps }
+                        aggregatedDlThroughput: { value: 10, unit: Mbps }
+                        qosProfiles: [standard, low-latency]
+                        defaultQosProfile: standard
+                      - id: "00000000-0000-4000-8000-000000000002"
+                        name: public-safety
+                        maxNumberOfDevices: 2000
+                        aggregatedUlThroughput: { value: 100, unit: Mbps }
+                        aggregatedDlThroughput: { value: 100, unit: Mbps }
+                        qosProfiles: [voice, low-latency]
+                        defaultQosProfile: voice
+                      - id: "00000000-0000-4000-8000-000000000003"
+                        name: media-production
+                        maxNumberOfDevices: 500
+                        aggregatedUlThroughput: { value: 1, unit: Gbps }
+                        aggregatedDlThroughput: { value: 1, unit: Gbps }
+                        qosProfiles: [video, low-latency]
+                        defaultQosProfile: low-latency
                     pagination:
                       page: 1
                       perPage: 10
