@@ -2710,4 +2710,113 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "should reject: {bad}");
         }
     }
+
+    /// Pin the vendored `specs/traffic-influence/vwip/openapi.yaml` examples to the
+    /// handler so they cannot silently drift (docs/DESIGN.md §7, §9).
+    ///
+    /// (1) **Success `state`.** `state` is a pure function of the `appId` tail
+    /// (`derive_state`), and two resources that share an `appId` therefore share a
+    /// `state`. The GET-list `two` example shows two resources that both carry
+    /// `appId …426614174002`, so the only self-consistent `state` for both is
+    /// `derive_state(…002)` — asserted here to be `active` (this also pins the
+    /// `active` value used by the 201, getTrafficInfluence, and patch examples).
+    /// A regression that let the example show two different states for one shared
+    /// appId — the defect this pass fixed — would contradict this assertion.
+    ///
+    /// (2) **Inline 400 error examples.** Every router-reachable inline `400`
+    /// example's exact `status`/`code`/`message` bytes, driven through the real
+    /// router (the shared 401/403/404/409/422/429/500/503 responses are `$ref`s to
+    /// the shared catalog, covered by its own tests).
+    #[tokio::test]
+    async fn vendored_examples_match_the_handler() {
+        // (1) The shared-appId `two` example (and the active 201/get/patch
+        // examples) must show the state derive_state yields for appId …002.
+        assert_eq!(derive_state("123e4567-e89b-12d3-a456-426614174002"), "active");
+
+        // (2) postTrafficInfluence 400 invalidArgument — appId present, not a UUID.
+        let (st, _, inv) = post(
+            Some(&token().await),
+            None,
+            json!({ "apiConsumerId": CONSUMER, "appId": "not-a-uuid" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert_eq!(inv["status"], 400);
+        assert_eq!(inv["code"], "INVALID_ARGUMENT");
+        assert_eq!(inv["message"], "`appId` must be a UUID.");
+
+        // postTrafficInfluence 400 outOfRange — sourcePort outside 0..=65535.
+        let (st, _, oor) = post(
+            Some(&token().await),
+            None,
+            json!({
+                "apiConsumerId": CONSUMER,
+                "appId": APP_ACTIVE,
+                "sourceTrafficFilters": { "sourcePort": 70000 },
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert_eq!(oor["status"], 400);
+        assert_eq!(oor["code"], "OUT_OF_RANGE");
+        assert_eq!(oor["message"], "`sourcePort` must be between 0 and 65535.");
+
+        // getAllTrafficInfluences 400 invalidArgument — appId filter not a UUID.
+        let (st, _, list_inv) =
+            list_req(Some(&mint_token(READ_SCOPE).await), Some("appId=nope"), None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert_eq!(list_inv["status"], 400);
+        assert_eq!(list_inv["code"], "INVALID_ARGUMENT");
+        assert_eq!(list_inv["message"], "`appId` must be a valid UUID.");
+
+        // postTrafficInfluenceDevice 400 missingDevice / emptyDevice.
+        let dtok = mint_token(DEVICE_WRITE_SCOPE).await;
+        let (st, _, missing) = post_device(
+            Some(&dtok),
+            None,
+            json!({ "apiConsumerId": CONSUMER, "appId": APP_ACTIVE }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert_eq!(missing["status"], 400);
+        assert_eq!(missing["code"], "INVALID_ARGUMENT");
+        assert_eq!(missing["message"], "`device` is required.");
+        let (st, _, empty) = post_device(
+            Some(&dtok),
+            None,
+            json!({ "apiConsumerId": CONSUMER, "appId": APP_ACTIVE, "device": {} }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert_eq!(empty["status"], 400);
+        assert_eq!(empty["code"], "INVALID_ARGUMENT");
+        assert_eq!(empty["message"], "`device` must contain at least one identifier.");
+
+        // patchTrafficInfluence 400 invalidArgument / outOfRange. The body is
+        // validated before the store lookup, so an unknown id still reaches the
+        // body `400` (the documented "body 400 wins over the unknown-id 404").
+        let wtok = token().await;
+        let (st, _, p_inv) = patch_req(
+            Some(&wtok),
+            "ti-no-such-id",
+            None,
+            json!({ "appInstanceId": "not-a-uuid" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert_eq!(p_inv["status"], 400);
+        assert_eq!(p_inv["code"], "INVALID_ARGUMENT");
+        assert_eq!(p_inv["message"], "`appInstanceId` must be a UUID or null.");
+        let (st, _, p_oor) = patch_req(
+            Some(&wtok),
+            "ti-no-such-id",
+            None,
+            json!({ "sourceTrafficFilters": { "sourcePort": 70000 } }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert_eq!(p_oor["status"], 400);
+        assert_eq!(p_oor["code"], "OUT_OF_RANGE");
+        assert_eq!(p_oor["message"], "`sourcePort` must be between 0 and 65535.");
+    }
 }

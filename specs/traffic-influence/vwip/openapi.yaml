@@ -7,6 +7,7 @@
 # by `src/apis/traffic_influence/vwip.rs`; spec and code must not drift.
 #
 # Serves `POST /traffic-influences` (`postTrafficInfluence`),
+# `GET /traffic-influences` (`getAllTrafficInfluences`, optional `appId` filter),
 # `POST /traffic-influence-devices` (`postTrafficInfluenceDevice`),
 # `GET /traffic-influences/{trafficInfluenceID}` (`getTrafficInfluence`),
 # `PATCH /traffic-influences/{trafficInfluenceID}` (`patchTrafficInfluence`) and
@@ -287,7 +288,8 @@ paths:
                   $ref: "#/components/schemas/TrafficInfluence"
               examples:
                 two:
-                  summary: Two resources for the same appId
+                  summary: Two resources for the same appId (both `active` — the
+                    `state` is derived from the shared appId's tail `…002`)
                   value:
                     - trafficInfluenceID: 8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70
                       apiConsumerId: consumer-42
@@ -296,7 +298,7 @@ paths:
                     - trafficInfluenceID: 9a27c11d-1b3e-4f0a-8c2d-7e6f5a4b3c21
                       apiConsumerId: consumer-42
                       appId: 123e4567-e89b-12d3-a456-426614174002
-                      state: created
+                      state: active
                 empty:
                   summary: No resources (or no match) — never a 404
                   value: []

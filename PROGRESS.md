@@ -414,7 +414,35 @@ Verified sub-items:
   router. The 200 examples (score 50 / 0) and the shared-`$ref`
   401/403/404/409/429/500/503 responses already matched. This advances the vwip
   audit cursor to the next API (traffic-influence).
-- 🔧 traffic-influence
+- 🔧 traffic-influence — verified 2026-10-13: all six modelled operations
+  (`postTrafficInfluence` `POST /traffic-influences`, `getAllTrafficInfluences`
+  `GET /traffic-influences` with optional `appId` filter, `postTrafficInfluenceDevice`
+  `POST /traffic-influence-devices`, the stateful `getTrafficInfluence`
+  `GET /traffic-influences/{id}`, `patchTrafficInfluence` `PATCH …/{id}`,
+  `deleteTrafficInfluence` `DELETE …/{id}`) are implemented
+  (`src/apis/traffic_influence/vwip.rs` + an in-memory `store.rs` + a
+  `notifications.rs` firing the create-time initial-event CloudEvent), routed, and
+  well-tested (~87 test fns before this pass). All seven inline `400` error-example
+  message bytes already matched the handler, and the minted `trafficInfluenceID`s
+  are legitimately illustrative (`mint_id` is counter/clock-derived, the
+  application-profiles posture — not request-reproducible). **Spec↔code consistency
+  defect found and fixed in the GET-list `two` example:** it showed two resources
+  that *share* `appId …426614174002` but carry different states (one `active`, one
+  `created`), an impossible combination — `state` is a pure function of the `appId`
+  tail (`derive_state`: `d%3` 0→ordered/1→created/2→active) and PATCH does not
+  re-derive it, so two resources with the same appId always share one state
+  (`…002`→`active`). Corrected the second resource to `active` and clarified the
+  example summary. Also **fixed the stale spec header comment** (it listed five
+  operations, omitting `getAllTrafficInfluences`, though the body defines it — the
+  stale-doc trap class). Added `vendored_examples_match_the_handler` pinning the
+  shared-appId→state consistency (`derive_state(…002)=="active"`, guarding the
+  `two`/201/get/patch examples) and the exact `status`/`code`/`message` bytes of all
+  router-reachable inline `400` families (postTrafficInfluence invalidArgument/
+  outOfRange, getAll invalidArgument, postDevice missingDevice/emptyDevice, patch
+  invalidArgument/outOfRange). This advances the vwip audit cursor to the next API
+  (application-endpoint-discovery). Spec + test change (no behaviour/response change
+  — the handler was already correct; only the list example was self-inconsistent);
+  no new dependency.
 - 🔧 application-endpoint-discovery
 - 🔧 application-endpoint-registration
 - 🔧 predictive-connectivity-data
@@ -498,6 +526,68 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-13 — Phase 5 vwip verification pass (traffic-influence). Audited the
+  nineteenth vwip API in mount order (a stateful resource: an in-memory
+  `trafficInfluenceID`→rendered-JSON `store`, plus a `notifications` module firing
+  the create-time initial-event `traffic-influence-change` CloudEvent). All **six**
+  modelled operations are fully implemented, routed, and well-tested (~87 test fns
+  before this pass): `postTrafficInfluence` (`POST /traffic-influences`),
+  `getAllTrafficInfluences` (`GET /traffic-influences`, optional `appId` filter,
+  bare array, never 404s), `postTrafficInfluenceDevice`
+  (`POST /traffic-influence-devices`, same fields + a required `device` that is
+  validated-only / never echoed / never persisted), the stateful
+  `getTrafficInfluence` (`GET …/{trafficInfluenceID}`), `patchTrafficInfluence`
+  (`PATCH …/{id}`, `merge-patch+json`, body validated before the store so a body
+  `400` wins over an unknown-id `404`, and `state` is **not** re-derived), and
+  `deleteTrafficInfluence` (`DELETE …/{id}`, synchronous single-use eviction behind
+  the `202` contract). I verified the two genuine `appId` control planes match the
+  handler: the reserved-error suffix plane (`scenarios::reserved_error`) and
+  `derive_state` (`d = appId` trailing three digits; `d%3` → 0 `ordered` / 1
+  `created` / 2 `active`; <3 digits → `ordered`). The minted `trafficInfluenceID`s
+  are legitimately *illustrative* — `mint_id` is a SHA-256 over an atomic counter +
+  clock seconds (not the request), so pinning a concrete value would be wrong (the
+  application-profiles / session-insights / sponsored-data posture, not the
+  deterministic-id posture of verified-caller / click-to-dial). All **seven** inline
+  `400` error-example `message` bytes already matched the handler exactly (no
+  message drift — the truncated-identifier-message class caught on earlier APIs does
+  not occur here). **Spec↔code consistency defect found and fixed — a new class
+  (self-inconsistent success example):** the GET-list `two` example showed two
+  resources that *share* `appId …426614174002` yet carry **different** states (one
+  `active`, one `created`). Because `state` is a pure function of the shared appId's
+  tail and PATCH never re-derives it, two resources with the same appId *always*
+  share one `state` (`…002` → `active`) — the `created` entry is an impossible
+  combination a consumer could never reproduce (and the existing
+  `list_filtered_by_app_id_returns_exactly_the_matching_resources` test already
+  creates both resources under one appId, confirming the shared-state invariant).
+  Corrected the second entry to `active` and clarified the example summary that the
+  `state` is derived from the shared appId tail. Also **fixed the stale spec header
+  comment**: it enumerated five served operations and omitted
+  `getAllTrafficInfluences` though the spec body (and the module docs) define it —
+  the stale-doc trap class caught on device-data-volume / qos-booking /
+  application-profiles / session-insights / sponsored-data; added the missing
+  `GET /traffic-influences` line. Added `vendored_examples_match_the_handler`, which
+  (a) pins the shared-appId→state consistency the fix depends on
+  (`derive_state("…002") == "active"`, guarding the `two`/201/getTrafficInfluence/
+  patch `active` examples) and (b) drives the real router to pin the exact
+  `status`/`code`/`message` bytes of every router-reachable inline `400` family
+  (postTrafficInfluence `invalidArgument` "`appId` must be a UUID." / `outOfRange`
+  "`sourcePort` must be between 0 and 65535.", getAll `invalidArgument` "`appId`
+  must be a valid UUID.", postDevice `missingDevice` "`device` is required." /
+  `emptyDevice` "`device` must contain at least one identifier.", patch
+  `invalidArgument` "`appInstanceId` must be a UUID or null." / `outOfRange`) so none
+  can silently drift. The 401/403/404/409/422/429/500/503 responses are `$ref`s to
+  the shared catalog (covered by its own tests). This advances the vwip audit cursor
+  to the next API (application-endpoint-discovery). Spec + test change (no
+  behaviour/response change — the handler's output was already correct; only the
+  list example was self-inconsistent and the header comment stale); no new
+  dependency. `cargo test` green: 3071 passed, 0 failed (+1, the new pinning test).
+  `cargo build --release` green; binary = 5,434,520 bytes (unchanged vs. the
+  most-frequent-location pass on rustc 1.97.0 — the change touches only the spec and
+  `#[cfg(test)]` code, outside the release path). *Backlog banner still stands:* the
+  net-new feature backlog remains exhausted and the human decision (authorise
+  stateful infra, name an increment, or pause the routine) is still open — this is
+  the sanctioned per-API vwip verification (backlog item 3), and this pass it caught
+  a genuine, consumer-visible documentation defect.
 - 2026-10-13 — Phase 5 vwip verification pass (most-frequent-location). Audited
   the eighteenth vwip API in mount order (a stateless, privacy-preserving
   presence score — no stored state). The single modelled operation
