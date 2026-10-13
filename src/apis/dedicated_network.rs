@@ -10,8 +10,8 @@
 //!
 //! CamaraSim keeps created networks in an in-memory store ([`vwip::routes`] wires
 //! the endpoints; [`store`] is the state); it is a **stateful, resource-oriented**
-//! API. So far only the create leg is mounted (docs/DESIGN.md §7 drives the
-//! result from the request); read / list / delete arrive in later passes.
+//! API. The full Networks CRUD is mounted — create, read-back, list, and delete
+//! (docs/DESIGN.md §7 drives each result from the request / store state).
 //!
 //! One submodule per major version (docs/DESIGN.md §5, §9). So far:
 //! - [`vwip`] — mounted at `/dedicated-network/vwip` (CAMARA DedicatedNetworks /

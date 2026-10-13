@@ -53,8 +53,9 @@ info:
       no-digits) → `REQUESTED`, `1` → `RESERVED`, `2` → `ACTIVATED`. So
       `serviceAreaId` is a genuine second plane.
 
-    `sinkCredential` is accepted but never echoed (it is a secret), and — this
-    slice being create-only — no notification is delivered (a documented cut).
+    `sinkCredential` is accepted but never echoed (it is a secret), and no
+    notification is ever delivered to the `sink` — this API records no
+    notification target (a documented cut).
     CamaraSim exposes the full shared reserved-error set here so every reserved
     suffix is reachable; canonical Dedicated Network declares a subset for this
     operation (400/401/403).
@@ -429,7 +430,7 @@ components:
       description: |
         Credential for authenticating notification callbacks (CAMARA
         `SinkCredential`). Accepted by CamaraSim but never echoed (a secret) and
-        — this slice being create-only — never applied.
+        never applied — this API delivers no `sink` notification (a documented cut).
       required:
         - credentialType
       properties:

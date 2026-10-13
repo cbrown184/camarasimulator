@@ -49,10 +49,10 @@
 //!      `ACTIVATED`. (`TERMINATED` is a teardown state, never assigned at
 //!      creation.) So `serviceAreaId` is a genuine second plane.
 //!
-//! `sinkCredential` is accepted but never echoed (it is a secret) and — this
-//! slice being create-only — no notification is delivered (a documented cut;
-//! notifications, list/delete arrive in later passes). `x-correlator` is
-//! echoed on every response.
+//! `sinkCredential` is accepted but never echoed (it is a secret), and no
+//! notification is ever delivered to the `sink` — this API records no
+//! notification target, a documented cut (mirroring QoD's teardown legs).
+//! `x-correlator` is echoed on every response.
 //!
 //! ## `readNetwork` — read a network back
 //!
@@ -1246,6 +1246,50 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-del-404")
+        );
+    }
+
+    // --- Vendored-example pinning (spec ↔ code) ----------------------------
+
+    #[tokio::test]
+    async fn vendored_success_example_matches_the_handler() {
+        // `valid_body(1)` is byte-for-byte the spec's `createNetwork`
+        // `withProfile` request example (serviceAreaId tail 001), so the 201
+        // response must match the vendored `reserved` example
+        // (specs/dedicated-network/vwip/openapi.yaml): status RESERVED with every
+        // documented field echoed. Pins the example's derivation so it can't drift.
+        let (status, _, body) = create_ok(valid_body(1)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["status"], "RESERVED");
+        assert_eq!(body["name"], "factory-floor");
+        assert_eq!(body["networkProfileId"], "00000000-0000-4000-8000-000000000abc");
+        assert_eq!(body["serviceTime"]["start"], "2024-01-01T00:00:00Z");
+        assert_eq!(body["serviceTime"]["end"], "2024-12-31T23:59:59Z");
+        assert_eq!(body["serviceAreaId"], "00000000-0000-4000-8000-000000000001");
+        // The `id` in the vendored example is illustrative: `new_network_id` is
+        // counter/clock-derived, not request-reproducible, so pin only its shape.
+        assert!(is_uuid_shaped(body["id"].as_str().unwrap()));
+        assert!(body.get("sinkCredential").is_none());
+    }
+
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // The spec's one inline error example — the `createNetwork` 400
+        // `outOfRange` (an `end` before its `start`) — must byte-match the
+        // handler's `status`/`code`/`message`. Existing error tests guarded only
+        // `code`, so the `message` could silently drift.
+        let body = json!({
+            "networkProfileId": "00000000-0000-4000-8000-000000000abc",
+            "serviceTime": { "start": "2024-12-31T00:00:00Z", "end": "2024-01-01T00:00:00Z" },
+            "serviceAreaId": uuid_ending(1),
+        });
+        let (status, _, res) = create_ok(body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(res["status"], 400);
+        assert_eq!(res["code"], "OUT_OF_RANGE");
+        assert_eq!(
+            res["message"],
+            "`serviceTime.end` must not precede `serviceTime.start`."
         );
     }
 }

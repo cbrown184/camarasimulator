@@ -635,7 +635,20 @@ Verified sub-items:
   (dedicated-network). Spec + `#[cfg(test)]` change (no behaviour/response change
   — the handlers were already correct; only the one list example was
   incomplete); no new dependency.
-- 🔧 dedicated-network
+- 🔧 dedicated-network — verified 2026-10-13: all four modelled CRUD operations
+  (`createNetwork`, `readNetwork`, `listNetworks`, `deleteNetwork`) are
+  implemented (`src/apis/dedicated_network/vwip.rs` + an in-memory `store.rs`),
+  routed, and well-tested, and the vendored
+  `specs/dedicated-network/vwip/openapi.yaml` is consistent with the code (the
+  request-validation + `serviceAreaId` `d % 3` lifecycle planes, the minted-id
+  store legs, all success/error examples). **No spec↔code value drift** (minted
+  `id`s are legitimately illustrative). Fixed the **stale "create-only / later
+  pass" doc trap** in four places (parent module doc, `vwip.rs` body doc,
+  `store.rs` `get` doc, and two spec strings) — all claimed read/list/delete were
+  future work though they ship — keeping the genuine cut (no `sink` notification).
+  Added `vendored_success_example_matches_the_handler` and
+  `vendored_error_example_messages_match_the_handler` pinning the two previously
+  unpinned examples. Doc + `#[cfg(test)]` change; no new dependency.
 - 🔧 dedicated-network-accesses
 - 🔧 dedicated-network-areas
 - 🔧 edge-application-management
@@ -712,6 +725,46 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-13 — Phase 5 vwip verification pass (dedicated-network). Audited the
+  twenty-sixth vwip API in mount order (the resource sibling of
+  dedicated-network-profiles). All four modelled CRUD operations — `createNetwork`
+  (`POST /networks` → 201 `NetworkInfo`), the stateful `readNetwork`
+  (`GET /networks/{networkId}`), `listNetworks` (`GET /networks`, optional `name`
+  filter, bare JSON array), and `deleteNetwork` (`DELETE …/{networkId}` → 204,
+  single-use) — are implemented (`src/apis/dedicated_network/vwip.rs` + an
+  in-memory `store.rs`), routed, and well-tested (~40 test fns before this pass).
+  Verified the two control planes match the handler: request validation (name
+  length, the `networkProfileId`/`qosProfileName` `oneOf`, UUID shapes, the
+  `serviceTime` RFC-3339 bounds + UTC end<start → 400 `OUT_OF_RANGE`, the
+  `^https://.+$` sink) and the `serviceAreaId` identifier plane (reserved trailing
+  suffix → the canonical CAMARA error; else `d % 3` → `REQUESTED`/`RESERVED`/
+  `ACTIVATED`). **No spec↔code value drift found:** all success examples
+  (`reserved` tail 001→RESERVED, `twoNetworks` 001/002, read `activated` 002→
+  ACTIVATED) match the `status_for` mapping, and the minted `id`s are legitimately
+  illustrative (`store::new_network_id` is counter/clock-derived, the
+  application-profiles posture, not request-reproducible); the one inline error
+  example (`createNetwork` 400 `outOfRange`) was byte-accurate. **Stale
+  "create-only / later pass" docs fixed in four places** (the same stale-slice-doc
+  trap caught on device-data-volume / qos-booking / application-profiles /
+  session-insights / sponsored-data / network-access-devices): the parent
+  `dedicated_network.rs` doc ("only the create leg is mounted … read/list/delete
+  arrive in later passes"), the `vwip.rs` body doc ("this slice being create-only
+  … list/delete arrive in later passes"), the `store.rs` `get` doc ("the delete
+  leg (a later pass) will too"), and two spec strings (`info.description` and the
+  `SinkCredential` schema, both "this slice being create-only") — corrected to
+  describe the full CRUD while keeping the genuine documented cut (no `sink`
+  notification is ever delivered; this API records no notification target).
+  **Small tested increment:** added `vendored_success_example_matches_the_handler`
+  (drives the spec's `withProfile` request through the router and pins the
+  `reserved` 201 example's status + echoed fields) and
+  `vendored_error_example_messages_match_the_handler` (pins the `outOfRange`
+  example's exact `{status,code,message}` bytes, which existing tests guarded only
+  for `code`). `cargo test` green (3081 → 3083 tests) and `cargo build --release`
+  green; release binary 5,438,616 bytes (~5.2 MiB, unchanged from the prior pass).
+  This advances the vwip audit cursor to the next API (dedicated-network-accesses).
+  Spec + doc + `#[cfg(test)]` change only (no behaviour/response change — the
+  handlers were already correct; the drift was doc staleness, not examples); no
+  new dependency.
 - 2026-10-13 — Phase 5 vwip verification pass (dedicated-network-profiles).
   Audited the twenty-fifth vwip API in mount order (the first of the
   DedicatedNetworks family). Both modelled operations — `readNetworkProfiles`
