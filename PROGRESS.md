@@ -443,7 +443,37 @@ Verified sub-items:
   (application-endpoint-discovery). Spec + test change (no behaviour/response change
   — the handler was already correct; only the list example was self-inconsistent);
   no new dependency.
-- 🔧 application-endpoint-discovery
+- 🔧 application-endpoint-discovery — verified 2026-10-13: the one modelled
+  operation (`getOptimalAppEndpoints`,
+  `POST /application-endpoint-discovery/vwip/retrieve-optimal-app-endpoints`) is
+  implemented (`src/apis/application_endpoint_discovery/vwip.rs`), routed, and
+  well-tested (29 test fns before this pass), and the module docs agree with the
+  code and the vendored `specs/application-endpoint-discovery/vwip/openapi.yaml`:
+  the structural application-identifier plane (exactly one UUID `appId` /
+  `applicationEndpointsId`; `…000` → 404; else `(d % 3) + 1` endpoints with a
+  rotating fqdn/ipv4/ipv6 address family), the device reserved-error-suffix plane
+  (checked before the app-not-found 404), and the two-legged/three-legged
+  identifier resolution all match. **Spec↔code drift found and fixed — the
+  deterministic-value / placeholder class** (same as verified-caller /
+  optimal-edge-discovery / click-to-dial / iot-sim-fraud-prevention): the vendored
+  `single` 200 example, explicitly bound to `appId …012`, carried placeholder
+  values `fqdn: app-1a2b3c4d.edge.camarasim.example.com` and `edgeCloudZoneId:
+  5d803d3f-…`, but the handler derives both deterministically via SHA-256 — appId
+  …012 actually yields `app-d08c37d8.edge.camarasim.example.com` and (for
+  `camarasim-edge-eu-west-1`) `b89bb689-d520-cfa4-6542-021d73c84510`. The
+  `EdgeCloudZone` schema example paired the same zone name with the same wrong id
+  (the id is a pure function of the name), so it was corrected to the real value
+  too. Corrected all three and added `vendored_success_example_matches_the_handler`,
+  which drives the real router for appId …012 and pins the exact `port` (1036),
+  `fqdn`, single-address-family shape, `edgeCloudZone` fields (id/name/provider/
+  region/status), description, echoed `appId`, `applicationServerProviderName`,
+  and the absent-device case. Two further inline error examples had previously-seen
+  drift, both fixed in the same pass: the 404 `notFound` example ("was"→"is" not
+  found) and the 422 `missingIdentifier` example (truncated identifier message);
+  added `vendored_error_example_messages_match_the_handler` pinning the 400/404/422
+  inline error families through the router. The reserved-suffix plane and the
+  request/response schemas already matched. This advances the vwip audit cursor to
+  the next API (application-endpoint-registration).
 - 🔧 application-endpoint-registration
 - 🔧 predictive-connectivity-data
 - 🔧 network-access-devices
@@ -525,6 +555,72 @@ Respect phase order. Preferred next work:
 > its bullet with concrete, checked-off sub-steps.
 
 ## Scan journal
+
+- 2026-10-13 — Phase 5 vwip verification pass (application-endpoint-discovery).
+  Audited the twentieth vwip API in mount order (a stateless, deterministic edge
+  endpoint discovery — no stored state). The single modelled operation
+  `getOptimalAppEndpoints`
+  (`POST /application-endpoint-discovery/vwip/retrieve-optimal-app-endpoints`) is
+  fully implemented (`src/apis/application_endpoint_discovery/vwip.rs`), routed,
+  and well-tested (29 test fns before this pass), and the module docs agree with
+  the code and the vendored spec. I verified the three genuine control planes
+  match the handler: the structural application-identifier plane (exactly one
+  UUID-shaped `appId` / `applicationEndpointsId` — neither/both/non-UUID → 400
+  `INVALID_ARGUMENT`; a documented divergence from CAMARA's `anyOf`; the trailing
+  three digits `d` then drive the set: `…000` → 404 `NOT_FOUND`, else `(d % 3) + 1`
+  endpoints with a `(d + rank) % 3` rotating fqdn/single-ipv4/single-ipv6 address
+  family), the device reserved-error-suffix plane (`scenarios::reserved_error`,
+  checked **before** the app-not-found 404 so the device `…404`/`…429`/… cases are
+  reachable), and the two-legged/three-legged identifier resolution (mirrors
+  Optimal Edge Discovery: `device`+line subject → 422 `UNNECESSARY_IDENTIFIER`;
+  empty `device` → 400 `INVALID_ARGUMENT`; absent `device` + non-line subject →
+  422 `MISSING_IDENTIFIER`; `DeviceResponse` echoed only when the request `device`
+  carried ≥2 identifiers incl. a `phoneNumber`). **Spec↔code drift found and fixed
+  — the deterministic-value / placeholder class** (identical to the
+  verified-caller / optimal-edge-discovery / click-to-dial /
+  iot-sim-fraud-prevention passes): the vendored `single` 200 example, explicitly
+  bound to `appId …012`, carried placeholder values — `fqdn:
+  app-1a2b3c4d.edge.camarasim.example.com` and `edgeCloudZoneId: 5d803d3f-…` — but
+  `build_endpoint`/`zone_id` derive both deterministically via SHA-256, so a
+  consumer sending appId …012 actually gets `fqdn:
+  app-d08c37d8.edge.camarasim.example.com` and (for the chosen zone
+  `camarasim-edge-eu-west-1`) `edgeCloudZoneId:
+  b89bb689-d520-cfa4-6542-021d73c84510`. The `EdgeCloudZone` schema example paired
+  that same zone name with the same wrong id (and the id is a pure function of the
+  name), so I corrected it to the real value as well. Corrected all three and
+  added `vendored_success_example_matches_the_handler`, which drives the real
+  router for appId …012 and pins the exact documented bytes — `port` 1036, the
+  `fqdn`, the single-address-family shape (no ipv4/ipv6 siblings), every
+  `edgeCloudZone` field (id/name/provider/region/status), the description, the
+  echoed `appId`, `applicationServerProviderName`, and the absent `device` — so
+  the example can never silently drift again. **Two more inline error-example
+  drifts found and fixed in the same pass**, both previously-seen classes: (a) the
+  404 `notFound` example said "The specified resource **was** not found." but
+  `CamaraError::for_status(404)` emits "…**is** not found." (the was→is class
+  caught on media-streaming-rate / optimal-edge-discovery), and (b) the 422
+  `missingIdentifier` example carried the truncated "The device cannot be
+  identified." but `resolve_identifier` emits the full "…: supply a `device` or
+  use a token that identifies a device." (the truncated-identifier-message class
+  caught on subscription-status / media-streaming-rate / optimal-edge-discovery /
+  consent-info / most-frequent-location). Corrected both and added
+  `vendored_error_example_messages_match_the_handler`, which drives the router and
+  pins the exact `status`/`code`/`message` bytes of all four router-reachable
+  inline error families (400 `invalidArgument`, 404 `notFound`, 422
+  `missingIdentifier`, 422 `unnecessaryIdentifier`). The 401/403/409/429/500/503
+  responses are `$ref`s to the shared catalog (covered by its own tests). This
+  advances the vwip audit cursor to the next API
+  (application-endpoint-registration). Spec + test change (no behaviour/response
+  change — the handler's output was already correct; only the vendored examples
+  carried placeholders / stale messages); no new dependency. `cargo test` green:
+  3073 passed, 0 failed (+2, the two new pinning tests). `cargo build --release`
+  green;
+  binary = 5,434,520 bytes (unchanged vs. the traffic-influence pass on rustc
+  1.97.0 — the change touches only the spec and `#[cfg(test)]` code, outside the
+  release path). *Backlog banner still stands:* the net-new feature backlog
+  remains exhausted and the human decision (authorise stateful infra, name an
+  increment, or pause the routine) is still open — this is the sanctioned per-API
+  vwip verification (backlog item 3), and this pass it caught a genuine,
+  consumer-visible documentation defect.
 
 - 2026-10-13 — Phase 5 vwip verification pass (traffic-influence). Audited the
   nineteenth vwip API in mount order (a stateful resource: an in-memory

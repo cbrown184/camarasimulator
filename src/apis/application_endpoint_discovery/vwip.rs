@@ -729,6 +729,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vendored_success_example_matches_the_handler() {
+        // Pins the vendored `single` 200 example (specs/.../vwip/openapi.yaml):
+        // appId …012 → one fqdn-family endpoint, whose `fqdn` and
+        // `edgeCloudZoneId` are deterministic SHA-256 derivations. These were
+        // placeholders (`app-1a2b3c4d…`, `5d803d3f-…`); this drives the real
+        // router and pins the actual bytes so the example can't drift again.
+        let body = format!(
+            r#"{{"appId":"{APP_012}","device":{{"phoneNumber":"+123456789012"}}}}"#
+        );
+        let (status, _, body) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::OK);
+        let eps = body["applicationEndpoints"].as_array().unwrap();
+        assert_eq!(eps.len(), 1);
+        let ep = &eps[0];
+        assert_eq!(ep["port"], 1036);
+        assert_eq!(ep["fqdn"], "app-d08c37d8.edge.camarasim.example.com");
+        assert!(ep.get("ipv4Addresses").is_none());
+        assert!(ep.get("ipv6Addresses").is_none());
+        let zone = &ep["edgeCloudZone"];
+        assert_eq!(zone["edgeCloudZoneId"], "b89bb689-d520-cfa4-6542-021d73c84510");
+        assert_eq!(zone["edgeCloudZoneName"], "camarasim-edge-eu-west-1");
+        assert_eq!(zone["edgeCloudProvider"], "CamaraSim Edge");
+        assert_eq!(zone["edgeCloudRegion"], "eu-west-1");
+        assert_eq!(zone["edgeCloudZoneStatus"], "active");
+        assert_eq!(
+            ep["applicationEndpointDescription"],
+            "Optimal application endpoint #1 for the requested application."
+        );
+        assert_eq!(body["appId"], APP_012);
+        assert_eq!(body["applicationServerProviderName"], PROVIDER_NAME);
+        // Single device identifier → the DeviceResponse is not echoed.
+        assert!(body.get("device").is_none());
+    }
+
+    #[tokio::test]
     async fn different_app_tails_select_different_endpoint_counts() {
         let body = format!(
             r#"{{"appId":"{APP_014}","device":{{"phoneNumber":"+123456789012"}}}}"#
@@ -842,6 +877,59 @@ mod tests {
         let (status, _, body) = call_ok(&body).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["code"], "MISSING_IDENTIFIER");
+    }
+
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // Pins the inline error-example `status`/`code`/`message` bytes in
+        // specs/.../vwip/openapi.yaml against the handler, through the real
+        // router. The 404 example was the "was→is" drift class and the 422
+        // missingIdentifier was the truncated-identifier-message class; both are
+        // now corrected and guarded so neither can silently drift again.
+
+        // 400 invalidArgument — missing application identifier.
+        let (status, _, body) =
+            call_ok(r#"{"device":{"phoneNumber":"+123456789012"}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            body["message"],
+            "One of `appId` / `applicationEndpointsId` is required."
+        );
+
+        // 404 notFound — application identifier ending …000 (shared NOT_FOUND).
+        let not_found = format!(r#"{{"appId":"{APP_000}","device":{{"phoneNumber":"+123456789012"}}}}"#);
+        let (status, _, body) = call_ok(&not_found).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["status"], 404);
+        assert_eq!(body["code"], "NOT_FOUND");
+        assert_eq!(body["message"], "The specified resource is not found.");
+
+        // 422 missingIdentifier — no device, non-line subject (full message).
+        let missing = format!(r#"{{"appId":"{APP_012}"}}"#);
+        let (status, _, body) = call_ok(&missing).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "MISSING_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "The device cannot be identified: supply a `device` or use a token that identifies a device."
+        );
+
+        // 422 unnecessaryIdentifier — device resubmitted on a line token.
+        let token = mint_token_with_client(READ_SCOPE, "+123456789012").await;
+        let unnecessary = format!(
+            r#"{{"appId":"{APP_012}","device":{{"phoneNumber":"+123456789012"}}}}"#
+        );
+        let (status, _, body) = post_retrieve(Some(&token), &unnecessary, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "The device is already identified by the access token."
+        );
     }
 
     // --- Validation & auth -------------------------------------------------

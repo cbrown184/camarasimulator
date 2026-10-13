@@ -133,13 +133,15 @@ paths:
                 $ref: "#/components/schemas/EndpointDiscoveryResult"
               examples:
                 single:
-                  summary: A single endpoint (appId …012, fqdn family)
+                  summary: A single endpoint for appId …012 (fqdn family) — the
+                    concrete, reproducible response for that identifier (the fqdn
+                    and edgeCloudZoneId are deterministic SHA-256 derivations).
                   value:
                     applicationEndpoints:
                       - port: 1036
-                        fqdn: app-1a2b3c4d.edge.camarasim.example.com
+                        fqdn: app-d08c37d8.edge.camarasim.example.com
                         edgeCloudZone:
-                          edgeCloudZoneId: "5d803d3f-e8dc-4e1a-9f7e-2a4c9c0d3b21"
+                          edgeCloudZoneId: "b89bb689-d520-cfa4-6542-021d73c84510"
                           edgeCloudZoneName: camarasim-edge-eu-west-1
                           edgeCloudProvider: CamaraSim Edge
                           edgeCloudRegion: eu-west-1
@@ -189,7 +191,7 @@ paths:
                   value:
                     status: 404
                     code: NOT_FOUND
-                    message: The specified resource was not found.
+                    message: The specified resource is not found.
         "409":
           $ref: "../../shared/errors.yaml#/components/responses/Conflict"
         "422":
@@ -212,7 +214,7 @@ paths:
                   value:
                     status: 422
                     code: MISSING_IDENTIFIER
-                    message: The device cannot be identified.
+                    message: "The device cannot be identified: supply a `device` or use a token that identifies a device."
                 unnecessaryIdentifier:
                   summary: The device is already identified by the token
                   value:
@@ -465,8 +467,8 @@ components:
           format: uuid
           description: >-
             A stable, UUID-shaped id derived from the zone name (SHA-256); stable
-            per zone.
-          example: "5d803d3f-e8dc-4e1a-9f7e-2a4c9c0d3b21"
+            per zone. The example is the real id for `camarasim-edge-eu-west-1`.
+          example: "b89bb689-d520-cfa4-6542-021d73c84510"
         edgeCloudZoneName:
           type: string
           maxLength: 64
