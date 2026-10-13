@@ -695,7 +695,37 @@ Verified sub-items:
   next API (dedicated-network-areas). Doc + spec-string + `#[cfg(test)]` change
   only (no behaviour/response change — the handlers were already correct; the
   drift was doc staleness, not examples); no new dependency.
-- 🔧 dedicated-network-areas
+- 🔧 dedicated-network-areas — verified 2026-10-13: both modelled operations
+  (`readNetworkServiceArea`, `GET /areas/{areaId}`; `retrieveNetworkServiceAreas`,
+  `POST /retrieve-service-areas`) are implemented
+  (`src/apis/dedicated_network_areas/vwip.rs`), routed, and well-tested (36 test
+  fns before this pass), and the module docs agree with the code and the vendored
+  `specs/dedicated-network-areas/vwip/openapi.yaml`: the single-area three-layer
+  `areaId` control plane (malformed → 400 `INVALID_ARGUMENT`; reserved trailing
+  suffix → the canonical CAMARA error; else `digits % N` picks a fixed
+  service-area template with the requested id echoed) and the collection query's
+  AND-combined optional filters (`atLocation`/`overlappingArea`/`coveringArea`
+  CIRCLE-only haversine spatial filters + `byName`/`byNetworkProfileId`/
+  `byQosProfileName`, never 404s) all match the handler. **Spec↔code drift found
+  and fixed in the vendored `readNetworkServiceArea` 200 `cityCentre` example —
+  the deterministic-value class** (as on dedicated-network / network-access-devices
+  / click-to-dial): the example was bound to `areaId …001` but showed
+  `london-city`, yet the handler selects `TEMPLATES[digits % N]`, so tail `001`
+  → template 1 (`manchester-metro`), not template 0 (`london-city`); the
+  existing `happy_path` test already pins `…001` → manchester-metro, so the
+  example id was the wrong part (its whole body is london-city). Rebound the
+  example to `areaId …000` (which genuinely selects london-city) and added a
+  derivation comment. Added `vendored_success_example_matches_the_handler` (drives
+  `…000` through the router and pins the full london-city body, asserts `…001` is
+  a different area so the id stays load-bearing, and pins the collection
+  `catalog` example's `…000`/`…002` ids/bodies) and
+  `vendored_error_example_messages_match_the_handler` (pins the exact
+  `status`/`code`/`message` bytes of the three inline error examples —
+  readNetworkServiceArea 400 `invalidArgument`, retrieve 400
+  `invalidArgument`/`outOfRange` — which existing tests guarded only for `code`).
+  This advances the vwip audit cursor to the next API (edge-application-management).
+  Spec + `#[cfg(test)]` change (no behaviour/response change — the handler was
+  already correct; only the one success-example id was wrong); no new dependency.
 - 🔧 edge-application-management
 - 🔧 esim-remote-management
 - 🔧 network-access-domains
@@ -770,6 +800,33 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-13 — Phase 5 vwip verification pass (dedicated-network-areas). Audited
+  the twenty-eighth vwip API in mount order (the geographical catalog sibling of
+  dedicated-network-profiles / -network / -network-accesses). Both modelled
+  operations — `readNetworkServiceArea` (`GET /areas/{areaId}`) and
+  `retrieveNetworkServiceAreas` (`POST /retrieve-service-areas`, AND-combined
+  CIRCLE-only spatial + attribute filters over a fixed four-area catalog) — are
+  implemented (`src/apis/dedicated_network_areas/vwip.rs`), routed, and
+  well-tested (36 test fns before this pass). **Spec↔code drift found and fixed —
+  the deterministic-value class:** the vendored `readNetworkServiceArea` 200
+  `cityCentre` example was bound to `areaId …001` but showed `london-city`, yet
+  the handler selects `TEMPLATES[digits % N]` so tail `001` → `manchester-metro`
+  (template 1), not `london-city` (template 0) — the example's body is entirely
+  london-city, so the id was the wrong part (the existing `happy_path` test
+  already pins `…001` → manchester-metro). Rebound the example to `areaId …000`
+  and added a derivation comment. Added `vendored_success_example_matches_the_handler`
+  (drives `…000` through the router pinning the full london-city body, asserts
+  `…001` selects a different area so the id stays load-bearing, and pins the
+  collection `catalog` example's `…000`/`…002` ids/bodies) and
+  `vendored_error_example_messages_match_the_handler` (pins the three inline error
+  examples' exact `status`/`code`/`message` bytes). Module docs agree with the
+  code; no stale-slice doc trap (both operations already documented as shipped).
+  `cargo test` green (3084 → 3086 tests) and `cargo build --release` green;
+  release binary 5,438,616 bytes (~5.2 MiB, unchanged from the prior pass). This
+  advances the vwip audit cursor to the next API (edge-application-management).
+  Spec + `#[cfg(test)]` change only (no behaviour/response change — the handler
+  was already correct; only the one success-example id was wrong); no new
+  dependency.
 - 2026-10-13 — Phase 5 vwip verification pass (dedicated-network-accesses).
   Audited the twenty-seventh vwip API in mount order (the access sibling of the
   DedicatedNetworks family). All seven modelled operations over the full access

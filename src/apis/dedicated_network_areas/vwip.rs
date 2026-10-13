@@ -1082,6 +1082,95 @@ mod tests {
         );
     }
 
+    // --- Spec ↔ handler pinning --------------------------------------------
+
+    #[tokio::test]
+    async fn vendored_success_example_matches_the_handler() {
+        // The vendored readNetworkServiceArea 200 `cityCentre` example is bound to
+        // areaId …000 and shows london-city. Drive that exact request through the
+        // real router and pin every documented field so the example can't drift
+        // (an earlier revision bound it to …001, which actually selects
+        // manchester-metro — guarded below).
+        let id = "00000000-0000-4000-8000-000000000000";
+        let (status, _, body) = get_ok(id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["id"], id, "id echoes the requested areaId");
+        assert_eq!(body["name"], "london-city");
+        assert_eq!(body["description"], "Central London coverage cell.");
+        assert_eq!(body["area"]["areaType"], "CIRCLE");
+        assert_eq!(body["area"]["center"]["latitude"].as_f64().unwrap(), 51.5074);
+        assert_eq!(body["area"]["center"]["longitude"].as_f64().unwrap(), -0.1278);
+        assert_eq!(body["area"]["radius"].as_f64().unwrap(), 5000.0);
+        assert_eq!(body["qosProfiles"], json!(["QOS_L", "QOS_M"]));
+        assert!(body.get("networkProfiles").is_none());
+
+        // Tail 001 is a different area (manchester-metro), so the example id is
+        // load-bearing: it must stay …000.
+        let (_, _, other) = get_ok(&uuid_ending(1)).await;
+        assert_eq!(other["name"], "manchester-metro");
+
+        // The vendored retrieveNetworkServiceAreas 200 `catalog` example shows the
+        // areas with canonical ids …000 (london-city) and …002 (port-of-felixstowe).
+        // Prove the handler mints exactly those ids/bodies for those templates.
+        let (status, body) = retrieve_ok(None).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = body.as_array().unwrap();
+        let london = arr.iter().find(|a| a["name"] == "london-city").unwrap();
+        assert_eq!(london["id"], "00000000-0000-4000-8000-000000000000");
+        assert_eq!(london["qosProfiles"], json!(["QOS_L", "QOS_M"]));
+        let port = arr.iter().find(|a| a["name"] == "port-of-felixstowe").unwrap();
+        assert_eq!(port["id"], "00000000-0000-4000-8000-000000000002");
+        assert_eq!(
+            port["networkProfiles"],
+            json!([
+                "00000000-0000-4000-8000-000000000000",
+                "00000000-0000-4000-8000-000000000001"
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // The three inline error examples (the only error responses not $ref'ing
+        // the shared catalog) are guarded elsewhere only for `code`; pin their
+        // exact `status`/`code`/`message` bytes through the router.
+        let token = mint_token(READ_SCOPE).await;
+
+        // readNetworkServiceArea 400 invalidArgument: malformed areaId.
+        let (status, _, body) = get_area(Some(&token), "not-a-uuid", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["message"], "`areaId` must be a UUID.");
+
+        // retrieveNetworkServiceAreas 400 invalidArgument: non-CIRCLE query area.
+        let (status, _, body) = post_retrieve(
+            Some(&token),
+            Some(json!({"overlappingArea": {"areaType": "POLYGON", "boundary": []}})),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["message"], "Only `areaType: CIRCLE` query areas are supported.");
+
+        // retrieveNetworkServiceAreas 400 outOfRange: coordinate out of range.
+        let (status, _, body) = post_retrieve(
+            Some(&token),
+            Some(json!({"atLocation": {"latitude": 200.0, "longitude": 0.0}})),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "OUT_OF_RANGE");
+        assert_eq!(
+            body["message"],
+            "`latitude` must be in [-90, 90] and `longitude` in [-180, 180]."
+        );
+    }
+
     // --- Pure units --------------------------------------------------------
 
     #[test]

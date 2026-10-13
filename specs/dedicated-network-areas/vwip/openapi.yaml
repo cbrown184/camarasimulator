@@ -138,8 +138,12 @@ paths:
               examples:
                 cityCentre:
                   summary: A city-centre service area with QoS profiles
+                  # Bound to areaId …000: the handler echoes the requested id and
+                  # selects TEMPLATES[digits % N], so tail 000 → template 0
+                  # (london-city). Tail 001 selects template 1 (manchester-metro),
+                  # not this area — see vendored_success_example_matches_the_handler.
                   value:
-                    id: "00000000-0000-4000-8000-000000000001"
+                    id: "00000000-0000-4000-8000-000000000000"
                     name: london-city
                     description: Central London coverage cell.
                     area:
