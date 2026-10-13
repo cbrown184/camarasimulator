@@ -784,4 +784,96 @@ mod tests {
             Some("corr-err")
         );
     }
+
+    // --- Spec ↔ code: pin the inline error example bytes --------------------
+
+    /// Every inline error example in `specs/most-frequent-location/vwip/openapi.yaml`
+    /// whose `message` is this API's own (not a shared `$ref`) must match the bytes
+    /// the handler returns through the real router, so the vendored spec cannot
+    /// silently drift from the code. The 401/403/404/409/429/500/503 responses are
+    /// `$ref`s to the shared catalog and are covered by its own tests.
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // Minted once; a non-line (client-credentials) subject so `device` drives
+        // the two-legged cases and the no-`device` case is MISSING_IDENTIFIER.
+        let token = mint_token(VERIFY_SCOPE).await;
+        let zone = r#""geoReference":{"type":"COVERAGE_ZONE","latitude":0.0,"longitude":0.0}"#;
+
+        // 400 invalidArgument — malformed body.
+        let (status, _, body) = post_verify(Some(&token), "not json", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            body["message"],
+            "Request body is not a valid VerifyFrequentLocationRequest."
+        );
+
+        // 400 outOfRange — latitude out of [-90, 90].
+        let (status, _, body) = post_verify(
+            Some(&token),
+            r#"{"device":{"phoneNumber":"+123456789012"},"geoReference":{"type":"COVERAGE_ZONE","latitude":100.0,"longitude":0.0}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "OUT_OF_RANGE");
+        assert_eq!(
+            body["message"],
+            "`latitude` must be in [-90, 90] and `longitude` in [-180, 180]."
+        );
+
+        // 400 postalCodeNotValid — reserved `00000` postal code.
+        let (status, _, body) = post_verify(
+            Some(&token),
+            r#"{"device":{"phoneNumber":"+123456789012"},"geoReference":{"type":"POSTAL_CODE","postalCode":"00000"}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "MOST_FREQUENT_LOCATION.POSTAL_CODE_NOT_VALID");
+        assert_eq!(
+            body["message"],
+            "Requested postal code value does not exist or is invalid."
+        );
+
+        // 422 missingIdentifier — no `device`, non-line subject (the fixed example).
+        let (status, _, body) =
+            post_verify(Some(&token), &format!(r#"{{{zone}}}"#), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "MISSING_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "The device cannot be identified: supply a `device` or use a token that identifies a device."
+        );
+
+        // 422 unnecessaryIdentifier — `device` submitted on a three-legged line token.
+        let line_token = mint_token_with_client(VERIFY_SCOPE, "+123456789012").await;
+        let (status, _, body) = post_verify(
+            Some(&line_token),
+            &format!(r#"{{"device":{{"phoneNumber":"+123456789012"}},{zone}}}"#),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "The device is already identified by the access token."
+        );
+
+        // 422 serviceNotApplicable — the reserved `…422` suffix (shared catalog
+        // message, shown inline here, so pinned here too).
+        let (status, _, body) = post_verify(
+            Some(&token),
+            &format!(r#"{{"device":{{"phoneNumber":"+123456789422"}},{zone}}}"#),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "SERVICE_NOT_APPLICABLE");
+        assert_eq!(
+            body["message"],
+            "The service is not available for the provided identifier."
+        );
+    }
 }
