@@ -1603,6 +1603,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vendored_examples_match_the_handler() {
+        // Pins the three vendored spec examples whose `callId` is deterministic
+        // (`call_id` = SHA-256 over the caller/callee pair) and was previously a
+        // placeholder UUID — the same placeholder-id drift class caught on
+        // verified-caller / iot-sim-fraud-prevention. The `callId` depends only on
+        // the pair, so we pin the documented pair → documented literal directly
+        // against `call_id` (collision-free — `createCall` is store-keyed, so a
+        // fixed documented pair would 409 against the other happy-path tests that
+        // share it), then prove the router actually emits `call_id(pair)` and the
+        // fixed silent WAV using a pair unique to this test. Together these pin the
+        // documented examples end to end.
+
+        // `created` example: caller +…111 / callee +…012 → the documented literal.
+        assert_eq!(
+            call_id("+123456789111", "+123456789012"),
+            "40c0c2be-6c32-41b9-bc58-e5cc1a25f8b3"
+        );
+        // `found` + `recording` examples: caller +…111 / callee +…222 (one call;
+        // the `recording` example is that recorded call's recording).
+        assert_eq!(
+            call_id("+123456789111", "+123456789222"),
+            "a2b3b31d-6b8e-49b0-8487-06f70764d7bd"
+        );
+
+        // The router emits exactly `call_id(pair)` as the returned `callId`, and
+        // getRecording returns the fixed silent WAV — driven on a pair unique to
+        // this test so it never collides with the store-keyed happy-path tests.
+        let (caller, callee) = ("+123456789118", "+123456789228");
+        let expected_id = call_id(caller, callee);
+
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"caller":{{"number":"{caller}"}},"callee":{{"number":"{callee}"}},"recordingEnabled":true}}"#
+        );
+        let (status, _, created) = post_calls(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["callId"], expected_id, "createCall returns call_id(pair)");
+        assert_eq!(created["status"], "initiating");
+        assert_eq!(created["recordingEnabled"], true);
+
+        // getCall round-trips the stored call by that deterministic id (the `found`
+        // example's shape: initiating, recording-enabled, pair echoed).
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, got) = get_call_by_id(Some(&read), &expected_id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(got["callId"], expected_id);
+        assert_eq!(got["status"], "initiating");
+        assert_eq!(got["recordingEnabled"], true);
+        assert_eq!(got["caller"]["number"], caller);
+        assert_eq!(got["callee"]["number"], callee);
+
+        // getRecording returns the `recording` example's fixed content/contentType.
+        let rec = mint_token(RECORDING_READ_SCOPE).await;
+        let (status, _, recording) = get_recording_by_id(Some(&rec), &expected_id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(recording["callId"], expected_id);
+        assert_eq!(recording["contentType"], "audio/wav");
+        assert_eq!(
+            recording["content"],
+            "UklGRjQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YRAAAACAgICAgICAgICAgICAgICA",
+            "the vendored `recording` example content is the fixed silent WAV"
+        );
+        // …which is exactly the base64 of the handler's fixed silent WAV.
+        assert_eq!(
+            recording["content"].as_str().unwrap(),
+            BASE64.encode(silent_wav())
+        );
+    }
+
+    #[tokio::test]
     async fn get_recording_for_a_call_without_recording_is_404() {
         // A call created without recordingEnabled has no recording → 404.
         let create = mint_token(CREATE_SCOPE).await;

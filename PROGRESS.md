@@ -357,7 +357,38 @@ Verified sub-items:
   `vendored_error_example_messages_match_the_handler` pinning the exact
   `status`/`code`/`message` bytes of both through the router so they can't drift.
   This advances the vwip audit cursor to the next API (click-to-dial).
-- 🔧 click-to-dial
+- 🔧 click-to-dial — verified 2026-10-13: all four modelled operations
+  (`createCall` `POST /calls`, the stateful `getCall` `GET /calls/{callId}`,
+  `terminateCall` `DELETE /calls/{callId}`, `getRecording`
+  `GET /calls/{callId}/recording`) are implemented
+  (`src/apis/click_to_dial/vwip.rs` + an in-memory `store.rs` with a disjoint
+  sink side-store + a `notifications.rs` firing the create/terminate/progression
+  `status-changed` CloudEvents), routed, and well-tested (~95 test fns), and the
+  vendored `specs/click-to-dial/vwip/openapi.yaml` is consistent with the code
+  (the full CRUD-ish set, scopes, reserved-error + availability/recording control
+  planes, and the simulated-progression notification cuts all match). **Spec↔code
+  drift found and fixed, placeholder-UUID class:** the `created`, `found`, and
+  `recording` examples all carried the Swagger placeholder `callId`
+  `3fa85f64-5717-4562-b3fc-2c963f66afa6`, but `call_id` derives the id
+  deterministically (SHA-256 over `caller` + `\0` + `callee`, v4-shaped) — the
+  documented `created` pair `+123456789111`/`+123456789012` actually yields
+  `40c0c2be-6c32-41b9-bc58-e5cc1a25f8b3` and the `found` pair
+  `+123456789111`/`+123456789222` yields `a2b3b31d-6b8e-49b0-8487-06f70764d7bd`
+  (the same deterministic-id drift the verified-caller / optimal-edge-discovery /
+  iot-sim-fraud-prevention passes caught). Corrected all three (tying the
+  `recording` example to the `found` call's id, so it is the recording of that
+  recorded call) and added `vendored_examples_match_the_handler`, which pins the
+  documented pair→literal mapping directly against `call_id` and proves the router
+  emits `call_id(pair)` + the fixed silent WAV on a pair unique to this test
+  (the store-keyed `createCall` 409s on a shared fixed pair, so the documented
+  pairs can't be re-created through the router). All inline error-example
+  `message` bytes (400 `INVALID_ARGUMENT`, 409 `ALREADY_EXISTS`, 422
+  `INVALID_PHONE_NUMBER`/`SAME_CALLER_CALLEE`/`CALLER_NOT_AVAILABLE`/
+  `CALLEE_NOT_AVAILABLE`/`RECORDING_NOT_SUPPORTED`, 404 `NOT_FOUND`×2) and the
+  recording `content` base64 were already byte-accurate against the handler. This
+  advances the vwip audit cursor to the next API (most-frequent-location). Spec +
+  test change (no behaviour/response change — the handler was already correct;
+  only the three example ids were placeholders); no new dependency.
 - 🔧 most-frequent-location
 - 🔧 traffic-influence
 - 🔧 application-endpoint-discovery
@@ -443,6 +474,57 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-13 — Phase 5 vwip verification pass (click-to-dial). Audited the
+  seventeenth vwip API in mount order (a stateful resource: an in-memory call
+  `store` with a disjoint sink side-store, plus a `notifications` module firing
+  create-time / terminate / simulated-progression `status-changed` CloudEvents).
+  All **four** modelled operations are fully implemented, routed, and well-tested
+  (~95 test fns before this pass): `createCall` (`POST /calls`, store-keyed — a
+  deterministic `callId` from the pair, so a re-create of a still-live pair is
+  `409 ALREADY_EXISTS`), the stateful `getCall` (`GET /calls/{callId}`),
+  `terminateCall` (`DELETE /calls/{callId}`, single-use eviction that fires a
+  terminal `disconnected` event), and `getRecording`
+  (`GET /calls/{callId}/recording`, gated on the stored call's `recordingEnabled`).
+  **Spec↔code drift found and fixed — the placeholder-UUID class** (the same
+  consumer-visible drift the verified-caller / optimal-edge-discovery /
+  iot-sim-fraud-prevention passes caught): the `created`, `found`, and `recording`
+  200/201 examples all carried the Swagger placeholder `callId`
+  `3fa85f64-5717-4562-b3fc-2c963f66afa6`, but the schema promises (and the handler
+  delivers) a `callId` *deterministically derived* from the participant pair —
+  `call_id` = SHA-256 over `caller` + `\0` + `callee`, v4-shaped. The documented
+  `created` pair `+123456789111`/`+123456789012` actually yields
+  `40c0c2be-6c32-41b9-bc58-e5cc1a25f8b3` and the `found` pair
+  `+123456789111`/`+123456789222` yields `a2b3b31d-6b8e-49b0-8487-06f70764d7bd`
+  (both confirmed by replicating the derivation and then by the new router test).
+  Corrected all three example ids and tied the `recording` example to the `found`
+  call's id (so it reads as the recording of that recorded call), and clarified in
+  each example `summary` that the id is the deterministic value for that pair while
+  `createdAt`/`generatedAt` stay illustrative (wall-clock). Added
+  `vendored_examples_match_the_handler`, which (a) pins each documented pair →
+  documented literal *directly* against `call_id` and (b) proves the real router
+  emits `call_id(pair)` as the returned id and the fixed silent WAV as the
+  recording `content` — driven on a pair unique to this test, because `createCall`
+  is store-keyed and the documented pairs are already used (and left live) by the
+  happy-path tests, so re-creating them through the router would `409`. Verified
+  the rest of the spec is byte-accurate: every inline error-example `message` (400
+  `INVALID_ARGUMENT` "Request body is not a valid CreateCallRequest.", 409
+  `ALREADY_EXISTS`, the five 422 cases `INVALID_PHONE_NUMBER` / `SAME_CALLER_CALLEE`
+  / `CALLER_NOT_AVAILABLE` / `CALLEE_NOT_AVAILABLE` / `RECORDING_NOT_SUPPORTED`,
+  and both 404 `NOT_FOUND` messages) already matched the handler, as did the
+  `recording` `content` base64 (the handler's `silent_wav`: a 60-byte 8 kHz 8-bit
+  mono silent RIFF/WAVE, `audio/wav`) and the 409 `CONFLICT` / reserved-suffix
+  plane. This advances the vwip audit cursor to the next API
+  (most-frequent-location). Spec + test change (no behaviour/response change — the
+  handler was already correct; only the three example ids were placeholders); no
+  new dependency. `cargo test` green: 3069 passed, 0 failed (+1, the new pinning
+  test). `cargo build --release` green; binary = 5,434,520 bytes (unchanged vs. the
+  sponsored-data pass on rustc 1.97.0 — the net spec-text change and the new
+  `#[cfg(test)]` code did not cross a 4 KiB page boundary; `#[cfg(test)]` is
+  outside the release path). *Backlog banner still stands:* the net-new feature
+  backlog remains exhausted and the human decision (authorise stateful infra, name
+  an increment, or pause the routine) is still open — this is the sanctioned
+  per-API vwip verification (backlog item 3), and this pass it caught a genuine,
+  consumer-visible documentation defect.
 - 2026-10-13 — Phase 5 vwip verification pass (sponsored-data). Audited the
   sixteenth vwip API in mount order (a stateful resource: an in-memory session
   `store` plus a `notifications` module firing the end-of-session webhook). All

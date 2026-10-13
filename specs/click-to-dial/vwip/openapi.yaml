@@ -197,9 +197,13 @@ paths:
                 $ref: "#/components/schemas/Call"
               examples:
                 created:
-                  summary: A newly-created call, initiating
+                  summary: >-
+                    A newly-created call, initiating. The `callId` is the
+                    deterministic value CamaraSim derives from this exact
+                    caller/callee pair (`createdAt` is illustrative — it is the
+                    wall-clock create time).
                   value:
-                    callId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    callId: 40c0c2be-6c32-41b9-bc58-e5cc1a25f8b3
                     caller:
                       number: "+123456789111"
                     callee:
@@ -431,9 +435,13 @@ paths:
                 $ref: "#/components/schemas/Call"
               examples:
                 found:
-                  summary: A stored call, still initiating
+                  summary: >-
+                    A stored call, still initiating. The `callId` is the
+                    deterministic value CamaraSim derives from this
+                    caller/callee pair (a recording-enabled call — its recording
+                    is the `recording` example below).
                   value:
-                    callId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    callId: a2b3b31d-6b8e-49b0-8487-06f70764d7bd
                     caller:
                       number: "+123456789111"
                     callee:
@@ -579,9 +587,13 @@ paths:
                 $ref: "#/components/schemas/RecordingResource"
               examples:
                 recording:
-                  summary: A recording for a recorded call
+                  summary: >-
+                    A recording for a recorded call (the `found` call above). The
+                    `callId` is that call's deterministic id; `content` is the
+                    fixed silent WAV CamaraSim always returns (`generatedAt` is
+                    illustrative — the wall-clock fetch time).
                   value:
-                    callId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    callId: a2b3b31d-6b8e-49b0-8487-06f70764d7bd
                     content: UklGRjQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YRAAAACAgICAgICAgICAgICAgICA
                     contentType: audio/wav
                     generatedAt: "2024-01-01T14:27:08Z"
