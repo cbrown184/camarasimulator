@@ -389,7 +389,31 @@ Verified sub-items:
   advances the vwip audit cursor to the next API (most-frequent-location). Spec +
   test change (no behaviour/response change — the handler was already correct;
   only the three example ids were placeholders); no new dependency.
-- 🔧 most-frequent-location
+- 🔧 most-frequent-location — verified 2026-10-13: the one modelled operation
+  (`verifyFrequentLocation`, `POST /most-frequent-location/vwip/verify`) is
+  implemented (`src/apis/most_frequent_location/vwip.rs`), routed, and well-tested
+  (23 test fns before this pass), and the vendored
+  `specs/most-frequent-location/vwip/openapi.yaml` is consistent with the code:
+  the two-plane score (`(identifier trailing three digits + area offset) % 101`,
+  area offset = `round(|lat|)+round(|long|)` for a `COVERAGE_ZONE` or the postal
+  code's trailing three digits), the `geoReference` validation (`COVERAGE_ZONE`
+  range → 400 `OUT_OF_RANGE`; reserved `00000` → 400
+  `MOST_FREQUENT_LOCATION.POSTAL_CODE_NOT_VALID`; malformed → 400
+  `INVALID_ARGUMENT`), the two-legged/three-legged identifier resolution, and the
+  reserved-error suffix plane (`…422` → `SERVICE_NOT_APPLICABLE`) all match the
+  handler. **Spec↔code drift found and fixed in the vendored 422
+  `missingIdentifier` example:** it carried the truncated `message: "The device
+  cannot be identified."` but `resolve_identifier` emits the full "…: supply a
+  `device` or use a token that identifies a device." (the same
+  truncated-identifier-message drift class caught on subscription-status /
+  media-streaming-rate / optimal-edge-discovery / consent-info). Corrected the
+  example and added `vendored_error_example_messages_match_the_handler` pinning the
+  exact `status`/`code`/`message` bytes of all six router-reachable inline error
+  families (400 `invalidArgument`/`outOfRange`/`postalCodeNotValid`, 422
+  `missingIdentifier`/`unnecessaryIdentifier`/`serviceNotApplicable`) through the
+  router. The 200 examples (score 50 / 0) and the shared-`$ref`
+  401/403/404/409/429/500/503 responses already matched. This advances the vwip
+  audit cursor to the next API (traffic-influence).
 - 🔧 traffic-influence
 - 🔧 application-endpoint-discovery
 - 🔧 application-endpoint-registration
@@ -474,6 +498,57 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-13 — Phase 5 vwip verification pass (most-frequent-location). Audited
+  the eighteenth vwip API in mount order (a stateless, privacy-preserving
+  presence score — no stored state). The single modelled operation
+  `verifyFrequentLocation` (`POST /most-frequent-location/vwip/verify`) is fully
+  implemented (`src/apis/most_frequent_location/vwip.rs`), routed, and well-tested
+  (23 test fns before this pass), and the module docs agree with the code and the
+  vendored `specs/most-frequent-location/vwip/openapi.yaml`: the two genuine
+  control planes (`score = (identifier trailing three digits + area offset) % 101`,
+  where the area offset is `round(|lat|)+round(|long|)` for a `COVERAGE_ZONE` and
+  the postal code's trailing three digits for a `POSTAL_CODE`, so the same device
+  flips its score as the area changes and vice-versa), the `geoReference`
+  validation ordering (request-level 400 plane first — `COVERAGE_ZONE` lat/long
+  range → `OUT_OF_RANGE`, reserved `00000` postal code →
+  `MOST_FREQUENT_LOCATION.POSTAL_CODE_NOT_VALID`, unknown `type`/foreign fields →
+  `INVALID_ARGUMENT` — then the identifier's reserved-suffix plane, then the
+  score), the two-legged/three-legged identifier resolution (mirrors Connected
+  Network Type: `device`+line subject → 422 `UNNECESSARY_IDENTIFIER`;
+  `device` with no identifier → 400 `INVALID_ARGUMENT`; absent `device` +
+  non-line subject → 422 `MISSING_IDENTIFIER`), and the reserved-error suffix
+  plane (`…422` → `SERVICE_NOT_APPLICABLE`) all match. **Spec↔code drift found and
+  fixed in the vendored 422 `missingIdentifier` example:** it carried the
+  truncated `message: "The device cannot be identified."` but `resolve_identifier`
+  emits the full "The device cannot be identified: supply a `device` or use a
+  token that identifies a device." — a consumer reading the spec would expect
+  different `message` bytes than the endpoint returns (the identical
+  truncated-identifier-message drift class caught on subscription-status,
+  media-streaming-rate, optimal-edge-discovery, and consent-info). Corrected the
+  example to the real bytes and added
+  `vendored_error_example_messages_match_the_handler`, which drives the endpoint
+  and pins the exact `status`/`code`/`message` bytes of all six router-reachable
+  inline example families whose messages are this API's own — 400
+  `invalidArgument` ("Request body is not a valid VerifyFrequentLocationRequest."),
+  400 `outOfRange` ("`latitude` must be in [-90, 90] and `longitude` in
+  [-180, 180]."), 400 `postalCodeNotValid` ("Requested postal code value does not
+  exist or is invalid."), 422 `missingIdentifier`, 422 `unnecessaryIdentifier`
+  ("The device is already identified by the access token."), and 422
+  `serviceNotApplicable` ("The service is not available for the provided
+  identifier.") — so none can silently drift again. The 200 success examples
+  (score 50 / 0) are illustrative single integers already consistent with the
+  score mapping, and the 401/403/404/409/429/500/503 responses are `$ref`s to the
+  shared catalog (covered by its own tests). This advances the vwip audit cursor
+  to the next API (traffic-influence). Spec + test change (no behaviour/response
+  change — the handler's output was already correct; only the spec example was
+  wrong); no new dependency. `cargo test` green: 3070 passed, 0 failed (+1, the
+  new pinning test). `cargo build --release` green; binary = 5,434,520 bytes
+  (unchanged vs. the click-to-dial pass on rustc 1.97.0 — the fix touches only the
+  spec and `#[cfg(test)]` code, not the release path). *Backlog banner still
+  stands:* the net-new feature backlog remains exhausted and the human decision
+  (authorise stateful infra, name an increment, or pause the routine) is still
+  open — this is the sanctioned per-API vwip verification (backlog item 3), and
+  this pass it caught a genuine, consumer-visible documentation defect.
 - 2026-10-13 — Phase 5 vwip verification pass (click-to-dial). Audited the
   seventeenth vwip API in mount order (a stateful resource: an in-memory call
   `store` with a disjoint sink side-store, plus a `notifications` module firing
