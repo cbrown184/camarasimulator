@@ -1357,4 +1357,129 @@ mod tests {
             Some("corr-bind-err")
         );
     }
+
+    /// Pin every vendored example in `specs/iot-sim-fraud-prevention/vwip/openapi.yaml`
+    /// against what the handlers actually return, driving each documented request
+    /// through the real router. This guards against the two drift classes prior
+    /// vwip passes caught: a deterministic response value that no longer matches
+    /// the derivation (the `IMEI_BIND_BOUND` `bindImei` carried a placeholder that
+    /// was not even Luhn-valid), and inline error-example `message` bytes that had
+    /// been transcribed from the upstream CAMARA spec and never reconciled with
+    /// this handler's messages.
+    #[tokio::test]
+    async fn vendored_examples_match_the_handler() {
+        // --- 200 success examples (queryType IMEIBIND / AREALIMIT) -----------
+        // IMEI_BIND_BOUND is the deterministic result for INPUT_PHONE_NUMBER
+        // (+123456789011): TAC 35209900 + serial 000011 + Luhn check digit.
+        let (status, _, body) =
+            query_ok_token(r#"{"device":{"phoneNumber":"+123456789011"},"queryType":"IMEIBIND"}"#)
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["imeiBind"]["bindStatus"], "BOUND");
+        assert_eq!(body["imeiBind"]["bindImei"], "352099000000113");
+        // Self-validating: the documented literal equals the derivation, so a
+        // future change to synth_imei fails here rather than silently blessing it.
+        assert_eq!(body["imeiBind"]["bindImei"].as_str().unwrap(), synth_imei(11));
+
+        // AREA_LIMIT_RESTRICTED is the deterministic Circle for the same input.
+        let (status, _, body) =
+            query_ok_token(r#"{"device":{"phoneNumber":"+123456789011"},"queryType":"AREALIMIT"}"#)
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["areaLimit"]["areaLimitStatus"], "RESTRICTED");
+        assert_eq!(body["areaLimit"]["limitArea"], synth_circle(11));
+        // And the exact documented coordinates.
+        assert_eq!(body["areaLimit"]["limitArea"]["areaType"], "CIRCLE");
+        assert_eq!(body["areaLimit"]["limitArea"]["center"]["latitude"], -79.0);
+        assert_eq!(body["areaLimit"]["limitArea"]["center"]["longitude"], -169.0);
+        assert_eq!(body["areaLimit"]["limitArea"]["radius"], 11);
+
+        // --- query 400 INVALID_ARGUMENT examples -----------------------------
+        // Insufficient Device Parameters.
+        let (status, _, body) = query_ok_token(r#"{"device":{},"queryType":"IMEIBIND"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["message"], "`device` must contain at least one identifier.");
+
+        // Missing or Invalid QueryType — one handler message for both situations.
+        let missing_qt = "Request body is not a valid QueryRequest (queryType must be \"IMEIBIND\" or \"AREALIMIT\").";
+        let (status, _, body) =
+            query_ok_token(r#"{"device":{"phoneNumber":"+123456789011"}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["message"], missing_qt);
+        let (status, _, body) =
+            query_ok_token(r#"{"device":{"phoneNumber":"+123456789011"},"queryType":"NOPE"}"#)
+                .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["message"], missing_qt);
+
+        // Invalid Phone Number.
+        let (status, _, body) =
+            query_ok_token(r#"{"device":{"phoneNumber":"0123"},"queryType":"IMEIBIND"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["message"], "`phoneNumber` must be in E.164 format (e.g. +123456789).");
+
+        // --- query 422 examples ----------------------------------------------
+        // Missing Identifier (two-legged token, no device).
+        let (status, _, body) = query_ok_token(r#"{"queryType":"IMEIBIND"}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "MISSING_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "No `device` supplied and the access token identifies no device."
+        );
+        // Unnecessary Identifier (device on a three-legged line token).
+        let token = mint_token_with_client(QUERY_SCOPE, "+123456789011").await;
+        let (status, _, body) = post_query(
+            Some(&token),
+            r#"{"device":{"phoneNumber":"+123456789022"},"queryType":"IMEIBIND"}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "An explicit identifier has been provided for the device when this is already identified by the access token."
+        );
+
+        // --- bind 400 example ------------------------------------------------
+        let bind_bad = "Request body is not a valid BindDeviceImeiRequest (bindType must be \"IMEIBIND\" or \"AREALIMIT\").";
+        let (status, _, body) =
+            bind_ok(r#"{"device":{"phoneNumber":"+123456789011"},"bindType":"NOPE"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["message"], bind_bad);
+        let (status, _, body) = bind_ok(r#"{"device":{"phoneNumber":"+123456789011"}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["message"], bind_bad);
+
+        // --- unbind 400 example ----------------------------------------------
+        let unbind_bad = "Request body is not a valid UnBindDeviceImeiRequest (unBindType must be \"IMEIBIND\" or \"AREALIMIT\").";
+        let (status, _, body) =
+            unbind_ok(r#"{"device":{"phoneNumber":"+123456789011"},"unBindType":"NOPE"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["message"], unbind_bad);
+
+        // --- unbind 422 examples (disjoint, never-bound numbers) -------------
+        let (status, _, body) =
+            unbind_ok(r#"{"device":{"phoneNumber":"+19990000932"},"unBindType":"IMEIBIND"}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "UNNECESSARY_UNBIND_IMEI");
+        assert_eq!(body["message"], "The device has no IMEI binding to remove.");
+
+        let (status, _, body) =
+            unbind_ok(r#"{"device":{"phoneNumber":"+19990000942"},"unBindType":"AREALIMIT"}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "UNNECESSARY_UNBIND_AREALIMIT");
+        assert_eq!(body["message"], "The device has no area restriction to remove.");
+
+        // Unbind Missing Identifier (two-legged token, no device).
+        let (status, _, body) = unbind_ok(r#"{"unBindType":"IMEIBIND"}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "MISSING_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "No `device` supplied and the access token identifies no device."
+        );
+    }
 }

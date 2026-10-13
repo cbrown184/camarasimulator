@@ -207,10 +207,14 @@ paths:
               examples:
                 IMEI_BIND_BOUND:
                   summary: BINDIMEI RESULT (BOUND)
-                  description: The SIM is bound to a device IMEI
+                  description: >-
+                    The SIM is bound to a device IMEI. This is the deterministic
+                    result for the `INPUT_PHONE_NUMBER` request (`+123456789011`):
+                    the fixed TAC `35209900`, the zero-padded trailing serial
+                    `000011`, and the GSMA Luhn check digit `3`.
                   value:
                     imeiBind:
-                      bindImei: "352099000000117"
+                      bindImei: "352099000000113"
                       bindStatus: "BOUND"
                 IMEI_BIND_UNBOUND:
                   summary: BINDIMEI RESULT (UNBOUND)
@@ -848,26 +852,25 @@ components:
                       - OUT_OF_RANGE
           examples:
             Insufficient Device Parameters:
-              description: Sufficient parameters must be provided to allow the target UE to be identified
+              description: The submitted `device` object carries no identifier (`minProperties: 1` violated)
               value:
                 status: 400
                 code: INVALID_ARGUMENT
-                message: "At least one of phoneNumber, networkAccessIdentifier, ipv4Address and ipv6Address must be specified"
-            Insufficient QueryType Parameters:
+                message: "`device` must contain at least one identifier."
+            Missing or Invalid QueryType:
+              description: >-
+                `queryType` is absent, or is neither `IMEIBIND` nor `AREALIMIT`;
+                either way the request body fails to deserialise.
               value:
                 status: 400
                 code: INVALID_ARGUMENT
-                message: "QueryType must be specified"
+                message: "Request body is not a valid QueryRequest (queryType must be \"IMEIBIND\" or \"AREALIMIT\")."
             Invalid Phone Number:
+              description: The submitted `phoneNumber` is not in E.164 format
               value:
                 status: 400
                 code: INVALID_ARGUMENT
-                message: "Invalid format: phoneNumber"
-            Invalid QueryType Value:
-              value:
-                status: 400
-                code: INVALID_ARGUMENT
-                message: "The value of queryType can only be IMEIBIND or AREALIMIT"
+                message: "`phoneNumber` must be in E.164 format (e.g. +123456789)."
 
     Generic401:
       description: Unauthorized
@@ -974,13 +977,13 @@ components:
               value:
                 status: 422
                 code: UNNECESSARY_IDENTIFIER
-                message: An explicit identifier has been provided for the device when this is already identified by the access token
+                message: "An explicit identifier has been provided for the device when this is already identified by the access token."
             Missing Identifier:
               description: An identifier is not included in the request and the device cannot be identified from the 2-legged access token
               value:
                 status: 422
                 code: MISSING_IDENTIFIER
-                message: The device cannot be identified.
+                message: "No `device` supplied and the access token identifies no device."
 
     BindBadRequest400:
       description: Bad Request
@@ -1002,16 +1005,14 @@ components:
                       - INVALID_ARGUMENT
                       - OUT_OF_RANGE
           examples:
-            Invalid BindType Value:
+            Missing or Invalid BindType:
+              description: >-
+                `bindType` is absent, or is neither `IMEIBIND` nor `AREALIMIT`;
+                either way the request body fails to deserialise.
               value:
                 status: 400
                 code: INVALID_ARGUMENT
-                message: "The value of bindType can only be IMEIBIND or AREALIMIT"
-            Missing BindType:
-              value:
-                status: 400
-                code: INVALID_ARGUMENT
-                message: "bindType must be specified"
+                message: "Request body is not a valid BindDeviceImeiRequest (bindType must be \"IMEIBIND\" or \"AREALIMIT\")."
 
     UnbindBadRequest400:
       description: Bad Request
@@ -1033,11 +1034,14 @@ components:
                       - INVALID_ARGUMENT
                       - OUT_OF_RANGE
           examples:
-            Invalid UnBindType Value:
+            Missing or Invalid UnBindType:
+              description: >-
+                `unBindType` is absent, or is neither `IMEIBIND` nor `AREALIMIT`;
+                either way the request body fails to deserialise.
               value:
                 status: 400
                 code: INVALID_ARGUMENT
-                message: "The value of unBindType can only be IMEIBIND or AREALIMIT"
+                message: "Request body is not a valid UnBindDeviceImeiRequest (unBindType must be \"IMEIBIND\" or \"AREALIMIT\")."
 
     Unbind422:
       description: Unprocessable Content
@@ -1075,10 +1079,11 @@ components:
                 code: UNNECESSARY_UNBIND_AREALIMIT
                 message: The device has no area restriction to remove.
             Missing Identifier:
+              description: An identifier is not included in the request and the device cannot be identified from the 2-legged access token
               value:
                 status: 422
                 code: MISSING_IDENTIFIER
-                message: The device cannot be identified.
+                message: "No `device` supplied and the access token identifies no device."
 
     Generic429:
       description: Too Many Requests

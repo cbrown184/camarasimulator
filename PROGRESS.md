@@ -300,7 +300,36 @@ Verified sub-items:
   the router. The 403 `permissionDenied` example intentionally shows the shared
   catalog's canonical message (the auth layer's runtime message is scope-specific),
   so it is not pinned here; the 401/404/409/429/500/503 responses are `$ref`s.
-- 🔧 iot-sim-fraud-prevention
+- 🔧 iot-sim-fraud-prevention — verified 2026-10-13: all three modelled operations
+  over both CAMARA facets — `bindDeviceImei` (`POST /bind`), `query` (`POST /query`),
+  `unBindDeviceImei` (`POST /unbind`), each carrying `IMEIBIND` and `AREALIMIT` — are
+  implemented (`src/apis/iot_sim_fraud_prevention/vwip.rs` + an in-memory `store.rs`
+  with a disjoint IMEI-binding map and area-restriction set), routed, and well-tested
+  (46 test fns before this pass). **Spec↔code drift found and fixed, two classes.**
+  (1) The 200 `IMEI_BIND_BOUND` success example carried `bindImei
+  "352099000000117"` — not even a valid GSMA Luhn IMEI — but the handler's
+  deterministic `synth_imei` emits `352099000000113` for the documented
+  `+123456789011` (TAC `35209900` + serial `000011` + Luhn check digit `3`); the same
+  deterministic-value drift class the verified-caller / optimal-edge-discovery passes
+  caught. Corrected it and bound the example to its input. (2) Every inline error
+  example `message` had been transcribed from the upstream CAMARA spec and never
+  reconciled with this handler: the four 400 query examples ("At least one of
+  phoneNumber…", "QueryType must be specified", "Invalid format: phoneNumber", "The
+  value of queryType can only be…"), both 400 bind/unbind examples, and both 422
+  `MISSING_IDENTIFIER` examples ("The device cannot be identified.") all differed from
+  the bytes the server returns, and the 422 `UNNECESSARY_IDENTIFIER` example dropped
+  the handler's trailing period. Corrected all of them to the handler's exact messages
+  (collapsing the two queryType/bindType/unBindType 400 examples that share one serde
+  message), and added `vendored_examples_match_the_handler`, which drives every
+  documented request through the real router and pins the success `bindImei` (both as
+  the literal and against `synth_imei(11)`), the `AREALIMIT` `Circle` (against
+  `synth_circle(11)` and the documented −79.0/−169.0/11), and the exact
+  `status`/`code`/`message` bytes of all router-reachable inline error families so they
+  can never silently drift again. The `AREA_LIMIT_RESTRICTED` circle, the reserved-error
+  suffix plane, and the shared-`$ref` 401/403/404/429 responses were already correct.
+  This advances the vwip audit cursor to the next API (sponsored-data). Spec + test
+  change (no behaviour/response change — the handlers were already correct; only the
+  spec examples were wrong). No new dependency.
 - 🔧 sponsored-data
 - 🔧 click-to-dial
 - 🔧 most-frequent-location
@@ -388,6 +417,64 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-13 — Phase 5 vwip verification pass (iot-sim-fraud-prevention). Audited the
+  fifteenth vwip API in mount order (a stateful resource with two disjoint in-memory
+  maps). All three modelled operations across both CAMARA facets — `bindDeviceImei`
+  (`POST /bind`), `query` (`POST /query`), `unBindDeviceImei` (`POST /unbind`), each
+  taking `IMEIBIND` and `AREALIMIT` — are fully implemented, routed, and well-tested
+  (46 test fns before this pass), and the module docs agree with the code (no
+  stale-slice trap: the parent doc already lists both facets as fully supported).
+  **Spec↔code drift found and fixed, two distinct classes.** (1) *Deterministic
+  success value* — the 200 `IMEI_BIND_BOUND` example carried `bindImei
+  "352099000000117"`, which is not even a valid GSMA Luhn IMEI (I confirmed the Luhn
+  sum fails), whereas the handler's `synth_imei` deterministically yields
+  `352099000000113` for the documented `+123456789011` request (fixed TAC `35209900`
+  + zero-padded serial `000011` + Luhn check digit `3`) — the same consumer-visible
+  deterministic-id drift the verified-caller and optimal-edge-discovery passes caught
+  (a value a consumer would reproduce from the input and the schema's "deterministic"
+  promise). Corrected the example and tied it to its input. (2) *Unreconciled error
+  messages* — every inline error example `message` had been copied verbatim from the
+  upstream CAMARA IoTSIMFraudPrevention spec and never reconciled with this handler:
+  the four 400 query examples ("At least one of phoneNumber, networkAccessIdentifier,
+  ipv4Address and ipv6Address must be specified", "QueryType must be specified",
+  "Invalid format: phoneNumber", "The value of queryType can only be IMEIBIND or
+  AREALIMIT"), both 400 bind/unbind examples ("… can only be …", "bindType must be
+  specified"), and both 422 `MISSING_IDENTIFIER` examples ("The device cannot be
+  identified.") differed from the exact bytes the server returns, and the 422
+  `UNNECESSARY_IDENTIFIER` example dropped the handler's trailing period — the
+  truncated/diverging-identifier-message drift class caught on subscription-status /
+  media-streaming-rate / optimal-edge-discovery / consent-info, here across a whole
+  file. Corrected all of them to the handler's exact messages: `INVALID_ARGUMENT`
+  "`device` must contain at least one identifier." / "`phoneNumber` must be in E.164
+  format (e.g. +123456789)." / the per-operation "Request body is not a valid
+  {Query,BindDeviceImei,UnBindDeviceImei}Request (…Type must be \"IMEIBIND\" or
+  \"AREALIMIT\")." (collapsing each operation's two serde-failure examples — missing
+  vs invalid type — into one, since the handler returns one message for both), and
+  `MISSING_IDENTIFIER` "No `device` supplied and the access token identifies no
+  device." Added `vendored_examples_match_the_handler`, which drives every documented
+  request through the real router and pins the success `bindImei` (asserted both as
+  the literal `352099000000113` and against `synth_imei(11)`, so a future derivation
+  change fails the test rather than silently blessing a new value), the `AREALIMIT`
+  `Circle` (against `synth_circle(11)` and the documented center −79.0/−169.0, radius
+  11), and the exact `status`/`code`/`message` bytes of all router-reachable inline
+  error families (query 400×3, query 422 MISSING/UNNECESSARY, bind 400×2, unbind 400,
+  unbind 422 UNNECESSARY_UNBIND_IMEI/UNNECESSARY_UNBIND_AREALIMIT/MISSING) so none can
+  silently drift again. The `AREA_LIMIT_RESTRICTED` circle example and the reserved-error
+  suffix plane were already correct; the 401/403/404/429 responses are inline-but-canonical
+  shared-shape examples left as the catalog's standard bytes. This advances the vwip
+  audit cursor to the next API (sponsored-data). Spec + test change (no
+  behaviour/response change — the handlers' output was already correct; only the spec
+  examples were wrong); no new dependency. `cargo test` green: 3067 passed, 0 failed
+  (+1, the new pinning test). `cargo build --release` green; binary = 5,434,520 bytes
+  (+4,096 — one page — vs the prior fourteen passes' 5,430,424 on rustc 1.97.0). The
+  bump is attributable: the vendored specs are embedded in the binary via
+  `include_str!` (`src/registry.rs`) and served at runtime, so the net-longer spec
+  example text crossed one 4 KiB page boundary; no code-size regression (only spec
+  text and `#[cfg(test)]` code changed, and `#[cfg(test)]` is outside the release
+  path). *Backlog banner still stands:* the net-new feature backlog remains exhausted
+  and the human decision (authorise stateful infra, name an increment, or pause the
+  routine) is still open — this is the sanctioned per-API vwip verification (backlog
+  item 3), and this pass it caught a genuine, consumer-visible documentation defect.
 - 2026-10-13 — Phase 5 vwip verification pass (consent-info). Audited the
   fourteenth vwip API in mount order. The single modelled operation
   `retrieveStatus` (`POST /consent-info/vwip/retrieve`) is fully implemented
