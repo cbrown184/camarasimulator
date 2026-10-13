@@ -538,7 +538,43 @@ Verified sub-items:
   This advances the vwip audit cursor to the next API (network-access-devices).
   Spec + `#[cfg(test)]` change (no behaviour/response change — the handler was
   already correct; only the one success example was wrong); no new dependency.
-- 🔧 network-access-devices
+- 🔧 network-access-devices — verified 2026-10-13: all five modelled operations
+  over the full device-listing + stateful reboot-request lifecycle —
+  `getNetworkAccessDevices` (`GET /network-access-devices`),
+  `getNetworkAccessDevice` (`GET …/{id}`), `createRebootRequest`
+  (`POST /reboot-requests`), `getRebootRequest` (`GET …/{id}`),
+  `updateRebootRequest` (`PATCH …/{id}`, merge-patch gated on schedule state →
+  409 `NETWORK_ACCESS_DEVICES.INCOMPATIBLE_STATE`), and `deleteRebootRequest`
+  (`DELETE …/{id}`) — are implemented (`src/apis/network_access_devices/vwip.rs`
+  + `store.rs`), routed, and well-tested (74 test fns before this pass), and the
+  vendored `specs/network-access-devices/vwip/openapi.yaml` declares the same set
+  with the 409 inline example byte-matching the handler. **Spec↔code drift found
+  and fixed — the deterministic-value / placeholder class** (as on
+  application-endpoint-discovery / click-to-dial / verified-caller): the `200`
+  `singleConnected`/`twoDevices` listing examples and the `connectedGateway`
+  by-id example were bound to concrete subject tails (`…000`/`…002`) yet carried
+  placeholder device `id`s (`3fa85f64-…`, `123e4567-…`) and MACs, though each
+  `id` and `hardwareAddress.value` is a deterministic `SHA-256("nad-device:{sub}:{i}")`
+  derivation — for `+123456789000` the one device is actually
+  `ad59992d-c305-2bb1-d861-380b14eec986` / `81:F4:87:98:A7:60`, and for
+  `+123456789002` the two are `20664178-…`/`C5:A5:64:05:03:37` and
+  `939deb68-…`/`F7:DB:88:02:F6:9E`. The `createRebootRequest`/`getRebootRequest`
+  examples' materialised `devices` entry carried the same placeholder though it
+  is the subject's real derived device id. Bound all five examples to concrete
+  subjects, corrected the ids/MACs to the handler's values (keeping the minted
+  reboot `id` + timestamps explicitly illustrative, the application-profiles
+  posture), and added `vendored_success_examples_match_the_handler` driving the
+  real router for both subjects to pin the full list/by-id bodies and the
+  reboot-all materialised `devices`. **Two stale module docs fixed** (the
+  "later slices" trap class caught on device-data-volume / qos-booking /
+  application-profiles / session-insights / sponsored-data): the parent
+  `network_access_devices.rs` said "The read/patch/delete legs are later slices"
+  and the `vwip.rs` header said "Three endpoints" (listing five) and "The `PATCH`
+  (update) leg is a later slice" though all five legs ship and are tested —
+  corrected both to describe the full lifecycle. This advances the vwip audit
+  cursor to the next API (capabilities-and-restrictions). Spec + doc + test
+  change (no behaviour/response change — the handlers were already correct; only
+  the example ids/MACs were placeholders); no new dependency.
 - 🔧 capabilities-and-restrictions
 - 🔧 dedicated-network-profiles
 - 🔧 dedicated-network
@@ -617,6 +653,66 @@ Respect phase order. Preferred next work:
 > its bullet with concrete, checked-off sub-steps.
 
 ## Scan journal
+
+- 2026-10-13 — Phase 5 vwip verification pass (network-access-devices). Audited
+  the twenty-third vwip API in mount order (device listing + a stateful
+  reboot-request resource lifecycle). All **five** modelled operations —
+  `getNetworkAccessDevices`, `getNetworkAccessDevice`, `createRebootRequest`,
+  `getRebootRequest`, `updateRebootRequest` (merge-patch, 409
+  `NETWORK_ACCESS_DEVICES.INCOMPATIBLE_STATE` on an immediate reboot),
+  `deleteRebootRequest` — are implemented
+  (`src/apis/network_access_devices/vwip.rs` + an in-memory `store.rs`), routed,
+  and well-tested (74 test fns before this pass). I verified the control planes
+  match the handler: the device set is deterministic from the token subject (the
+  trailing three digits fix the count `d==0→1 else ((d-1)%3)+1` and each device's
+  status `STATUSES[(d+i)%3]`; `id` + `hardwareAddress` are `SHA-256`-derived); a
+  reserved subject suffix answers the shared canonical error on the subject-keyed
+  operations; the reboot-request legs are keyed on opaque server-minted ids with
+  store state (and, for PATCH, the stored request's schedule state) as the only
+  control plane; the 409 inline example byte-matched the handler. **Spec↔code
+  drift found and fixed — the deterministic-value / placeholder class** (the same
+  class caught on application-endpoint-discovery / click-to-dial /
+  verified-caller / iot-sim-fraud-prevention): the `200` `singleConnected` /
+  `twoDevices` listing examples and the `connectedGateway` by-id example were
+  bound to concrete subject tails (`…000` / `…002`) but carried placeholder device
+  `id`s (`3fa85f64-…`, `123e4567-…`) and MACs, though every `id` and
+  `hardwareAddress.value` is a deterministic `SHA-256("nad-device:{sub}:{i}")`
+  derivation — for `+123456789000` the one device is actually
+  `ad59992d-c305-2bb1-d861-380b14eec986` / `81:F4:87:98:A7:60`, and for
+  `+123456789002` the two are `20664178-…` / `C5:A5:64:05:03:37` and `939deb68-…`
+  / `F7:DB:88:02:F6:9E`; the `createRebootRequest` / `getRebootRequest` examples'
+  materialised `devices` entry carried the same placeholder though it is the
+  subject's real derived device id. I bound all five examples to concrete
+  subjects, corrected the ids/MACs to the handler's exact values (keeping the
+  minted reboot-request `id` and the `createdAt`/`modifiedAt` timestamps
+  explicitly illustrative — the application-profiles / session-insights posture,
+  since `store::new_reboot_request_id` is counter/clock-derived), and added
+  `vendored_success_examples_match_the_handler`, which drives the real router for
+  both subjects and pins the full `singleConnected` / `twoDevices` list bodies,
+  the `connectedGateway` by-id body, and the reboot-all materialised `devices`
+  array (the minted id/timestamps are not pinned, being non-deterministic). All
+  error responses are `$ref`s to the shared `errors.yaml` catalog except the
+  update `409`, whose inline example already byte-matched the handler. **Two
+  stale module docs fixed** (the "later slices / later passes" stale-doc trap
+  class caught on device-data-volume / qos-booking / application-profiles /
+  session-insights / sponsored-data): the parent `network_access_devices.rs`
+  claimed "The read/patch/delete legs are later slices" and the `vwip.rs` header
+  said "Three endpoints" (then listed five) and "The `PATCH` (update) leg is a
+  later slice," though all five legs ship and are fully tested — corrected both to
+  describe the complete lifecycle. This advances the vwip audit cursor to the next
+  API (capabilities-and-restrictions). Spec + doc + `#[cfg(test)]` change (no
+  behaviour/response change — the handlers were already correct; only the example
+  ids/MACs were placeholders); no new dependency. `cargo test` green: 3077 passed,
+  0 failed (+1, the new pinning test). `cargo build --release` green; binary =
+  5,434,520 bytes (unchanged vs. the predictive-connectivity-data pass on rustc
+  1.97.0 — the change is outside the release path). *Backlog banner still stands:*
+  the net-new feature backlog remains exhausted and the human decision (authorise
+  stateful infra, name an increment, or pause the routine) is still open — this is
+  the sanctioned per-API vwip verification (backlog item 3). **Integration note:**
+  on entry the local checkout was a detached HEAD at `47274ba`
+  (predictive-connectivity-data) == `origin/main`; local `main` was fast-forwarded
+  to it. This pass branches off `47274ba`, rebases on main, and pushes one commit
+  on top.
 
 - 2026-10-13 — Phase 5 vwip verification pass (predictive-connectivity-data).
   Audited the twenty-second vwip API in mount order (a stateless, deterministic,

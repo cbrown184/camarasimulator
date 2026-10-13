@@ -1,7 +1,7 @@
 //! Network Access Devices **vwip** (CAMARA NetworkAccessManagement / Network
 //! Access Devices, wip).
 //!
-//! Three endpoints:
+//! Five endpoints:
 //! - `GET /network-access-devices/vwip/network-access-devices` — list the
 //!   operator-supplied network access devices associated with the subscriber.
 //! - `GET /network-access-devices/vwip/network-access-devices/{networkAccessDeviceId}`
@@ -12,9 +12,12 @@
 //!   in the shared in-memory [`super::store`] (operationId `createRebootRequest`).
 //! - `GET /network-access-devices/vwip/reboot-requests/{rebootRequestId}` — read a
 //!   created reboot request back by its opaque id (operationId `getRebootRequest`).
+//! - `PATCH /network-access-devices/vwip/reboot-requests/{rebootRequestId}` —
+//!   update a created reboot request via a `merge-patch+json` body, gated on its
+//!   schedule state (operationId `updateRebootRequest`).
 //! - `DELETE /network-access-devices/vwip/reboot-requests/{rebootRequestId}` —
 //!   cancel/delete a created reboot request, evicting it from the store
-//!   (operationId `deleteRebootRequest`). The `PATCH` (update) leg is a later slice.
+//!   (operationId `deleteRebootRequest`). All five legs are live and tested.
 //!
 //! ## What it does
 //!
@@ -914,6 +917,70 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["deviceStatus"], "unavailable");
         assert_eq!(arr[1]["deviceStatus"], "connected");
+    }
+
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        // The vendored spec's 200/201 success examples carry *deterministic*
+        // device `id`s and `hardwareAddress.value`s (SHA-256 over the subject +
+        // index), bound to concrete subjects — not placeholders. Pin the exact
+        // documented bytes through the real router so they can't silently drift
+        // (the deterministic-value class caught on application-endpoint-discovery
+        // / click-to-dial / verified-caller).
+
+        // `singleConnected` listing example — subject `+123456789000`.
+        let single = json!([{
+            "id": "ad59992d-c305-2bb1-d861-380b14eec986",
+            "deviceStatus": "connected",
+            "name": "Gateway-1",
+            "description": "Operator-supplied network access gateway",
+            "hardwareAddress": { "hardwareAddressType": "EUI-48", "value": "81:F4:87:98:A7:60" },
+        }]);
+        let token000 = mint_token_with_client(SCOPE, "+123456789000").await;
+        let (status, _, body) = get_devices(Some(&token000), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, single, "singleConnected example drifted from the handler");
+
+        // `twoDevices` listing example — subject `+123456789002`.
+        let two = json!([
+            {
+                "id": "20664178-9b1a-bb5a-f540-91b97a4fe515",
+                "deviceStatus": "unavailable",
+                "name": "Gateway-1",
+                "description": "Operator-supplied network access gateway",
+                "hardwareAddress": { "hardwareAddressType": "EUI-48", "value": "C5:A5:64:05:03:37" },
+            },
+            {
+                "id": "939deb68-1765-8f6e-e10a-98902116731a",
+                "deviceStatus": "connected",
+                "name": "Gateway-2",
+                "description": "Operator-supplied network access gateway",
+                "hardwareAddress": { "hardwareAddressType": "EUI-48", "value": "F7:DB:88:02:F6:9E" },
+            },
+        ]);
+        let token002 = mint_token_with_client(SCOPE, "+123456789002").await;
+        let (status, _, body) = get_devices(Some(&token002), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, two, "twoDevices example drifted from the handler");
+
+        // `connectedGateway` by-id example — the single `+123456789000` device,
+        // read back by its documented id, must equal that device verbatim.
+        let (status, _, device) =
+            get_device_by_id(Some(&token000), "ad59992d-c305-2bb1-d861-380b14eec986", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(device, single.as_array().unwrap()[0]);
+
+        // `created` / `rebootAll` reboot-request examples — a reboot-all over the
+        // `+123456789000` subject materialises that subject's one deterministic
+        // device id in `devices` (the minted `id` and timestamps are illustrative,
+        // so they are not pinned).
+        let (status, _, created) = post_reboot_request(Some(&token000), None, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            created["devices"],
+            json!(["ad59992d-c305-2bb1-d861-380b14eec986"]),
+            "the materialised reboot-all devices drifted from the handler"
+        );
     }
 
     #[tokio::test]

@@ -153,32 +153,41 @@ paths:
                 $ref: "#/components/schemas/NetworkAccessDeviceList"
               examples:
                 singleConnected:
-                  summary: One connected gateway (happy-path default, `…000` tail)
+                  summary: >-
+                    One connected gateway — the `…000` happy-path default, shown
+                    for the concrete subject `+123456789000`. Each `id` and
+                    `hardwareAddress.value` is derived deterministically from the
+                    subject and device index (SHA-256), so these are the exact
+                    values the handler returns for this subject, not placeholders.
                   value:
-                    - id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    - id: ad59992d-c305-2bb1-d861-380b14eec986
                       deviceStatus: connected
                       name: Gateway-1
                       description: Operator-supplied network access gateway
                       hardwareAddress:
                         hardwareAddressType: EUI-48
-                        value: "12:34:56:78:9A:BC"
+                        value: "81:F4:87:98:A7:60"
                 twoDevices:
-                  summary: Two devices (`…002` tail)
+                  summary: >-
+                    Two devices [unavailable, connected] — the `…002` case, shown
+                    for the concrete subject `+123456789002`. The `id`s and MACs
+                    are the handler's deterministic (SHA-256) values for this
+                    subject.
                   value:
-                    - id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    - id: 20664178-9b1a-bb5a-f540-91b97a4fe515
                       deviceStatus: unavailable
                       name: Gateway-1
                       description: Operator-supplied network access gateway
                       hardwareAddress:
                         hardwareAddressType: EUI-48
-                        value: "AB:CD:EF:12:34:56"
-                    - id: 123e4567-e89b-12d3-a456-426614174000
+                        value: "C5:A5:64:05:03:37"
+                    - id: 939deb68-1765-8f6e-e10a-98902116731a
                       deviceStatus: connected
                       name: Gateway-2
                       description: Operator-supplied network access gateway
                       hardwareAddress:
                         hardwareAddressType: EUI-48
-                        value: "0A:1B:2C:3D:4E:5F"
+                        value: "F7:DB:88:02:F6:9E"
         "400":
           $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
         "401":
@@ -260,15 +269,19 @@ paths:
                 $ref: "#/components/schemas/NetworkAccessDevice"
               examples:
                 connectedGateway:
-                  summary: One connected gateway
+                  summary: >-
+                    The single device from the subject `+123456789000`'s set,
+                    read back by its id. The `id` and MAC are the handler's
+                    deterministic (SHA-256) values for that subject, matching the
+                    `singleConnected` listing example.
                   value:
-                    id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    id: ad59992d-c305-2bb1-d861-380b14eec986
                     deviceStatus: connected
                     name: Gateway-1
                     description: Operator-supplied network access gateway
                     hardwareAddress:
                       hardwareAddressType: EUI-48
-                      value: "12:34:56:78:9A:BC"
+                      value: "81:F4:87:98:A7:60"
         "400":
           $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
         "401":
@@ -367,11 +380,16 @@ paths:
                 $ref: "#/components/schemas/RebootRequest"
               examples:
                 created:
-                  summary: A reboot request targeting all the subscriber's devices
+                  summary: >-
+                    An immediate reboot of all the subject `+123456789000`'s
+                    devices (an empty body). The materialised `devices` holds
+                    that subject's one deterministic device id; the `id` is
+                    server-minted (counter/clock-derived, so illustrative, not
+                    reproducible) and `createdAt`/`modifiedAt` are wall-clock.
                   value:
                     id: 8f14e45f-ceea-467d-9a3e-2c9f2b0f0a01
                     devices:
-                      - 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                      - ad59992d-c305-2bb1-d861-380b14eec986
                     createdAt: "2024-06-01T14:27:08Z"
                     modifiedAt: "2024-06-01T14:27:08Z"
         "400":
@@ -453,11 +471,16 @@ paths:
                 $ref: "#/components/schemas/RebootRequest"
               examples:
                 rebootAll:
-                  summary: A reboot request targeting all the subscriber's devices
+                  summary: >-
+                    A reboot request targeting all of the subject
+                    `+123456789000`'s devices, read back verbatim. The `devices`
+                    holds that subject's one deterministic device id; the `id` is
+                    the server-minted (illustrative) value and the timestamps are
+                    wall-clock.
                   value:
                     id: 8f14e45f-ceea-467d-9a3e-2c9f2b0f0a01
                     devices:
-                      - 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                      - ad59992d-c305-2bb1-d861-380b14eec986
                     createdAt: "2024-06-01T14:27:08Z"
                     modifiedAt: "2024-06-01T14:27:08Z"
         "400":
