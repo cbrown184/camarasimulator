@@ -1965,6 +1965,63 @@ mod tests {
         assert_eq!(body["code"], "TOO_MANY_REQUESTS");
     }
 
+    /// The inline error examples unique to this spec (the ones that are not
+    /// `$ref`s into the shared error catalog) carry exact `status`/`code`/`message`
+    /// bytes; drive each router-reachable one through the real router and pin those
+    /// bytes so a vendored example can never silently drift from the handler (the
+    /// same drift class the media-streaming-rate / subscription-status /
+    /// device-authenticity passes closed on other vwip specs). The createSession
+    /// `422 MISSING_IDENTIFIER` example is deliberately *not* driven here: its
+    /// branch only fires for a token with an empty `sub`, which the token endpoint
+    /// never issues (a minted `client_credentials` token always carries a non-empty
+    /// subject), so it is unreachable through the router — its message literal lives
+    /// solely in `resolve_identifier`.
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        let create = mint_token(CREATE_SCOPE).await;
+
+        // createSession 400 `invalidArgument` — "`sink` is required."
+        let no_sink = r#"{"applicationProfileId":"3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                          "device":{"phoneNumber":"+123456789012"},
+                          "applicationServer":{"ipv4Address":"198.51.100.1"}}"#;
+        let (status, _, body) = post_session(Some(&create), no_sink, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["message"], "`sink` is required.");
+
+        // createSession 422 `serviceNotApplicable` — reserved `…422` suffix.
+        let (status, _, body) = create_ok("+123456789422").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "SERVICE_NOT_APPLICABLE");
+        assert_eq!(
+            body["message"],
+            "The service is not available for the provided identifier."
+        );
+
+        // sendSessionMetrics 400 `invalidArgument` — "`packetLossErrorRate` is required."
+        let write = mint_token(WRITE_SCOPE).await;
+        let id = create_session_id().await;
+        let missing_figure = r#"{"packetDelay":{"value":12,"unit":"Milliseconds"},
+                                 "jitter":{"value":3,"unit":"Milliseconds"}}"#;
+        let (status, _, body) = post_metrics(Some(&write), &id, missing_figure, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["message"], "`packetLossErrorRate` is required.");
+
+        // sendSessionMetrics 400 `outOfRange` — "`packetLossErrorRate` must be between 1 and 10."
+        let id = create_session_id().await;
+        let out_of_range = r#"{"packetDelay":{"value":12},"jitter":{"value":3},
+                               "packetLossErrorRate":11}"#;
+        let (status, _, body) = post_metrics(Some(&write), &id, out_of_range, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "OUT_OF_RANGE");
+        assert_eq!(body["message"], "`packetLossErrorRate` must be between 1 and 10.");
+    }
+
     // --- Validation --------------------------------------------------------
 
     #[tokio::test]

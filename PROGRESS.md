@@ -262,7 +262,25 @@ Verified sub-items:
   added `vendored_error_example_messages_match_the_handler` pinning the exact
   `status`/`code`/`message` bytes through the router so they can't silently drift
   (same drift class the media-streaming-rate / subscription-status passes closed).
-- 🔧 session-insights
+- 🔧 session-insights — verified 2026-10-13: all five modelled operations
+  (`createSession`, `getSession`, `deleteSession`, `retrieveSessionsByDevice`,
+  `sendSessionMetrics`) are implemented (`src/apis/session_insights/vwip.rs` +
+  `store.rs` + `notifications.rs`), routed, and well-tested (87 test fns), and the
+  vendored `specs/session-insights/vwip/openapi.yaml` declares the same five
+  operations — spec ↔ code consistent (the 201 success examples' minted `id`s are
+  legitimately illustrative, as in application-profiles, since `store::new_session_id`
+  is counter/clock-derived not request-derived; time-bounded vs `…000`-tail
+  open-ended `expiresAt` presence matches `create_session`; all inline error-example
+  messages byte-match the handler). **Stale parent module doc fixed**
+  (`src/apis/session_insights.rs`): it listed `DELETE`, `retrieve-sessions`, and
+  `metrics` as "in later passes" though all three ship — the same stale-slice-doc
+  trap caught on device-data-volume / qos-booking / application-profiles. Added
+  `vendored_error_example_messages_match_the_handler` pinning the four
+  router-reachable inline error-example families (createSession 400
+  `invalidArgument`, createSession 422 `serviceNotApplicable`, sendSessionMetrics
+  400 `invalidArgument`, sendSessionMetrics 400 `outOfRange`); the createSession 422
+  `missingIdentifier` example is not router-reachable (its branch needs an
+  empty-`sub` token the token endpoint never issues) and is documented as such.
 - 🔧 consent-info
 - 🔧 iot-sim-fraud-prevention
 - 🔧 sponsored-data
@@ -352,6 +370,60 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-13 — Phase 5 vwip verification pass (session-insights). Audited the
+  thirteenth vwip API in mount order (the second stateful vwip resource, after
+  application-profiles). All **five** modelled operations — `createSession` (`POST
+  /session-insights/vwip/sessions`), `getSession` (`GET …/sessions/{sessionId}`),
+  `deleteSession` (`DELETE …/sessions/{sessionId}`), `retrieveSessionsByDevice`
+  (`POST …/retrieve-sessions`), and `sendSessionMetrics` (`POST
+  …/sessions/{sessionId}/metrics`) — are fully implemented
+  (`src/apis/session_insights/vwip.rs` + an in-memory `store.rs` and a
+  `notifications.rs` delivering the terminal `session-ended` CloudEvent via
+  fire-and-forget async timers), routed, and well-tested (87 test fns before this
+  pass), and the vendored `specs/session-insights/vwip/openapi.yaml` declares the
+  same five operations. **Spec ↔ code found consistent** (no response/behaviour
+  drift): the two 201 success examples' minted `id`s are legitimately *illustrative*
+  — `store::new_session_id` derives them from a counter/clock, not the request body,
+  so a consumer cannot reproduce them (the application-profiles posture, *not* the
+  deterministic-id posture of verified-caller / optimal-edge-discovery, so pinning a
+  concrete id here would be wrong); the time-bounded (`expiresAt` present) vs
+  `…000`-tail open-ended (no `expiresAt`) split matches `create_session`'s
+  `open_ended = tail ∈ {None, Some(0)}`; and every inline error-example `message`
+  byte-matches the handler. **One genuine defect found and fixed — the stale
+  "in later passes" module-doc trap** (identical to device-data-volume's "`/check`
+  is a later slice", qos-booking's "First slice: createBooking", and
+  application-profiles' "First slice: POST + GET", each of which had misdirected a
+  pass toward re-implementing an existing endpoint): the parent doc
+  `src/apis/session_insights.rs` said the resource was addressed by its id "`GET
+  /sessions/{sessionId}`, and — in later passes — `DELETE`, `retrieve-sessions`,
+  and `metrics`", though all three ship and are tested — corrected to list all five
+  operations as implemented. **Small tested increment:** the spec's inline error
+  examples (those not `$ref`ing the shared catalog) were exercised by existing tests
+  only for `code`, never their `message` bytes; added
+  `vendored_error_example_messages_match_the_handler` driving the four
+  router-reachable families through the real router and pinning the exact
+  `status`/`code`/`message` bytes — createSession 400 `invalidArgument`
+  ("`sink` is required."), createSession 422 `serviceNotApplicable`, sendSessionMetrics
+  400 `invalidArgument` ("`packetLossErrorRate` is required."), and sendSessionMetrics
+  400 `outOfRange` ("`packetLossErrorRate` must be between 1 and 10.") — so they can
+  never silently drift (the 401/403/404/409/429/500/503 responses are `$ref`s covered
+  by the shared catalog's own tests). Documented that the createSession 422
+  `missingIdentifier` example is *not* router-reachable: its `resolve_identifier`
+  branch fires only for a token with an empty `sub`, which the token endpoint never
+  issues (a minted `client_credentials` token always carries a non-empty subject),
+  and `Claims` cannot be constructed from outside the auth module (`raw` is private),
+  so its message literal (which matches the single source in `resolve_identifier`) is
+  left to its handler branch. This advances the vwip audit cursor to the next API
+  (consent-info). Docs + test change (no behaviour/response/spec change — the handlers
+  and spec were already correct and mutually consistent; one module doc was stale and
+  one inline-example family was unguarded); no new dependency. `cargo test` green:
+  3065 passed, 0 failed (+1, the new pinning test). `cargo build --release` green;
+  binary = 5,430,424 bytes (unchanged vs. the prior twelve passes on rustc 1.97.0 —
+  the change touches only a module doc and `#[cfg(test)]` code, outside the release
+  path). *Backlog banner still stands:* the net-new feature backlog remains exhausted
+  and the human decision (authorise stateful infra, name an increment, or pause the
+  routine) is still open — this is the sanctioned per-API vwip verification (backlog
+  item 3).
 - 2026-10-13 — Phase 5 vwip verification pass (device-authenticity). Audited the
   twelfth vwip API in mount order. The single modelled operation `checkImeiStatus`
   (`POST /device-authenticity/vwip/check-status`) is fully implemented

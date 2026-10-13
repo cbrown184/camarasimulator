@@ -6,8 +6,10 @@
 //! notify the application when the experience degrades or the session ends. It
 //! is a **stateful, resource-oriented** API: `POST /sessions` creates a session
 //! resource and mints an opaque `id`, and later requests address that resource
-//! by its id (`GET /sessions/{sessionId}`, and — in later passes —
-//! `DELETE`, `retrieve-sessions`, and `metrics`).
+//! by its id — `GET /sessions/{sessionId}`, `DELETE /sessions/{sessionId}`,
+//! `POST /retrieve-sessions` (list a device's sessions), and
+//! `POST /sessions/{sessionId}/metrics` (submit application-observed metrics),
+//! all implemented.
 //!
 //! It is **non-spatial** (no location in the model) and the session is keyed by
 //! the CAMARA `Device` object — the submitted `device` identifier, else the
