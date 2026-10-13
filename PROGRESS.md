@@ -245,7 +245,23 @@ Verified sub-items:
   `serviceNotApplicable` message bytes through the router. The 200 examples
   (`…000`/`…001`/`…008`) and the `serviceNotApplicable`/`unnecessaryIdentifier`
   messages already matched.
-- 🔧 device-authenticity
+- 🔧 device-authenticity — verified 2026-10-13: the one modelled operation
+  (`checkImeiStatus`, `POST /device-authenticity/vwip/check-status`) is
+  implemented (`src/apis/device_authenticity/vwip.rs`), routed, and well-tested,
+  and both module docs agree with the code and the vendored
+  `specs/device-authenticity/vwip/openapi.yaml`: the IMEI-keyed identifier (no
+  two-legged/three-legged fallback), the `d % 9` operational-status plane over the
+  nine-value enum (`…000`→`allowed` no `reportedDate`, `…002`→`stolen` with
+  `reportedDate = now − d h`), and the reserved-error suffix plane all match. No
+  spec↔code drift found (the 200 examples' mapping is already pinned by existing
+  status tests; the `IDENTIFIER_NOT_FOUND`/`QUOTA_EXCEEDED` schema enum members
+  are the canonical API's own codes, intentionally superseded by the shared
+  reserved-error convention — documented divergence, not drift). **Small tested
+  increment:** the two *inline* error examples' `message` bytes (400
+  `invalidArgument`, 422 `serviceNotApplicable`) were guarded only for `code`;
+  added `vendored_error_example_messages_match_the_handler` pinning the exact
+  `status`/`code`/`message` bytes through the router so they can't silently drift
+  (same drift class the media-streaming-rate / subscription-status passes closed).
 - 🔧 session-insights
 - 🔧 consent-info
 - 🔧 iot-sim-fraud-prevention
@@ -336,6 +352,52 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-13 — Phase 5 vwip verification pass (device-authenticity). Audited the
+  twelfth vwip API in mount order. The single modelled operation `checkImeiStatus`
+  (`POST /device-authenticity/vwip/check-status`) is fully implemented
+  (`src/apis/device_authenticity/vwip.rs`), routed, and well-tested (14 test fns
+  before this pass), and both module docs (`device_authenticity.rs` parent +
+  `vwip.rs`) agree with the code: the IMEI-keyed identifier (required 15-digit
+  `imei`, no two-legged/three-legged token-subject fallback — the device is named
+  explicitly), the deterministic operational-status plane (IMEI trailing three
+  digits `d` → status by `d % 9` over the nine-value enum
+  `allowed`/`lost`/`stolen`/`blacklisted`/`blocked`/`fraud`/`non-payment`/
+  `regulatory`/`unknown`; `allowed` carries no `reportedDate`, an adverse status
+  carries `reportedDate = now − d h`), and the reserved-error suffix plane all
+  match the handler and the vendored `specs/device-authenticity/vwip/openapi.yaml`.
+  **No spec↔code↔doc drift found** (like device-visit-location and
+  network-health-assessment, this one is clean): the two 200 examples
+  (`…000`→`allowed` no `reportedDate`; `…002`→`stolen`, `lastChecked 10:41:38Z` /
+  `reportedDate 08:41:38Z` = exactly `now − 2 h`, internally consistent) match the
+  mapping and are already pinned by `zero_tail_is_the_allowed_default_without_a_reported_date`,
+  `trailing_digits_select_each_status_in_order`, and
+  `an_adverse_status_carries_a_reported_date`; the 400 `invalidArgument` example
+  message byte-matches the handler's invalid-`imei` message; the 422
+  `serviceNotApplicable` example message byte-matches `CamaraError::for_status(422)`;
+  the reserved-suffix set (400/401/403/404/409/422/429/500/503) equals
+  `scenarios::RESERVED_ERROR_SUFFIXES`. Confirmed the `DeviceAuthenticityError`
+  schema's `IDENTIFIER_NOT_FOUND`/`QUOTA_EXCEEDED` enum members are the canonical
+  API's own codes, intentionally superseded in CamaraSim by the shared
+  reserved-error convention (`…404`→canonical `NOT_FOUND`, `…429`→`TOO_MANY_REQUESTS`,
+  as the module docs and existing `reserved_suffix_selects_a_canonical_camara_error`
+  test state) — a documented divergence, not drift. **Small tested increment:** the
+  two *inline* error examples whose `message` is not a `$ref` into the shared
+  catalog (400 `invalidArgument`, 422 `serviceNotApplicable`) were exercised by
+  existing tests only for their `code`, never their `message` bytes; added
+  `vendored_error_example_messages_match_the_handler` driving both through the
+  router and pinning the exact `status`/`code`/`message` bytes so the spec examples
+  can never silently drift from the handler (the same drift class the
+  media-streaming-rate / network-health-assessment / application-profiles /
+  subscription-status passes closed). This advances the vwip audit cursor to the
+  next API (session-insights). Test + docs change (no behaviour/response/spec change
+  — the handler and spec were already correct and mutually consistent; one inline
+  example family was simply unguarded); no new dependency. `cargo test` green: 3064
+  passed, 0 failed (+1, the new pinning test). `cargo build --release` green;
+  binary = 5,430,424 bytes (unchanged vs. the prior eleven passes on rustc 1.97.0 —
+  the new test is `#[cfg(test)]`, outside the release path). *Backlog banner still
+  stands:* the net-new feature backlog remains exhausted and the human decision
+  (authorise stateful infra, name an increment, or pause the routine) is still open
+  — this is the sanctioned per-API vwip verification (backlog item 3).
 - 2026-10-13 — Phase 5 vwip verification pass (subscription-status). Audited the
   eleventh vwip API in mount order. The single modelled operation
   `retrieveSubscriptionStatus` (`POST

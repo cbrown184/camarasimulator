@@ -366,6 +366,38 @@ mod tests {
         assert_eq!(body["code"], "TOO_MANY_REQUESTS");
     }
 
+    /// The vendored spec carries two *inline* error examples whose `message`
+    /// bytes are not `$ref`s into the shared catalog: the 400 `invalidArgument`
+    /// and the 422 `serviceNotApplicable`. Existing tests assert only their
+    /// `code`, so a future edit to either handler message would silently drift
+    /// the spec. Drive both through the router and pin the exact
+    /// `status`/`code`/`message` bytes the spec documents so they cannot.
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        let token = mint_token(CHECK_STATUS_SCOPE).await;
+
+        // 400 invalidArgument — the spec example message for a missing/invalid imei.
+        let (status, _, body) = post_check(Some(&token), "{}", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            body["message"],
+            "`imei` is required and must be a 15-digit string."
+        );
+
+        // 422 serviceNotApplicable — the reserved `…422` suffix.
+        let (status, _, body) =
+            post_check(Some(&token), r#"{"imei":"490154203237422"}"#, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "SERVICE_NOT_APPLICABLE");
+        assert_eq!(
+            body["message"],
+            "The service is not available for the provided identifier."
+        );
+    }
+
     // --- Validation & auth -------------------------------------------------
 
     #[tokio::test]
