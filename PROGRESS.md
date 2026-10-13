@@ -330,7 +330,33 @@ Verified sub-items:
   This advances the vwip audit cursor to the next API (sponsored-data). Spec + test
   change (no behaviour/response change — the handlers were already correct; only the
   spec examples were wrong). No new dependency.
-- 🔧 sponsored-data
+- 🔧 sponsored-data — verified 2026-10-13: all seven modelled operations across
+  both facets — the sponsorship lifecycle (`startSponsorship`, `getSessionStatus`,
+  `revokeSponsorship`) and the campaign operations (`getCampaignStatus`,
+  `getActiveSponsorships`, `configureAlerts`, `manageCampaign`) — are implemented
+  (`src/apis/sponsored_data/vwip.rs` + an in-memory `store.rs` and a
+  `notifications.rs` firing the `session_revoked` webhook), routed, and well-tested
+  (73 test fns before this pass), and the vendored
+  `specs/sponsored-data/vwip/openapi.yaml` is consistent with the code: every
+  derived success example byte-matches the handler — `getSessionStatus`
+  (`+123456789012` → 12/38 active; `+123456789050` → 50/0 `data_exhausted`),
+  `getCampaignStatus` (campaignId UUID tail `000` → active/prepaid/1000 remaining,
+  `010` → completed/`data_exhausted`/0 remaining, `003` → paused/postpaid/3 used),
+  and the fixed acknowledgement strings (`successful_revocation`, `CAMPAIGN PAUSED
+  SUCCESSFULLY`, `Campaign notifications subscription - SUCCESS`); minted
+  `sessionId`s are legitimately illustrative (counter/clock-derived, the
+  application-profiles posture, not request-reproducible). **Stale parent module
+  doc fixed** (`src/apis/sponsored_data.rs`): it said the campaign-management
+  operations `configureAlerts`/`manageCampaign` "remain deferred to later work"
+  though both ship and are routed — the same stale-"deferred/later slice" doc trap
+  caught on device-data-volume / qos-booking / application-profiles /
+  session-insights; corrected to list all seven operations as implemented. **Small
+  tested increment:** the spec's two inline 400 error examples (`startSponsorship`
+  → `invalidArgument` / `outOfRange`, the only error examples not `$ref`ing the
+  shared catalog) were exercised by existing tests only for their `code`; added
+  `vendored_error_example_messages_match_the_handler` pinning the exact
+  `status`/`code`/`message` bytes of both through the router so they can't drift.
+  This advances the vwip audit cursor to the next API (click-to-dial).
 - 🔧 click-to-dial
 - 🔧 most-frequent-location
 - 🔧 traffic-influence
@@ -417,6 +443,66 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-13 — Phase 5 vwip verification pass (sponsored-data). Audited the
+  sixteenth vwip API in mount order (a stateful resource: an in-memory session
+  `store` plus a `notifications` module firing the end-of-session webhook). All
+  **seven** modelled operations across both facets are fully implemented, routed,
+  and well-tested (73 test fns before this pass): the sponsorship lifecycle —
+  `startSponsorship` (`POST /sponsorship`), `getSessionStatus`
+  (`GET …/{sponsorId}/{campaignId}/{sessionId}/session-status`), `revokeSponsorship`
+  (`DELETE …/revoke`, single-use eviction that fires the `session_revoked`
+  webhook) — plus the campaign operations `getCampaignStatus`, `getActiveSponsorships`
+  (both `GET /campaign/…`, reserved-suffix-on-the-campaignId-UUID + store scan),
+  `configureAlerts` (`POST …/alert-subscription`, stateless ack) and `manageCampaign`
+  (`POST /campaign/management`, stateless pause/resume ack). **Spec ↔ code found
+  consistent — no value drift.** I verified every derived success example
+  byte-for-byte against the handler: `getSessionStatus` consumption
+  (`+123456789012` tail 12 on the 50 MB default → consumed 12 / available 38,
+  `active`; `+123456789050` tail 50 → 50 / 0, `inactive` / `data_exhausted`, both
+  matching `consumption` = `d mod (grant+1)`); `getCampaignStatus` state from the
+  campaignId UUID's trailing three digits (`…000` → d 0 → active/prepaid,
+  used 0 / remaining 1000; `…010` → d 10 → completed, `(d/6)%2=1` → `data_exhausted`,
+  used 1000 / remaining 0; `…003` → d 3 → paused/postpaid, used 3), and the window
+  anchoring (start = now−24h; ongoing end = now+24h; completed end = now−1h); and the
+  fixed acknowledgement strings (`successful_revocation`, `Campaign notifications
+  subscription - SUCCESS`, `CAMPAIGN PAUSED SUCCESSFULLY` / `… RESUMED …`,
+  `status` `paused`/`resumed`). The minted `sessionId`s in the 201 / status / revoke
+  / active-sponsorships examples are legitimately *illustrative* — `mint_session_id`
+  derives them from a counter + clock (not the request), so pinning a concrete value
+  would be wrong (the application-profiles / session-insights posture, not the
+  deterministic-id posture of verified-caller / optimal-edge-discovery). **One
+  genuine defect found and fixed — the stale "deferred to later work" module-doc
+  trap** (identical class to device-data-volume's "`/check` is a later slice",
+  qos-booking's "First slice: createBooking", application-profiles' "First slice:
+  POST + GET", and session-insights' "in later passes", each of which had misdirected
+  a pass toward re-implementing an existing endpoint): the parent doc
+  `src/apis/sponsored_data.rs` described only `startSponsorship`/`getSessionStatus`
+  as mounted and claimed the campaign-management operations
+  `configureAlerts`/`manageCampaign` "remain deferred to later work", though all
+  seven operations ship and are routed in `vwip.rs` — corrected to list the full
+  set (lifecycle + campaign) as implemented and to describe the stateful store vs
+  stateless campaign derivation accurately. **Small tested increment:** the spec's
+  two inline 400 error examples (`startSponsorship` → `invalidArgument` /
+  `outOfRange`) are the only error examples unique to this API — every other error
+  response `$ref`s the shared catalog — and existing tests exercised only their
+  `code`, never the `message` bytes; added
+  `vendored_error_example_messages_match_the_handler`, which drives both through the
+  real router and pins the exact `status`/`code`/`message`
+  ("`phoneNumber` must be an E.164 number (e.g. +123456789012)." and "`dataVolume`
+  must be between 1 and 1000 MB.") so they can never silently drift from the handler
+  (the same drift class the media-streaming-rate / subscription-status passes
+  closed). This advances the vwip audit cursor to the next API (click-to-dial).
+  Docs + test change (no behaviour/response/spec change — the handlers and spec were
+  already correct and mutually consistent; one module doc was stale and one
+  inline-example family was unguarded); no new dependency. `cargo test` green: 3068
+  passed, 0 failed (+1, the new pinning test). `cargo build --release` green;
+  binary = 5,434,520 bytes (unchanged vs. the iot-sim-fraud-prevention pass on
+  rustc 1.97.0 — the change touches only a module doc and `#[cfg(test)]` code,
+  outside the release path). *Backlog banner still stands:* the net-new feature
+  backlog remains exhausted and the human decision (authorise stateful infra, name
+  an increment, or pause the routine) is still open — this is the sanctioned per-API
+  vwip verification (backlog item 3), and this pass it caught a genuine
+  documentation defect.
 - 2026-10-13 — Phase 5 vwip verification pass (iot-sim-fraud-prevention). Audited the
   fifteenth vwip API in mount order (a stateful resource with two disjoint in-memory
   maps). All three modelled operations across both CAMARA facets — `bindDeviceImei`

@@ -1497,6 +1497,37 @@ mod tests {
         }
     }
 
+    /// The two inline 400 example `message` strings in the vendored spec
+    /// (`startSponsorship` → 400 → `invalidArgument` / `outOfRange`) are the only
+    /// error examples unique to this API — every other error response `$ref`s the
+    /// shared catalog. Existing tests pinned only their `code`; this drives both
+    /// through the real router and pins the full `status`/`code`/`message` bytes so
+    /// the spec examples can never silently drift from the handler (the same drift
+    /// class the media-streaming-rate / subscription-status passes closed).
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        let token = mint_token(CREATE_SCOPE).await;
+
+        // 400 invalidArgument — a malformed `phoneNumber` (sponsorId/campaignId are
+        // well-formed, so validation reaches the phoneNumber check).
+        let (status, _, body) = post(Some(&token), &body_for("12345", None, None), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            body["message"],
+            "`phoneNumber` must be an E.164 number (e.g. +123456789012)."
+        );
+
+        // 400 outOfRange — a `dataVolume` below the floor.
+        let (status, _, body) =
+            post(Some(&token), &body_for("+123456789012", Some(0), None), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "OUT_OF_RANGE");
+        assert_eq!(body["message"], "`dataVolume` must be between 1 and 1000 MB.");
+    }
+
     #[tokio::test]
     async fn missing_required_fields_are_rejected() {
         let token = mint_token(CREATE_SCOPE).await;
