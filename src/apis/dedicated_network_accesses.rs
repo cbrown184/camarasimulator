@@ -11,9 +11,11 @@
 //!
 //! CamaraSim keeps created accesses in an in-memory store ([`vwip::routes`] wires
 //! the endpoints; [`store`] is the state); it is a **stateful, resource-oriented**
-//! API. So far only the create leg is mounted (docs/DESIGN.md §7 drives the
-//! result from the request); read / list / delete and the device sub-resources
-//! (`/accesses/{accessId}/devices…`) arrive in later passes.
+//! API. The full access lifecycle is mounted (docs/DESIGN.md §7 drives each
+//! result from the request): create / read / list / delete plus the device
+//! sub-resources (`/accesses/{accessId}/devices` list, `…/devices/add`,
+//! `…/devices/remove`). Only `sink` notification delivery remains a documented
+//! cut.
 //!
 //! One submodule per major version (docs/DESIGN.md §5, §9). So far:
 //! - [`vwip`] — mounted at `/dedicated-network-accesses/vwip` (CAMARA

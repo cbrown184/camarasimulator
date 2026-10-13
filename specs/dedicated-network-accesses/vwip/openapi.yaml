@@ -925,7 +925,7 @@ components:
       description: |
         Credential for authenticating notification callbacks (CAMARA
         `SinkCredential`). Accepted by CamaraSim but never echoed (a secret) and
-        — this slice being create-only — never applied.
+        never applied — `sink` notification delivery is a documented cut.
       required:
         - credentialType
       properties:

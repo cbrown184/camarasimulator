@@ -649,7 +649,52 @@ Verified sub-items:
   Added `vendored_success_example_matches_the_handler` and
   `vendored_error_example_messages_match_the_handler` pinning the two previously
   unpinned examples. Doc + `#[cfg(test)]` change; no new dependency.
-- 🔧 dedicated-network-accesses
+- 🔧 dedicated-network-accesses — verified 2026-10-13: all seven modelled
+  operations over the full access lifecycle — `createAccess` (`POST /accesses`
+  → 201 `AccessInfo`), the stateful `readAccess` (`GET /accesses/{accessId}`),
+  `listAccesses` (`GET /accesses`, optional `networkId` filter, bare array),
+  `deleteAccess` (`DELETE …/{accessId}` → 204, single-use), and the device
+  sub-resources `listDevices` (`GET …/{accessId}/devices`, paginated
+  `AccessDevicesPage` + `deviceStatus` filter), `addDevicesToAccess`
+  (`POST …/devices/add`, bare `Device[]` body → 201 `AddDevicesSuccess`) and
+  `removeDevicesFromAccess` (`POST …/devices/remove`, bare `Device[]` body →
+  204) — are implemented (`src/apis/dedicated_network_accesses/vwip.rs` + an
+  in-memory `store.rs`), routed, and well-tested (54 test fns before this pass),
+  and the vendored `specs/dedicated-network-accesses/vwip/openapi.yaml` is
+  consistent with the code: the three control planes (request validation → 400;
+  the `networkId` reserved-suffix identifier plane; the per-device
+  `GRANTED`/`DENIED` grant plane keyed on each device's first-present identifier)
+  and all success examples (`createAccess` `mixed` …012 → 2/1/1 with the …404
+  device DENIED; `listDevices` `onePage` → page 1/10, totalCount 2/totalPages 1;
+  `addDevicesToAccess` `added` → NAI granted, …404 denied) match the handler.
+  **No spec↔code value drift found:** there are no inline error examples (every
+  400 `$ref`s the `AccessError` schema with no `examples`), and the minted
+  `id`s are legitimately illustrative (`store::new_access_id` is counter/clock-
+  derived, the application-profiles posture, not request-reproducible). **Stale
+  "create-only / later passes" docs fixed in six places** (the same stale-slice-
+  doc trap caught on device-data-volume / qos-booking / application-profiles /
+  session-insights / sponsored-data / network-access-devices / dedicated-network):
+  the parent `dedicated_network_accesses.rs` doc ("only the create leg is
+  mounted … read/list/delete and the device sub-resources arrive in later
+  passes"), the `vwip.rs` module header (the store-bridge sentence and the
+  "this slice being create-only" documented-cuts paragraph), the
+  `CreateAccessRequest.sink_credential` struct comment ("notifications are a
+  later pass"), three `store.rs` doc lines ("sub-resource legs arrive in later
+  passes", "later passes' read/list/delete", "the list/delete legs (later
+  passes)"), and the spec's `SinkCredential` schema string ("this slice being
+  create-only") — all corrected to describe the full lifecycle while keeping the
+  genuine documented cuts (the CAMARA 207 multi-status / 422 NO_VALID_DEVICE /
+  409 request-level device-conflict forms, `sink` notification delivery, and the
+  `listAccesses` `x-device` header filter). **Small tested increment:** added
+  `vendored_success_examples_match_the_handler`, which drives the three
+  documented success examples through the real router and pins the derived parts
+  (the `createAccess` `mixed` stats + verbatim `recentAccessDevices`, the
+  `listDevices` `onePage` full page body, and the `addDevicesToAccess` `added`
+  AccessDevices array) so they can't silently drift; the illustrative minted
+  `id`s are deliberately not pinned. This advances the vwip audit cursor to the
+  next API (dedicated-network-areas). Doc + spec-string + `#[cfg(test)]` change
+  only (no behaviour/response change — the handlers were already correct; the
+  drift was doc staleness, not examples); no new dependency.
 - 🔧 dedicated-network-areas
 - 🔧 edge-application-management
 - 🔧 esim-remote-management
@@ -725,6 +770,33 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-13 — Phase 5 vwip verification pass (dedicated-network-accesses).
+  Audited the twenty-seventh vwip API in mount order (the access sibling of the
+  DedicatedNetworks family). All seven modelled operations over the full access
+  lifecycle (`createAccess`, `readAccess`, `listAccesses`, `deleteAccess`,
+  `listDevices`, `addDevicesToAccess`, `removeDevicesFromAccess`) are
+  implemented (`src/apis/dedicated_network_accesses/vwip.rs` + an in-memory
+  `store.rs`), routed, and well-tested (54 test fns before this pass). Verified
+  the three control planes match the handler (request validation → 400; the
+  `networkId` reserved-suffix plane; the per-device GRANTED/DENIED grant plane)
+  and that all success examples match. **No spec↔code value drift:** there are
+  no inline error examples (every 400 `$ref`s the `AccessError` schema), and the
+  minted `id`s are legitimately illustrative (counter/clock-derived). **Fixed
+  the stale "create-only / later passes" doc trap in six places** (parent module
+  doc, `vwip.rs` header store-bridge sentence + documented-cuts paragraph, the
+  `sink_credential` struct comment, three `store.rs` doc lines, and the spec's
+  `SinkCredential` schema string) — all claimed read/list/delete and the device
+  sub-resources were future work though all ship — keeping the genuine cuts
+  (CAMARA 207 / 422 NO_VALID_DEVICE / 409 conflict forms, `sink` delivery,
+  `x-device` filter). Added `vendored_success_examples_match_the_handler`
+  pinning the `createAccess` `mixed`, `listDevices` `onePage`, and
+  `addDevicesToAccess` `added` documented examples through the router. `cargo
+  test` green (3083 → 3084 tests) and `cargo build --release` green; release
+  binary 5,438,616 bytes (~5.2 MiB, unchanged from the prior pass). This
+  advances the vwip audit cursor to the next API (dedicated-network-areas). Doc
+  + spec-string + `#[cfg(test)]` change only (no behaviour/response change — the
+  handlers were already correct; the drift was doc staleness, not examples); no
+  new dependency.
 - 2026-10-13 — Phase 5 vwip verification pass (dedicated-network). Audited the
   twenty-sixth vwip API in mount order (the resource sibling of
   dedicated-network-profiles). All four modelled CRUD operations — `createNetwork`

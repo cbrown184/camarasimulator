@@ -6,7 +6,7 @@
 //! and mints its `id`, and the upstream API also exposes
 //! `GET /accesses/{accessId}` (read-back), `GET /accesses` (list) and
 //! `DELETE /accesses/{accessId}`, plus the device sub-resources. This module is
-//! the state that bridges create to those later reads. It mirrors
+//! the state that bridges create to those reads. It mirrors
 //! [`crate::apis::dedicated_network::store`]: a process-global `HashMap` guarded
 //! by a `std::sync::Mutex`, the lock held only for the map read/write and never
 //! across an `.await`, so it never blocks the async runtime.
@@ -15,7 +15,9 @@
 //! verbatim by `GET`. `createAccess` writes (`insert`) and mints ids
 //! (`new_access_id`); the `readAccess` (`get`) leg reads one back, `listAccesses`
 //! (`all`) snapshots them all, and `deleteAccess` (`remove`) evicts one. The
-//! `/accesses/{accessId}/devices…` sub-resource legs arrive in later passes.
+//! `/accesses/{accessId}/devices…` sub-resource legs (`listDevices`,
+//! `addDevicesToAccess`, `removeDevicesFromAccess`) mutate the stored access's
+//! `recentAccessDevices` roster in place via `update`.
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -33,8 +35,7 @@ fn store() -> &'static Mutex<HashMap<String, Value>> {
 }
 
 /// Store the rendered `AccessInfo` `access` under `id`. Called by `createAccess`
-/// once the resource is created, so later passes' read/list/delete legs can
-/// address it.
+/// once the resource is created, so the read/list/delete legs can address it.
 pub fn insert(id: String, access: Value) {
     store()
         .lock()
@@ -44,8 +45,8 @@ pub fn insert(id: String, access: Value) {
 
 /// Fetch the `AccessInfo` stored under `id`, or `None` if no such access exists
 /// (never created, or created in a different process). `readAccess` uses the
-/// distinction to answer `200` vs `404`; the list/delete legs (later passes)
-/// will read this store too. The lock is held only for the clone, never across
+/// distinction to answer `200` vs `404`; the list/delete legs read this store
+/// too. The lock is held only for the clone, never across
 /// an `.await`, so it never blocks the async runtime.
 pub fn get(id: &str) -> Option<Value> {
     store()

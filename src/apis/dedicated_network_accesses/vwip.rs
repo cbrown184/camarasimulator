@@ -25,8 +25,8 @@
 //! `defaultQosProfile`). `createAccess` accepts a `CreateAccessRequest`, mints an
 //! opaque UUID `id`, evaluates each submitted device to a per-device
 //! `GRANTED`/`DENIED` status, records the rendered `AccessInfo` in an in-memory
-//! store ([`super::store`]) so later passes' read/list/delete and device legs can
-//! address it, and returns `201`.
+//! store ([`super::store`]) so the read/list/delete and device legs can address
+//! it, and returns `201`.
 //!
 //! The endpoint is protected: it requires a valid access token
 //! ([`crate::auth::verify::Claims`]) carrying the
@@ -59,10 +59,10 @@
 //!    per-device `recentAccessDevices` list, so `devices` is a genuine second
 //!    plane.
 //!
-//! `sinkCredential` is accepted but never echoed (it is a secret). This slice
-//! being create-only, the following are **documented cuts** (later passes):
-//! the CAMARA `207` multi-status form with a `ResultForDevice[]` body — CamaraSim
-//! represents partial denials as data inside the `201 AccessInfo`
+//! `sinkCredential` is accepted but never echoed (it is a secret). The following
+//! are **documented cuts** (not tied to any one leg): the CAMARA `207`
+//! multi-status form with a `ResultForDevice[]` body — CamaraSim represents
+//! partial denials as data inside the `201 AccessInfo`
 //! (`stats`/`recentAccessDevices`) rather than as a `207` — the `409`/`422`
 //! request-level device conflicts and `sink` notification delivery.
 //! `x-correlator` is echoed on every response.
@@ -210,8 +210,8 @@ struct CreateAccessRequest {
     #[serde(rename = "defaultQosProfile")]
     default_qos_profile: Option<String>,
     sink: Option<String>,
-    // Accepted but never echoed (a secret; notifications are a later pass). Kept
-    // in the struct so `deny_unknown_fields` still admits it.
+    // Accepted but never echoed (a secret; `sink` notification delivery is a
+    // documented cut). Kept in the struct so `deny_unknown_fields` still admits it.
     #[serde(rename = "sinkCredential")]
     #[allow(dead_code)]
     sink_credential: Option<Value>,
@@ -2217,5 +2217,91 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // --- Vendored spec examples pinned to the handler ----------------------
+
+    /// Drive the vendored spec's documented success examples through the real
+    /// router and pin the derived parts, so a spec example can't silently drift
+    /// from the handler. The minted `id`s are legitimately illustrative
+    /// (`store::new_access_id` is counter/clock-derived, not request-reproducible,
+    /// the application-profiles posture), so they are not pinned; everything the
+    /// request determines is.
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        // createAccess `201` `mixed` example — networkId …012 (non-reserved),
+        // one granted (+…012) and one denied (…404) device → stats 2/1/1 with the
+        // devices echoed verbatim in `recentAccessDevices`.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _h, created) = post_access(
+            &create,
+            json!({
+                "networkId": "00000000-0000-4000-8000-000000000012",
+                "devices": [
+                    { "phoneNumber": "+123456789012" },
+                    { "phoneNumber": "+123456789404" }
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["networkId"], "00000000-0000-4000-8000-000000000012");
+        assert_eq!(created["stats"]["totalDevices"], 2);
+        assert_eq!(created["stats"]["totalGranted"], 1);
+        assert_eq!(created["stats"]["totalDenied"], 1);
+        assert_eq!(
+            created["recentAccessDevices"],
+            json!([
+                { "device": { "phoneNumber": "+123456789012" }, "status": "GRANTED" },
+                { "device": { "phoneNumber": "+123456789404" }, "status": "DENIED" }
+            ])
+        );
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // listDevices `200` `onePage` example — the access's recorded roster read
+        // back as a one-page `AccessDevicesPage` (default page 1 / perPage 10,
+        // totalCount 2 / totalPages 1), items in roster order.
+        let read = mint_token(DEVICES_READ_SCOPE).await;
+        let (status, _h, page) = get_devices(Some(&read), &id, None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            page,
+            json!({
+                "items": [
+                    { "device": { "phoneNumber": "+123456789012" }, "status": "GRANTED" },
+                    { "device": { "phoneNumber": "+123456789404" }, "status": "DENIED" }
+                ],
+                "pagination": {
+                    "page": 1,
+                    "perPage": 10,
+                    "totalCount": 2,
+                    "totalPages": 1
+                }
+            })
+        );
+
+        // addDevicesToAccess `201` `added` example — a bare array of the added
+        // devices, each with its resolved status (NAI granted, …404 denied). The
+        // `201` body is the `AddDevicesSuccess` (AccessDevices array), not the
+        // whole AccessInfo.
+        let add = mint_token(DEVICES_ADD_SCOPE).await;
+        let (status, _h, added) = post_add_devices(
+            Some(&add),
+            &id,
+            json!([
+                { "networkAccessIdentifier": "user@operator" },
+                { "phoneNumber": "+123456789404" }
+            ]),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            added,
+            json!([
+                { "device": { "networkAccessIdentifier": "user@operator" }, "status": "GRANTED" },
+                { "device": { "phoneNumber": "+123456789404" }, "status": "DENIED" }
+            ])
+        );
     }
 }
