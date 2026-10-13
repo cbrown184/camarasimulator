@@ -4,10 +4,11 @@
 //! Application Endpoint Registration is a **stateful, resource-oriented** API:
 //! `POST /application-endpoint-lists` registers a set of application endpoints and
 //! mints an opaque `applicationEndpointListId`, and later requests
-//! (`GET /application-endpoint-lists/{id}`, `PUT`, `DELETE` — landing in later
-//! passes) address that resource by its id. This module is the state that bridges
-//! those requests. It mirrors [`crate::apis::application_profiles::store`] (opaque
-//! UUID keys, single node), trimmed to what the register slice needs.
+//! (`GET /application-endpoint-lists/{id}`, `GET /application-endpoint-lists`,
+//! `PUT`, `DELETE`) address that resource by its id. This module is the state that
+//! bridges those requests. It mirrors [`crate::apis::application_profiles::store`]
+//! (opaque UUID keys, single node), with the full registration lifecycle — read,
+//! list, replace, remove — in place.
 //!
 //! ## Simulator constraints
 //!

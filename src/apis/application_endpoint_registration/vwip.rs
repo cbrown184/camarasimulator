@@ -1381,4 +1381,149 @@ mod tests {
             put_list(None, OK_PROFILE, &replacement_body(OK_PROFILE), None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
+
+    // --- Vendored spec examples: exact error-message bytes ------------------
+
+    /// Pin the exact `status`/`code`/`message` bytes of every router-reachable
+    /// inline error example in `specs/application-endpoint-registration/vwip/openapi.yaml`
+    /// against what the handlers actually emit, so the vendored spec cannot
+    /// silently drift from the code. The other tests above assert only `status`
+    /// and `code`; this one guards the `message` strings too (the same pinning the
+    /// device-authenticity / network-health-assessment vwip passes added — here no
+    /// drift was found, the examples were already byte-accurate). The 401/403/404/
+    /// 409/429/500/503 responses are `$ref`s to the shared `errors.yaml` catalog
+    /// (covered by its own tests), so they are not re-pinned here.
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // An endpoints body whose only defect is an empty endpoints array.
+        let empty_endpoints = json!({
+            "applicationEndpoints": [],
+            "applicationProviderName": "Acme",
+            "applicationProfileId": OK_PROFILE
+        })
+        .to_string();
+        // An endpoints body whose only defect is a port outside 1..=65535 on [0].
+        let bad_port = json!({
+            "applicationEndpoints": [ { "ipv4Address": "192.0.2.1", "port": 70000 } ],
+            "applicationProviderName": "Acme",
+            "applicationProfileId": OK_PROFILE
+        })
+        .to_string();
+
+        // --- registerApplicationEndpoints: POST /application-endpoint-lists ---
+        let write = mint_token(WRITE_SCOPE).await;
+
+        // 400 invalidArgument — `applicationEndpoints` must contain at least one endpoint.
+        let (status, _, err) = post_list(Some(&write), &empty_endpoints, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["status"], 400);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            err["message"],
+            "`applicationEndpoints` must contain at least one endpoint."
+        );
+
+        // 400 outOfRange — `applicationEndpoints[0].port` must be in 1..=65535.
+        let (status, _, err) = post_list(Some(&write), &bad_port, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["status"], 400);
+        assert_eq!(err["code"], "OUT_OF_RANGE");
+        assert_eq!(
+            err["message"],
+            "`applicationEndpoints[0].port` must be in 1..=65535."
+        );
+
+        // 422 unidentifiableProfile — the nil-UUID application profile.
+        let (status, _, err) = post_list(Some(&write), &valid_body(NIL_UUID), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err["status"], 422);
+        assert_eq!(err["code"], "UNIDENTIFIABLE_APPLICATION_PROFILE");
+        assert_eq!(
+            err["message"],
+            "The provided applicationProfileId does not identify a known application profile."
+        );
+
+        // 422 serviceNotApplicable — reserved `…422` suffix on applicationProfileId.
+        let profile_422 = "abcdef01-0000-4000-8000-000000000422";
+        let (status, _, err) = post_list(Some(&write), &valid_body(profile_422), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err["status"], 422);
+        assert_eq!(err["code"], "SERVICE_NOT_APPLICABLE");
+        assert_eq!(
+            err["message"],
+            "The service is not available for the provided identifier."
+        );
+
+        // --- getApplicationEndpointsById: GET /{id} — 400 invalidArgument -----
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, err) = get_list(Some(&read), "not-a-uuid", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["status"], 400);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+        assert_eq!(err["message"], "`applicationEndpointListId` must be a UUID.");
+
+        // --- deregisterApplicationEndpoint: DELETE /{id} — 400 invalidArgument -
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, err) = delete_list(Some(&del), "not-a-uuid", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["status"], 400);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+        assert_eq!(err["message"], "`applicationEndpointListId` must be a UUID.");
+
+        // --- updateApplicationEndpoint: PUT /{id} -----------------------------
+        // The body is shared with register and validated before the store state, so
+        // a uuid-shaped-but-never-registered id lets the body/profile 400s and 422s
+        // surface (a body 400 wins over the unknown-id 404).
+        let update = mint_token(UPDATE_SCOPE).await;
+
+        // 400 invalidArgument (body) — same empty-endpoints message as register.
+        let (status, _, err) = put_list(Some(&update), OK_PROFILE, &empty_endpoints, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["status"], 400);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            err["message"],
+            "`applicationEndpoints` must contain at least one endpoint."
+        );
+
+        // 400 outOfRange (body) — same port message as register.
+        let (status, _, err) = put_list(Some(&update), OK_PROFILE, &bad_port, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["status"], 400);
+        assert_eq!(err["code"], "OUT_OF_RANGE");
+        assert_eq!(
+            err["message"],
+            "`applicationEndpoints[0].port` must be in 1..=65535."
+        );
+
+        // 422 unidentifiableProfile (body) — the nil-UUID application profile.
+        let (status, _, err) =
+            put_list(Some(&update), OK_PROFILE, &valid_body(NIL_UUID), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err["status"], 422);
+        assert_eq!(err["code"], "UNIDENTIFIABLE_APPLICATION_PROFILE");
+        assert_eq!(
+            err["message"],
+            "The provided applicationProfileId does not identify a known application profile."
+        );
+
+        // 422 serviceNotApplicable (body) — reserved `…422` suffix.
+        let (status, _, err) =
+            put_list(Some(&update), OK_PROFILE, &valid_body(profile_422), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err["status"], 422);
+        assert_eq!(err["code"], "SERVICE_NOT_APPLICABLE");
+        assert_eq!(
+            err["message"],
+            "The service is not available for the provided identifier."
+        );
+
+        // 400 invalidArgument (path) — non-UUID applicationEndpointListId.
+        let (status, _, err) =
+            put_list(Some(&update), "not-a-uuid", &replacement_body(OK_PROFILE), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["status"], 400);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+        assert_eq!(err["message"], "`applicationEndpointListId` must be a UUID.");
+    }
 }

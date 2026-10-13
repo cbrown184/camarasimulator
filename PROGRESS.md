@@ -474,7 +474,41 @@ Verified sub-items:
   inline error families through the router. The reserved-suffix plane and the
   request/response schemas already matched. This advances the vwip audit cursor to
   the next API (application-endpoint-registration).
-- 🔧 application-endpoint-registration
+- 🔧 application-endpoint-registration — verified 2026-10-13: all five modelled
+  operations over the full registration lifecycle — `registerApplicationEndpoints`
+  (`POST /application-endpoint-lists` → 200 with a bare minted
+  `applicationEndpointListId`), `getAllRegisteredApplicationEndpoints`
+  (`GET /application-endpoint-lists`, sorted array, never 404s),
+  `getApplicationEndpointsById` (`GET …/{id}`), `updateApplicationEndpoint`
+  (`PUT …/{id}` full replace → 204), and `deregisterApplicationEndpoint`
+  (`DELETE …/{id}` → 204, single-use) — are implemented
+  (`src/apis/application_endpoint_registration/vwip.rs` + an in-memory `store.rs`),
+  routed, and well-tested (44 test fns before this pass), and the vendored
+  `specs/application-endpoint-registration/vwip/openapi.yaml` is consistent with the
+  code: the two request-body/`applicationProfileId` control planes
+  (body validation → 400 `INVALID_ARGUMENT`/`OUT_OF_RANGE`; the shared reserved-error
+  suffix on `applicationProfileId` e.g. `…404`/`…422`; the nil-UUID sentinel → 422
+  `UNIDENTIFIABLE_APPLICATION_PROFILE`) and the opaque server-minted id's store state
+  (non-UUID path → 400, unknown id → 404) all match the handler, and the minted
+  `applicationEndpointListId` is legitimately *illustrative* (`store::new_list_id` is
+  counter/clock-derived, the application-profiles / session-insights posture, not
+  request-reproducible). **No spec↔code drift found — every inline error example was
+  already byte-accurate.** Fixed one **stale store-module doc** (same trap class as
+  device-data-volume / qos-booking / application-profiles / session-insights /
+  sponsored-data): `store.rs` said the `GET {id}` / `PUT` / `DELETE` legs were
+  "landing in later passes" and the store was "trimmed to what the register slice
+  needs," though all four legs ship and `get`/`all`/`replace`/`remove` are all present
+  — corrected to describe the full lifecycle. **Small tested increment:** every
+  existing error test asserted only `status`/`code`, so no test guarded the inline
+  example `message` bytes; added `vendored_error_example_messages_match_the_handler`
+  pinning the exact `status`/`code`/`message` bytes of all router-reachable inline
+  error families through the router — register 400 `invalidArgument`/`outOfRange`,
+  register 422 `unidentifiableProfile`/`serviceNotApplicable`, getById 400, delete
+  400, and update 400 (body + path) / 422 — so they can't silently drift (the same
+  pinning the device-authenticity / network-health-assessment passes added). This
+  advances the vwip audit cursor to the next API (predictive-connectivity-data).
+  Spec is unchanged (examples were correct); doc + test change only; no new
+  dependency.
 - 🔧 predictive-connectivity-data
 - 🔧 network-access-devices
 - 🔧 capabilities-and-restrictions
@@ -555,6 +589,67 @@ Respect phase order. Preferred next work:
 > its bullet with concrete, checked-off sub-steps.
 
 ## Scan journal
+
+- 2026-10-13 — Phase 5 vwip verification pass (application-endpoint-registration).
+  Audited the twenty-first vwip API in mount order (a stateful, resource-oriented
+  registration: an in-memory `applicationEndpointListId`→rendered-JSON `store`, no
+  notifications). All **five** modelled operations over the full lifecycle are
+  implemented (`src/apis/application_endpoint_registration/vwip.rs` + `store.rs`),
+  routed, and well-tested (44 test fns before this pass):
+  `registerApplicationEndpoints` (`POST /application-endpoint-lists` → `200` with a
+  bare minted `applicationEndpointListId`), `getAllRegisteredApplicationEndpoints`
+  (`GET /application-endpoint-lists`, store-sorted array, never `404`s),
+  `getApplicationEndpointsById` (`GET …/{id}`), `updateApplicationEndpoint`
+  (`PUT …/{id}`, full replace → `204`, body validated before store state so a body
+  `400` wins over a `404`), and `deregisterApplicationEndpoint` (`DELETE …/{id}` →
+  `204`, single-use). I verified the control planes match the handler: there is **no**
+  device identifier / two-legged-three-legged rule (a registration is a free-standing
+  catalog resource); request-body validation (empty/`>20` endpoints, the `anyOf`
+  address form, port `1..=65535` → `OUT_OF_RANGE`, malformed IPv4/IPv6/`edgeCloudZoneId`,
+  multi-line/over-length provider/description, non-UUID `applicationProfileId`) → `400`;
+  the shared reserved-error suffix on `applicationProfileId` (`scenarios::reserved_error`,
+  e.g. `…404`→404, `…422`→422 `SERVICE_NOT_APPLICABLE`); and the nil-UUID sentinel
+  `00000000-0000-0000-0000-000000000000` → `422 UNIDENTIFIABLE_APPLICATION_PROFILE`
+  (the API's own code), checked after the reserved suffix. The minted
+  `applicationEndpointListId` is legitimately *illustrative* (`store::new_list_id` is a
+  SHA-256 over an atomic counter + clock, not the request — the application-profiles /
+  session-insights posture, not the deterministic-id posture of verified-caller /
+  click-to-dial), so the vendored `200` example id is correctly not pinned.
+  **No spec↔code drift found — every inline error example was already byte-accurate
+  against the handler** (the `was→is`, truncated-identifier, and placeholder-UUID drift
+  classes caught on earlier APIs do not occur here). **Fixed one stale store-module
+  doc** (the stale-"later passes / trimmed slice" trap class caught on
+  device-data-volume / qos-booking / application-profiles / session-insights /
+  sponsored-data): `store.rs` described the `GET {id}` / `PUT` / `DELETE` legs as
+  "landing in later passes" and the store as "trimmed to what the register slice needs,"
+  though all four legs ship and `get`/`all`/`replace`/`remove` are all present and
+  documented later in the same file — corrected to describe the full
+  read/list/replace/remove lifecycle. **Small tested increment:** every existing error
+  test asserted only `status`/`code`, so no test guarded the vendored inline
+  error-example `message` bytes; added `vendored_error_example_messages_match_the_handler`,
+  which drives the real router and pins the exact `status`/`code`/`message` bytes of all
+  router-reachable inline error families — register `400`
+  `invalidArgument`/`outOfRange`, register `422`
+  `unidentifiableProfile`/`serviceNotApplicable`, getById `400`, delete `400`, and
+  update `400` (body + non-UUID path) / `422` — so none can silently drift (the same
+  pinning the device-authenticity / network-health-assessment passes added). The
+  `401`/`403`/`404`/`409`/`429`/`500`/`503` responses are `$ref`s to the shared
+  `errors.yaml` catalog (covered by its own tests). This advances the vwip audit cursor
+  to the next API (predictive-connectivity-data). Spec unchanged (examples were already
+  correct); doc + `#[cfg(test)]` change only; no new dependency. `cargo test` green:
+  3074 passed, 0 failed (+1, the new pinning test). `cargo build --release` green;
+  binary = 5,434,520 bytes (unchanged vs. the application-endpoint-discovery pass on
+  rustc 1.97.0 — the change is outside the release path). *Backlog banner still stands:*
+  the net-new feature backlog remains exhausted and the human decision (authorise
+  stateful infra, name an increment, or pause the routine) is still open — this is the
+  sanctioned per-API vwip verification (backlog item 3). **Integration note:** on entry
+  the local checkout was a detached HEAD at `cc206c9` (application-endpoint-discovery),
+  7 commits ahead of the *local* `main` pointer (f15d2f9); a `git fetch` confirmed
+  `origin/main` was already at `cc206c9` (the
+  iot-sim-fraud-prevention…application-endpoint-discovery passes had pushed cleanly — the
+  local `main`/tracking refs were merely stale), so this pass fast-forwards local `main`
+  to this commit and pushes one commit on top. No origin divergence or regression
+  observed.
 
 - 2026-10-13 — Phase 5 vwip verification pass (application-endpoint-discovery).
   Audited the twentieth vwip API in mount order (a stateless, deterministic edge
