@@ -281,7 +281,25 @@ Verified sub-items:
   400 `invalidArgument`, sendSessionMetrics 400 `outOfRange`); the createSession 422
   `missingIdentifier` example is not router-reachable (its branch needs an
   empty-`sub` token the token endpoint never issues) and is documented as such.
-- 🔧 consent-info
+- 🔧 consent-info — verified 2026-10-13: the one modelled operation
+  (`retrieveStatus`, `POST /consent-info/vwip/retrieve`) is implemented
+  (`src/apis/consent_info/vwip.rs`), routed, and well-tested, and the vendored
+  `specs/consent-info/vwip/openapi.yaml` is consistent (the `d % 6` consent-state
+  plane, the `requestCaptureUrl` capture-URL gate, the two reserved 403s, and the
+  two-legged/three-legged identifier resolution all match the handler).
+  **Spec↔code drift found and fixed in the vendored 422 `missingIdentifier`
+  example:** it carried the truncated `message: "The phone number cannot be
+  identified."` but `resolve_identifier` emits the full "…: supply `phoneNumber`
+  or use a token that identifies a line." (the same truncated-identifier-message
+  drift class caught on subscription-status / media-streaming-rate /
+  optimal-edge-discovery). Corrected the example and added
+  `vendored_error_example_messages_match_the_handler` pinning the six
+  router-reachable inline example families whose messages are the API's own —
+  400 `invalidArgument`, 403 `notAllowedScopesPurpose`, 403 `invalidCallbackUrl`,
+  422 `missingIdentifier`/`unnecessaryIdentifier`/`serviceNotApplicable` — through
+  the router. The 403 `permissionDenied` example intentionally shows the shared
+  catalog's canonical message (the auth layer's runtime message is scope-specific),
+  so it is not pinned here; the 401/404/409/429/500/503 responses are `$ref`s.
 - 🔧 iot-sim-fraud-prevention
 - 🔧 sponsored-data
 - 🔧 click-to-dial
@@ -370,6 +388,57 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-13 — Phase 5 vwip verification pass (consent-info). Audited the
+  fourteenth vwip API in mount order. The single modelled operation
+  `retrieveStatus` (`POST /consent-info/vwip/retrieve`) is fully implemented
+  (`src/apis/consent_info/vwip.rs`), routed, and well-tested (22 test fns before
+  this pass), and both module docs agree with the code: the phone-number-keyed
+  identifier with the two-legged/three-legged resolution (shared with Subscription
+  Status — `phoneNumber` valid only two-legged; resubmitted on a line token → 422
+  `UNNECESSARY_IDENTIFIER`; absent under a non-line subject → 422
+  `MISSING_IDENTIFIER`), the deterministic `d % 6` consent-state plane (`0` →
+  valid/no reason/future expiry, `1` PENDING, `2` REQUESTED, `3` DENIED, `4`
+  EXPIRED/past expiry, `5` OBJECTED), the `requestCaptureUrl` capture-URL gate
+  (offered only when consent is not valid AND the caller asked), the two
+  request-level 403s (`NOT_ALLOWED_SCOPES_PURPOSE` for a scope containing
+  `forbidden`; `INVALID_CALLBACK_URL` for a malformed `callbackUrl`), and the
+  reserved-error suffix plane all match the handler and the vendored
+  `specs/consent-info/vwip/openapi.yaml`. **Spec↔code drift found and fixed in the
+  vendored 422 `missingIdentifier` example:** it carried the truncated
+  `message: "The phone number cannot be identified."` but `resolve_identifier`
+  emits the fuller "The phone number cannot be identified: supply `phoneNumber` or
+  use a token that identifies a line." — a consumer reading the spec would expect
+  different `message` bytes than the endpoint returns (the identical
+  truncated-identifier-message drift class caught on subscription-status,
+  media-streaming-rate, and optimal-edge-discovery). Corrected the example to the
+  real bytes and added `vendored_error_example_messages_match_the_handler`, which
+  drives the endpoint and pins the exact `status`/`code`/`message` bytes of the six
+  router-reachable inline example families whose messages are this API's own —
+  400 `invalidArgument` ("`purpose` must match the pattern `^dpv:[a-zA-Z0-9]+$`."),
+  403 `notAllowedScopesPurpose`, 403 `invalidCallbackUrl`, 422 `missingIdentifier`,
+  422 `unnecessaryIdentifier`, and the reserved-suffix 422 `serviceNotApplicable` —
+  so they can never silently drift again. Documented why the 403 `permissionDenied`
+  example is *not* pinned: it intentionally shows the shared catalog's canonical
+  message ("Client does not have sufficient permissions to perform this action.",
+  the same literal in `specs/shared/errors.yaml` and sibling specs), while the auth
+  layer's `require_scope` runtime message is scope-specific ("Access token does not
+  have the required scope '…'."), so that family is covered by the shared catalog's
+  own tests (the 401/404/409/429/500/503 responses are `$ref`s likewise). Spot-checked
+  the rest of the spec and found no other drift: the three 200 success examples
+  (`valid`/`pendingWithCapture`/`expired`) illustrate the `d % 6` plane with
+  wall-clock-dependent expiry/capture values that are legitimately illustrative
+  (not request-reproducible), and the request/response/error schemas agree with the
+  Rust types. This advances the vwip audit cursor to the next API
+  (iot-sim-fraud-prevention). Spec + test change (no behaviour/response change — the
+  handler's output was already correct; only the spec example was wrong); no new
+  dependency. `cargo test` green: 3066 passed, 0 failed (+1, the new pinning test).
+  `cargo build --release` green; binary = 5,430,424 bytes (unchanged vs. the prior
+  thirteen passes on rustc 1.97.0 — the fix touches only the spec and `#[cfg(test)]`
+  code, not the release path). *Backlog banner still stands:* the net-new feature
+  backlog remains exhausted and the human decision (authorise stateful infra, name
+  an increment, or pause the routine) is still open — this is the sanctioned per-API
+  vwip verification (backlog item 3), and this pass it caught a genuine
+  documentation defect.
 - 2026-10-13 — Phase 5 vwip verification pass (session-insights). Audited the
   thirteenth vwip API in mount order (the second stateful vwip resource, after
   application-profiles). All **five** modelled operations — `createSession` (`POST

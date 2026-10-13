@@ -594,6 +594,101 @@ mod tests {
         assert_eq!(body["code"], "SERVICE_NOT_APPLICABLE");
     }
 
+    // --- Vendored spec inline-example message pinning ----------------------
+
+    /// The vendored `specs/consent-info/vwip/openapi.yaml` carries inline error
+    /// examples whose `message` is this API's own (not a `$ref` into the shared
+    /// catalog). Earlier tests exercised only their `code`; this drives each one
+    /// through the real router and pins the exact `status`/`code`/`message` bytes
+    /// so a spec example can never silently drift from the handler (the same drift
+    /// class caught on subscription-status / media-streaming-rate, whose 422
+    /// identifier message had likewise been truncated). The 403 `permissionDenied`
+    /// example intentionally shows the shared catalog's canonical message
+    /// (`specs/shared/errors.yaml`), while the auth layer's runtime message is
+    /// scope-specific, so it is covered by the shared catalog's own tests and not
+    /// pinned here; the 401/404/409/429/500/503 responses are `$ref`s likewise.
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        let line = mint_token_with_client(RETRIEVE_SCOPE, "+123456789012").await;
+
+        // 400 INVALID_ARGUMENT — the `purpose`-pattern example.
+        let (status, _, body) = retrieve_ok(
+            r#"{"phoneNumber":"+123456789000","scopes":["s"],"purpose":"Marketing","requestCaptureUrl":false}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            body["message"],
+            "`purpose` must match the pattern `^dpv:[a-zA-Z0-9]+$`."
+        );
+
+        // 403 NOT_ALLOWED_SCOPES_PURPOSE — a scope containing `forbidden`.
+        let (status, _, body) = retrieve_ok(
+            r#"{"phoneNumber":"+123456789000","scopes":["forbidden:data"],"purpose":"dpv:Marketing","requestCaptureUrl":false}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["status"], 403);
+        assert_eq!(body["code"], "NOT_ALLOWED_SCOPES_PURPOSE");
+        assert_eq!(
+            body["message"],
+            "The requested combination of scopes and purpose is not allowed."
+        );
+
+        // 403 INVALID_CALLBACK_URL — a malformed callback URL.
+        let (status, _, body) = retrieve_ok(
+            r#"{"phoneNumber":"+123456789000","scopes":["s"],"purpose":"dpv:Marketing","requestCaptureUrl":false,"callbackUrl":"not-a-url"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["status"], 403);
+        assert_eq!(body["code"], "INVALID_CALLBACK_URL");
+        assert_eq!(body["message"], "`callbackUrl` must be a valid http(s) URL.");
+
+        // 422 MISSING_IDENTIFIER — no phoneNumber under a non-line subject. This is
+        // the example the spec had truncated; pin the full handler message.
+        let (status, _, body) =
+            retrieve_ok(r#"{"scopes":["s"],"purpose":"dpv:Marketing","requestCaptureUrl":false}"#)
+                .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "MISSING_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "The phone number cannot be identified: supply `phoneNumber` or use a token that identifies a line."
+        );
+
+        // 422 UNNECESSARY_IDENTIFIER — a phoneNumber resubmitted on a line token.
+        let (status, _, body) = post_retrieve(
+            Some(&line),
+            r#"{"phoneNumber":"+123456789012","scopes":["s"],"purpose":"dpv:Marketing","requestCaptureUrl":false}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "The phone number is already identified by the access token."
+        );
+
+        // 422 SERVICE_NOT_APPLICABLE — the reserved `…422` suffix.
+        let (status, _, body) = retrieve_ok(
+            r#"{"phoneNumber":"+123456789422","scopes":["s"],"purpose":"dpv:Marketing","requestCaptureUrl":false}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "SERVICE_NOT_APPLICABLE");
+        assert_eq!(
+            body["message"],
+            "The service is not available for the provided identifier."
+        );
+    }
+
     // --- Identifier resolution (two-legged / three-legged) -----------------
 
     #[tokio::test]
