@@ -509,7 +509,35 @@ Verified sub-items:
   advances the vwip audit cursor to the next API (predictive-connectivity-data).
   Spec is unchanged (examples were correct); doc + test change only; no new
   dependency.
-- 🔧 predictive-connectivity-data
+- 🔧 predictive-connectivity-data — verified 2026-10-13: the one modelled operation
+  (`retrieveConnectivity`, `POST /predictive-connectivity-data/vwip/retrieve`) is
+  implemented (`src/apis/predictive_connectivity_data/vwip.rs`), routed, and
+  well-tested (35 test fns before this pass), and the module docs agree with the
+  code and the vendored `specs/predictive-connectivity-data/vwip/openapi.yaml`: the
+  area-keyed geometry control plane (first-geohash reserved-suffix errors; each
+  geohash's FNV-1a hash fixing its cell — `h%7==0`→NO_DATA, else ground score
+  `h%100` degrading 15 points per 30 m layer; the `serviceLevel` thresholds and
+  requested `height`→layer-count planes; the documented `POLYGON` / async-sink /
+  precision cuts) all match the handler. **Spec↔code drift found and fixed in the
+  vendored `200` `partlySupported` example — two defects of the NO_DATA-mislabel /
+  deterministic-value class** (the same class caught on population-density-data):
+  (1) `gbsuv` was shown as a NO_DATA cell (`[ND,ND,ND,ND]`), but
+  `fnv1a("gbsuv")%7==1` → it is a *data* cell (ground 62), so two data cells would
+  make the area `SUPPORTED_AREA`, not the claimed `PART_OF_AREA_NOT_SUPPORTED`; and
+  (2) `u4pruy`'s `[GC,MC,NC,NC]` holds only under `BEST_EFFORT` (ground 36), but the
+  example named no `serviceLevel`. Rebound the example to a concrete request
+  (`BEST_EFFORT` over `["u4pruy","dr5bb"]`, the documented 7-day window) and swapped
+  `gbsuv` for `dr5bb`, which genuinely hashes to a NO_DATA cell (`%7==0`), so the
+  mixed area is correctly partly-unsupported. Added
+  `vendored_success_example_matches_the_handler` (drives the router and pins the
+  exact documented cells + status) and `vendored_error_example_messages_match_the_handler`
+  (pins the six inline `400`/`422` example `message` bytes — invalidArgument,
+  invalidEndTime, maxTimePeriodExceeded, unsupportedAreaType, unsupportedPrecision,
+  unsupportedSyncResponse — which the existing error tests guarded only for
+  `status`/`code`). All inline error-example messages were already byte-accurate.
+  This advances the vwip audit cursor to the next API (network-access-devices).
+  Spec + `#[cfg(test)]` change (no behaviour/response change — the handler was
+  already correct; only the one success example was wrong); no new dependency.
 - 🔧 network-access-devices
 - 🔧 capabilities-and-restrictions
 - 🔧 dedicated-network-profiles
@@ -589,6 +617,68 @@ Respect phase order. Preferred next work:
 > its bullet with concrete, checked-off sub-steps.
 
 ## Scan journal
+
+- 2026-10-13 — Phase 5 vwip verification pass (predictive-connectivity-data).
+  Audited the twenty-second vwip API in mount order (a stateless, deterministic,
+  area-keyed connectivity forecast — no stored state, no device identifier). The
+  single modelled operation `retrieveConnectivity`
+  (`POST /predictive-connectivity-data/vwip/retrieve`) is fully implemented
+  (`src/apis/predictive_connectivity_data/vwip.rs`), routed, and well-tested (35
+  test fns before this pass), and the module docs agree with the code and the
+  vendored spec. I verified the geometry-as-control-plane design matches the
+  handler: the first geohash's trailing three digits drive the shared
+  reserved-error convention (checked after structural validation, before the time
+  window); each geohash's FNV-1a hash fixes its cell (`h%7==0` → a NO_DATA cell of
+  all `ND`; else ground score `s=h%100` degrading 15 points per 30 m layer, mapped
+  to `GC`/`MC`/`NC` by the target `serviceLevel`'s thresholds — C2 70/40, STREAM_4K
+  50/25, BEST_EFFORT 30/10); the overall `status` summarises the cell mix
+  (all/some/no NO_DATA → AREA_NOT_SUPPORTED / PART_OF_AREA_NOT_SUPPORTED /
+  SUPPORTED_AREA); `height` sets the layer count (`height/30 + 1`, default 4) and
+  is echoed as `requestedHeight`; `includeSignalStrength` toggles the per-layer
+  `layerSignalStrengths` (dBm) band; and the documented cuts (`POLYGON` → 422
+  UNSUPPORTED_AREA_TYPE, `precision` with GEOHASHLIST → 400, length>9 → 422
+  UNSUPPORTED_PRECISION, >100 geohashes → 422 UNSUPPORTED_SYNC_RESPONSE, async sink
+  accepted-not-acted-on, single time slice, deterministic INVALID_END_TIME /
+  MAX_TIME_PERIOD_EXCEEDED window checks) all hold. **Spec↔code drift found and
+  fixed in the vendored `200` `partlySupported` example — the NO_DATA-mislabel /
+  deterministic-value class** (the same class caught on population-density-data,
+  which had the very same `gbsuv`→NO_DATA error): the example showed `gbsuv` as a
+  NO_DATA cell (`[ND,ND,ND,ND]`), but `fnv1a("gbsuv")%7==1` → it is a *data* cell
+  (ground 62), so an area of `u4pruy`+`gbsuv` (both data cells) would actually be
+  `SUPPORTED_AREA`, contradicting the example's `PART_OF_AREA_NOT_SUPPORTED`
+  status; and `u4pruy`'s `[GC,MC,NC,NC]` layers hold only under `BEST_EFFORT`
+  (ground 36 under the 30/10 thresholds), though the example named no
+  `serviceLevel`. I rebound the example to a concrete request — `BEST_EFFORT` over
+  `["u4pruy","dr5bb"]` for the documented 7-day window — and replaced `gbsuv` with
+  `dr5bb`, which genuinely hashes to a NO_DATA cell (`%7==0`), so the mixed area is
+  correctly `PART_OF_AREA_NOT_SUPPORTED` and `u4pruy`'s `[GC,MC,NC,NC]` is exactly
+  the handler's BEST_EFFORT output. Added
+  `vendored_success_example_matches_the_handler`, which drives the real router with
+  that request and pins the exact documented bytes (layerThickness 30, both slice
+  times, `u4pruy`→`[GC,MC,NC,NC]` with no strengths band, `dr5bb`→`[ND×4]`, status,
+  and the omitted `requestedHeight`), and `vendored_error_example_messages_match_the_handler`,
+  which pins the six inline `400`/`422` error-example `message` bytes through the
+  router (invalidArgument, invalidEndTime, maxTimePeriodExceeded, unsupportedAreaType,
+  unsupportedPrecision, unsupportedSyncResponse) — the existing error tests guarded
+  only `status`/`code`, so a message could have silently drifted (the pinning the
+  media-streaming-rate / subscription-status passes added). Every inline error
+  example was already byte-accurate; the `401`/`403`/`404`/`409`/`429`/`500`/`503`
+  responses are `$ref`s to the shared `errors.yaml` catalog (covered by its own
+  tests). This advances the vwip audit cursor to the next API
+  (network-access-devices). Spec + `#[cfg(test)]` change (no behaviour/response
+  change — the handler was already correct; only the one success example was
+  wrong); no new dependency. `cargo test` green: 3076 passed, 0 failed (+2, the two
+  new pinning tests). `cargo build --release` green; binary = 5,434,520 bytes
+  (unchanged vs. the application-endpoint-registration pass on rustc 1.97.0 — the
+  change is outside the release path). *Backlog banner still stands:* the net-new
+  feature backlog remains exhausted and the human decision (authorise stateful
+  infra, name an increment, or pause the routine) is still open — this is the
+  sanctioned per-API vwip verification (backlog item 3). **Integration note:** on
+  entry the local checkout was a detached HEAD at `a2e45fa`
+  (application-endpoint-registration) == `origin/main`; local `main` pointer was
+  stale (f15d2f9) and was fast-forwarded. This pass branches off `a2e45fa`,
+  rebases on main, and pushes one commit on top. No origin divergence or
+  regression observed.
 
 - 2026-10-13 — Phase 5 vwip verification pass (application-endpoint-registration).
   Audited the twenty-first vwip API in mount order (a stateful, resource-oriented

@@ -1127,4 +1127,105 @@ mod tests {
             Some("corr-err")
         );
     }
+
+    // --- Spec ↔ code: vendored examples ------------------------------------
+
+    /// Pins the vendored `200` `partlySupported` example in
+    /// `specs/predictive-connectivity-data/vwip/openapi.yaml` to the handler's
+    /// real output. The example is a BEST_EFFORT forecast over
+    /// `["u4pruy","dr5bb"]` for the documented 7-day window: `u4pruy` is a data
+    /// cell whose ground score (36) yields `[GC, MC, NC, NC]` under BEST_EFFORT's
+    /// 30/10 thresholds, and `dr5bb` hashes to a NO_DATA cell (`[ND, …]`), so the
+    /// mixed area is `PART_OF_AREA_NOT_SUPPORTED`. (A prior example wrongly showed
+    /// `gbsuv` as a NO_DATA cell — it is actually a data cell — and attached
+    /// `u4pruy`'s BEST_EFFORT layers to an unspecified service level.)
+    #[tokio::test]
+    async fn vendored_success_example_matches_the_handler() {
+        let body = r#"{"serviceLevel":"BEST_EFFORT","area":{"areaType":"GEOHASHLIST","geohashes":["u4pruy","dr5bb"]},"startTime":"2024-01-01T00:00:00Z","endTime":"2024-01-08T00:00:00Z"}"#;
+        let (status, _, out) = call_ok(body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(out["layerThickness"], 30);
+
+        let slice = &out["timedConnectivityData"][0];
+        assert_eq!(slice["startTime"], "2024-01-01T00:00:00Z");
+        assert_eq!(slice["endTime"], "2024-01-08T00:00:00Z");
+
+        let cells = slice["cellConnectivityData"].as_array().unwrap();
+        assert_eq!(cells.len(), 2);
+
+        assert_eq!(cells[0]["geohash"], "u4pruy");
+        assert_eq!(cells[0]["layerConnectivities"], json!(["GC", "MC", "NC", "NC"]));
+        // includeSignalStrength was not requested → no strengths band.
+        assert!(cells[0].get("layerSignalStrengths").is_none());
+
+        assert_eq!(cells[1]["geohash"], "dr5bb");
+        assert_eq!(cells[1]["layerConnectivities"], json!(["ND", "ND", "ND", "ND"]));
+
+        assert_eq!(out["status"], "PART_OF_AREA_NOT_SUPPORTED");
+        // No height requested → requestedHeight omitted.
+        assert!(out.get("requestedHeight").is_none());
+    }
+
+    /// Pins the vendored inline `400`/`422` error-example `message` bytes to the
+    /// handler. The existing error tests assert only `status`/`code`, so without
+    /// this a message could silently drift from the spec example (the drift class
+    /// caught on media-streaming-rate / subscription-status and others).
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // 400 invalidArgument (unknown serviceLevel).
+        let body = r#"{"serviceLevel":"ULTRA","area":{"areaType":"GEOHASHLIST","geohashes":["bcde"]},"startTime":"2024-01-01T00:00:00Z","endTime":"2024-01-02T00:00:00Z"}"#;
+        let (s, _, out) = call_ok(body).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(out["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            out["message"],
+            "`serviceLevel` must be one of `C2`, `STREAM_4K`, `BEST_EFFORT`."
+        );
+
+        // 400 invalidEndTime (endTime before startTime).
+        let body = r#"{"serviceLevel":"C2","area":{"areaType":"GEOHASHLIST","geohashes":["bcde"]},"startTime":"2024-01-08T00:00:00Z","endTime":"2024-01-01T00:00:00Z"}"#;
+        let (s, _, out) = call_ok(body).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(out["code"], "PREDICTIVE_CONNECTIVITY_DATA.INVALID_END_TIME");
+        assert_eq!(out["message"], "`endTime` must not be earlier than `startTime`.");
+
+        // 400 maxTimePeriodExceeded (window longer than 7 days).
+        let body = r#"{"serviceLevel":"C2","area":{"areaType":"GEOHASHLIST","geohashes":["bcde"]},"startTime":"2024-01-01T00:00:00Z","endTime":"2024-01-09T00:00:01Z"}"#;
+        let (s, _, out) = call_ok(body).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(out["code"], "PREDICTIVE_CONNECTIVITY_DATA.MAX_TIME_PERIOD_EXCEEDED");
+        assert_eq!(out["message"], "The requested time window must not exceed 7 days.");
+
+        // 422 unsupportedAreaType (POLYGON).
+        let body = r#"{"serviceLevel":"C2","area":{"areaType":"POLYGON","boundary":[{"latitude":1.0,"longitude":2.0},{"latitude":3.0,"longitude":4.0},{"latitude":5.0,"longitude":6.0}]},"startTime":"2024-01-01T00:00:00Z","endTime":"2024-01-02T00:00:00Z"}"#;
+        let (s, _, out) = call_ok(body).await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(out["code"], "PREDICTIVE_CONNECTIVITY_DATA.UNSUPPORTED_AREA_TYPE");
+        assert_eq!(
+            out["message"],
+            "This simulator supports only `GEOHASHLIST` areas; `POLYGON` is not supported."
+        );
+
+        // 422 unsupportedPrecision (10-char geohash).
+        let (s, _, out) = call_ok(&body_with(r#""u4pruydqqv""#)).await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(out["code"], "PREDICTIVE_CONNECTIVITY_DATA.UNSUPPORTED_PRECISION");
+        assert_eq!(
+            out["message"],
+            "The requested geohash precision (length) is not supported."
+        );
+
+        // 422 unsupportedSyncResponse (101 geohashes).
+        let list = (0..101)
+            .map(|_| "\"bcde\"".to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let (s, _, out) = call_ok(&body_with(&list)).await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(out["code"], "PREDICTIVE_CONNECTIVITY_DATA.UNSUPPORTED_SYNC_RESPONSE");
+        assert_eq!(
+            out["message"],
+            "The request is too large for a synchronous response; a `sink` (async) request is required, which is not supported."
+        );
+    }
 }

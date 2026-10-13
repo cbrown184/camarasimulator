@@ -154,7 +154,14 @@ paths:
                 $ref: "#/components/schemas/ConnectivityDataResponse"
               examples:
                 partlySupported:
-                  summary: A two-geohash area with one data cell and one NO_DATA cell
+                  summary: >-
+                    BEST_EFFORT forecast over ["u4pruy","dr5bb"] for the 7-day
+                    window — one data cell and one NO_DATA cell. The values are
+                    the handler's deterministic output: u4pruy's ground score is
+                    36 (BEST_EFFORT thresholds 30/10 → GC, MC, NC, NC as the
+                    signal degrades 15 points per 30 m layer), and dr5bb hashes
+                    to a NO_DATA cell (every layer ND), so the mixed area is
+                    partly unsupported.
                   value:
                     layerThickness: 30
                     timedConnectivityData:
@@ -163,7 +170,7 @@ paths:
                         cellConnectivityData:
                           - geohash: "u4pruy"
                             layerConnectivities: [GC, MC, NC, NC]
-                          - geohash: "gbsuv"
+                          - geohash: "dr5bb"
                             layerConnectivities: [ND, ND, ND, ND]
                     status: PART_OF_AREA_NOT_SUPPORTED
         "400":
