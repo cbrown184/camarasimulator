@@ -1851,4 +1851,172 @@ mod tests {
             Some("corr-de")
         );
     }
+
+    // --- Vendored-example ↔ handler consistency ----------------------------
+
+    /// The vendored `200` success examples carry device identifiers
+    /// (`imei`/`iccid`, and for the query leg the reported `eId`) that the
+    /// handler derives deterministically from the request (`eId` via FNV-1a +
+    /// Luhn; the query leg's `eId` via `eid_from_task`). Drive each documented
+    /// example through the real router and pin the exact body so the examples
+    /// can never silently drift back to placeholder values.
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        // profileList `oneEnabledProfile` (eId …001, sequenceNum echoed).
+        let list_token = mint_token(LIST_SCOPE).await;
+        let (status, _, body) = post_list(
+            Some(&list_token),
+            &format!(r#"{{"sequenceNum":"seq-0001","data":{{"eId":"{EID_ONE}"}}}}"#),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({
+                "resultCode": "B100000",
+                "resultDesc": "Success",
+                "sequenceNum": "seq-0001",
+                "data": {
+                    "imei": "992085662256008",
+                    "eId": "A1B2C3D4E5F600000000000000000001",
+                    "profiles": [{ "iccid": "89814418471879978689", "enableStatus": 1 }],
+                },
+            })
+        );
+
+        // profileList `emptyEuicc` (eId …000, no sequenceNum).
+        let (status, _, body) = post_list(
+            Some(&list_token),
+            &body_for("A1B2C3D4E5F600000000000000000000"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({
+                "resultCode": "B100000",
+                "resultDesc": "Success",
+                "data": {
+                    "imei": "003080778538115",
+                    "eId": "A1B2C3D4E5F600000000000000000000",
+                    "profiles": [],
+                },
+            })
+        );
+
+        // profileResultQuery `success` (task-001 → operResult 1; eId/imei/iccid
+        // synthesised from the taskId).
+        let query_token = mint_token(QUERY_SCOPE).await;
+        let (status, _, body) = post_query(
+            Some(&query_token),
+            r#"{"sequenceNum":"seq-77","data":{"taskId":"task-001"}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({
+                "resultCode": "B100000",
+                "resultDesc": "Success",
+                "sequenceNum": "seq-77",
+                "data": {
+                    "taskId": "task-001",
+                    "imei": "054921625391109",
+                    "iccid": "89974964855544562789",
+                    "operResult": 1,
+                    "eId": "9b056a5d5ef9f464030ffcfd8d0c89ca",
+                    "resultMsg": "Operation completed successfully",
+                },
+            })
+        );
+
+        // profileResultQuery `executing` (task-000 → operResult 0, no sequenceNum).
+        let (status, _, body) = post_query(Some(&query_token), &query_body_for("task-000"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({
+                "resultCode": "B100000",
+                "resultDesc": "Success",
+                "data": {
+                    "taskId": "task-000",
+                    "imei": "791890645115681",
+                    "iccid": "89642926825946493487",
+                    "operResult": 0,
+                    "eId": "9b056b5d5ef9f617030ffdfd8d0c8b7d",
+                    "resultMsg": "Operation in progress",
+                },
+            })
+        );
+
+        // profileOperation `enableAccepted` (eId …001, optType 1; imei/iccid
+        // synthesised from the eId — the same values profileList reports).
+        let oper_token = mint_token(OPER_SCOPE).await;
+        let (status, _, body) = post_oper(Some(&oper_token), &oper_body(EID_ONE, 1), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({
+                "code": 0,
+                "message": "Enable operation accepted",
+                "config": {
+                    "subscriptionDetail": {
+                        "eId": "A1B2C3D4E5F600000000000000000001",
+                        "imei": "992085662256008",
+                        "iccid": "89814418471879978689",
+                        "optType": 1,
+                    },
+                },
+            })
+        );
+
+        // profileDownload `downloadAndEnableAccepted` (eId …001, autoEnableType 1).
+        let download_token = mint_token(DOWNLOAD_SCOPE).await;
+        let (status, _, body) = post_download(
+            Some(&download_token),
+            &format!(
+                r#"{{"config":{{"subscriptionDetail":{{"eId":"{EID_ONE}","autoEnableType":1}}}}}}"#
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({
+                "code": 0,
+                "message": "Profile download and enable accepted",
+                "config": {
+                    "subscriptionDetail": {
+                        "eId": "A1B2C3D4E5F600000000000000000001",
+                        "imei": "992085662256008",
+                        "iccid": "89814418471879978689",
+                        "autoEnableType": 1,
+                    },
+                },
+            })
+        );
+
+        // profileDownload `plainDownloadAccepted` (eId …001, no autoEnableType).
+        let (status, _, body) =
+            post_download(Some(&download_token), &download_body(EID_ONE), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({
+                "code": 0,
+                "message": "Profile download accepted",
+                "config": {
+                    "subscriptionDetail": {
+                        "eId": "A1B2C3D4E5F600000000000000000001",
+                        "imei": "992085662256008",
+                        "iccid": "89814418471879978689",
+                    },
+                },
+            })
+        );
+    }
 }

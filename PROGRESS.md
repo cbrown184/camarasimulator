@@ -764,7 +764,51 @@ Verified sub-items:
   behaviour/response change — the handlers were already correct; only the two
   catalog examples and one schema example carried placeholders); no new
   dependency.
-- 🔧 esim-remote-management
+- 🔧 esim-remote-management — verified 2026-10-13: all four modelled operations
+  over the full CMP surface — the two stateless read legs (`profileList`
+  `POST /profile/downloaded-list`, `profileResultQuery`
+  `POST /profile/result/query`) and the two command legs modelled as synchronous
+  acknowledgements (`profileOperation` `POST /profile/oper`, `profileDownload`
+  `POST /profile/download`) — are implemented
+  (`src/apis/esim_remote_management/vwip.rs`), routed, and well-tested (66 test
+  fns before this pass), and the module docs/spec agree with the code: the device
+  `eId` / `taskId` trailing-three-decimal-digit control plane (reserved-suffix →
+  canonical CAMARA error; `profileList` `d % 4` profile count with the first
+  enabled; `profileResultQuery` `d % 3` `operResult`; the command legs accept and
+  echo), the full envelope validation (`sequenceNum`/`eId`/`taskId` shapes,
+  `optType` 1..=3 / `autoEnableType` ==1 → `OUT_OF_RANGE`, `protocol`/`sink`/
+  `types`/`subscriptionMaxEvents` bounds), and the documented eUICC-engine/`sink`
+  cuts all match. **Spec↔code drift found and fixed — the deterministic-value /
+  placeholder class** (as on verified-caller / click-to-dial /
+  network-access-devices / edge-application-management): every `200` success
+  example carried the placeholder `imei "356938035643809"` and `iccid
+  "8931089011234567890"`, and the two `profileResultQuery` examples additionally
+  claimed a placeholder reported `eId` (`A1B2C3D4E5F6…0001`/`…0000`), but the
+  handler derives all of these deterministically — `imei`/`iccid` from the device
+  `eId` (FNV-1a + Luhn), and the query leg's reported `eId` from the `taskId` via
+  `eid_from_task`. The real values are: for `eId …0001`, `imei
+  992085662256008` + `iccid 89814418471879978689` (used by `profileList`
+  `oneEnabledProfile`, `profileOperation` `enableAccepted`, and both
+  `profileDownload` examples); for `eId …0000`, `imei 003080778538115`; for
+  `taskId task-001`, `eId 9b056a5d5ef9f464030ffcfd8d0c89ca` + `imei
+  054921625391109` + `iccid 89974964855544562789`; for `taskId task-000`, `eId
+  9b056b5d5ef9f617030ffdfd8d0c8b7d` + `imei 791890645115681` + `iccid
+  89642926825946493487`. Corrected all seven examples (binding each to its request
+  with a derivation note) and added `vendored_success_examples_match_the_handler`,
+  which drives all four endpoints through the real router and pins every documented
+  body so the examples can't silently drift back to placeholders. **Two stale
+  "first slice / not modelled yet" docs fixed** (the stale-slice-doc trap caught on
+  device-data-volume / qos-booking / dedicated-network-*): the parent
+  `esim_remote_management.rs` doc said "This first slice models only the stateless
+  profile-inventory query … the three asynchronous … legs … are not in scope for
+  this module yet," and the `profileList` `x-camarasim-scenarios` note said "The
+  asynchronous lifecycle operations (download / operation / result query) are not
+  modelled yet," though all four legs ship and are tested — corrected both to the
+  complete surface. The reserved-suffix set and the request/response schemas
+  already matched. This advances the vwip audit cursor to the next API
+  (network-access-domains, the last unaudited vwip API). Spec + doc + `#[cfg(test)]`
+  change (no behaviour/response change — the handlers were already correct; only
+  the examples carried placeholders); no new dependency.
 - 🔧 network-access-domains
 
 ## Backlog (unclaimed, top-first)
@@ -837,6 +881,56 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-13 — Phase 5 vwip verification pass (esim-remote-management). Audited
+  the thirtieth vwip API in mount order (the CMP-envelope eSIM profile-management
+  surface). All four modelled operations — the stateless read legs `profileList`
+  (`POST /profile/downloaded-list`) and `profileResultQuery`
+  (`POST /profile/result/query`), and the two command legs modelled as synchronous
+  acknowledgements `profileOperation` (`POST /profile/oper`) and `profileDownload`
+  (`POST /profile/download`) — are implemented
+  (`src/apis/esim_remote_management/vwip.rs`), routed, and well-tested (66 test fns
+  before this pass). Verified the control planes match the handler: the device
+  `eId` / `taskId` trailing-three-decimal-digit plane (reserved-suffix → canonical
+  CAMARA error; `profileList` `d % 4` profile count with only the first enabled;
+  `profileResultQuery` `d % 3` `operResult`; the command legs validate-and-echo),
+  the envelope validation (`sequenceNum`/`eId`/`taskId` patterns, `optType` 1..=3
+  and `autoEnableType` ==1 → `OUT_OF_RANGE`, `protocol`/`sink`/`types`/
+  `subscriptionMaxEvents` bounds, `config`/`subscriptionDetail` required), and the
+  documented eUICC-engine / `sink`-delivery cuts. **Spec↔code drift found and fixed
+  — the deterministic-value / placeholder class** (as on verified-caller /
+  click-to-dial / network-access-devices / edge-application-management): all seven
+  `200` success examples carried the placeholder `imei "356938035643809"` and
+  `iccid "8931089011234567890"`, and the two `profileResultQuery` examples also
+  claimed placeholder reported `eId`s (`A1B2C3D4E5F6…0001`/`…0000`), though the
+  handler derives `imei`/`iccid` deterministically from the device `eId` (FNV-1a +
+  Luhn) and the query leg's reported `eId` from the `taskId` (`eid_from_task`).
+  Corrected all seven to the handler's real values (eId …0001 → imei
+  992085662256008 / iccid 89814418471879978689; eId …0000 → imei 003080778538115;
+  taskId task-001 → eId 9b056a5d5ef9f464030ffcfd8d0c89ca / imei 054921625391109 /
+  iccid 89974964855544562789; taskId task-000 → eId 9b056b5d5ef9f617030ffdfd8d0c8b7d
+  / imei 791890645115681 / iccid 89642926825946493487), bound each to its request
+  with a derivation note, and added `vendored_success_examples_match_the_handler`
+  driving all four endpoints through the real router to pin every documented body.
+  **Two stale "first slice / not modelled yet" docs fixed** (the stale-slice-doc
+  trap caught on device-data-volume / qos-booking / dedicated-network-*): the parent
+  `esim_remote_management.rs` doc ("This first slice models only the stateless
+  profile-inventory query … the three asynchronous … legs … are not in scope for
+  this module yet") and the `profileList` `x-camarasim-scenarios` note ("The
+  asynchronous lifecycle operations … are not modelled yet") — corrected both to
+  the complete four-leg surface. `cargo test` green (3087 → 3088 tests) and
+  `cargo build --release` green; release binary 5,446,808 bytes (up 4,096 bytes /
+  one page from the prior 5,442,712 — the embedded vendored spec grew with the
+  corrected example values + descriptions; no runtime-code change). This advances
+  the vwip audit cursor to the next API (network-access-domains, the last unaudited
+  vwip API). Spec + doc + `#[cfg(test)]` change only (no behaviour/response change —
+  the handlers were already correct; only the examples carried placeholders); no new
+  dependency. *Backlog banner still stands:* the net-new feature backlog remains
+  exhausted and the human decision (authorise stateful infra, name an increment, or
+  pause the routine) is still open — this is the sanctioned per-API vwip
+  verification (backlog item 3). **Integration note:** on entry the local checkout
+  was a detached HEAD at `5833e14` (edge-application-management) == `origin/main`;
+  local `main` was stale (`f15d2f9`) and was fast-forwarded. This pass branches off
+  `5833e14`, rebases on main, and pushes one commit on top.
 - 2026-10-13 — Phase 5 vwip verification pass (edge-application-management).
   Audited the twenty-ninth vwip API in mount order (the management counterpart to
   the EdgeCloud discovery family: two read-only catalogs plus three stateful

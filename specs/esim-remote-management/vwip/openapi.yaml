@@ -152,23 +152,33 @@ paths:
               examples:
                 oneEnabledProfile:
                   summary: A device with one enabled profile
+                  description: >-
+                    Response for `data.eId`
+                    `A1B2C3D4E5F600000000000000000001` (…001 → one enabled
+                    profile). The `imei` and the profile `iccid` are derived
+                    deterministically from the `eId` (FNV-1a + Luhn check digit),
+                    so they are reproducible, not placeholders.
                   value:
                     resultCode: B100000
                     resultDesc: Success
                     sequenceNum: seq-0001
                     data:
-                      imei: "356938035643809"
+                      imei: "992085662256008"
                       eId: "A1B2C3D4E5F600000000000000000001"
                       profiles:
-                        - iccid: "8931089011234567890"
+                        - iccid: "89814418471879978689"
                           enableStatus: 1
                 emptyEuicc:
                   summary: A device with no installed profiles
+                  description: >-
+                    Response for `data.eId`
+                    `A1B2C3D4E5F600000000000000000000` (…000 → an empty eUICC).
+                    The `imei` is derived deterministically from the `eId`.
                   value:
                     resultCode: B100000
                     resultDesc: Success
                     data:
-                      imei: "356938035643809"
+                      imei: "003080778538115"
                       eId: "A1B2C3D4E5F600000000000000000000"
                       profiles: []
         "400":
@@ -199,7 +209,9 @@ paths:
           shared reserved error set so every reserved case is reachable
           (409/422/429 are CamaraSim extensions, sanctioned by the upstream spec's
           own "error list is not exhaustive" note). The asynchronous lifecycle
-          operations (download / operation / result query) are not modelled yet.
+          operations (download / operation / result query) are modelled by the
+          sibling `/profile/download`, `/profile/oper`, and `/profile/result/query`
+          operations in this spec.
         cases:
           - input: "`data.eId` ending in a reserved error suffix (e.g. …404)"
             result: the canonical CAMARA error for that status
@@ -250,28 +262,38 @@ paths:
               examples:
                 success:
                   summary: A task that completed successfully
+                  description: >-
+                    Response for `data.taskId` `task-001` (…001 → `d % 3 == 1` →
+                    success). The reported device `eId`/`imei`/`iccid` are
+                    synthesised deterministically from the `taskId`
+                    (`eid_from_task` → FNV-1a → `imei`/`iccid`), so they are
+                    reproducible, not placeholders.
                   value:
                     resultCode: B100000
                     resultDesc: Success
                     sequenceNum: seq-77
                     data:
                       taskId: task-001
-                      imei: "356938035643809"
-                      iccid: "8931089011234567890"
+                      imei: "054921625391109"
+                      iccid: "89974964855544562789"
                       operResult: 1
-                      eId: "A1B2C3D4E5F600000000000000000001"
+                      eId: "9b056a5d5ef9f464030ffcfd8d0c89ca"
                       resultMsg: Operation completed successfully
                 executing:
                   summary: A task still in progress
+                  description: >-
+                    Response for `data.taskId` `task-000` (…000 → `d % 3 == 0` →
+                    executing). The reported device `eId`/`imei`/`iccid` are
+                    synthesised deterministically from the `taskId`.
                   value:
                     resultCode: B100000
                     resultDesc: Success
                     data:
                       taskId: task-000
-                      imei: "356938035643809"
-                      iccid: "8931089011234567890"
+                      imei: "791890645115681"
+                      iccid: "89642926825946493487"
                       operResult: 0
-                      eId: "A1B2C3D4E5F600000000000000000000"
+                      eId: "9b056b5d5ef9f617030ffdfd8d0c8b7d"
                       resultMsg: Operation in progress
         "400":
           $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
@@ -355,14 +377,20 @@ paths:
               examples:
                 enableAccepted:
                   summary: An enable operation accepted
+                  description: >-
+                    Response for `config.subscriptionDetail.eId`
+                    `A1B2C3D4E5F600000000000000000001` with `optType` 1 and no
+                    supplied `imei`/`iccid`, so both are synthesised
+                    deterministically from the `eId` (the same values
+                    `profileList` reports for this device).
                   value:
                     code: 0
                     message: Enable operation accepted
                     config:
                       subscriptionDetail:
                         eId: "A1B2C3D4E5F600000000000000000001"
-                        imei: "356938035643809"
-                        iccid: "8931089011234567890"
+                        imei: "992085662256008"
+                        iccid: "89814418471879978689"
                         optType: 1
         "400":
           $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
@@ -454,25 +482,35 @@ paths:
               examples:
                 downloadAndEnableAccepted:
                   summary: A download-and-enable accepted
+                  description: >-
+                    Response for `config.subscriptionDetail.eId`
+                    `A1B2C3D4E5F600000000000000000001` with `autoEnableType` 1
+                    and no supplied `imei`/`iccid`, so both are synthesised
+                    deterministically from the `eId`.
                   value:
                     code: 0
                     message: Profile download and enable accepted
                     config:
                       subscriptionDetail:
                         eId: "A1B2C3D4E5F600000000000000000001"
-                        imei: "356938035643809"
-                        iccid: "8931089011234567890"
+                        imei: "992085662256008"
+                        iccid: "89814418471879978689"
                         autoEnableType: 1
                 plainDownloadAccepted:
                   summary: A plain download accepted (no auto-enable)
+                  description: >-
+                    Response for `config.subscriptionDetail.eId`
+                    `A1B2C3D4E5F600000000000000000001` with no `autoEnableType`
+                    and no supplied `imei`/`iccid`, so both are synthesised
+                    deterministically from the `eId`.
                   value:
                     code: 0
                     message: Profile download accepted
                     config:
                       subscriptionDetail:
                         eId: "A1B2C3D4E5F600000000000000000001"
-                        imei: "356938035643809"
-                        iccid: "8931089011234567890"
+                        imei: "992085662256008"
+                        iccid: "89814418471879978689"
         "400":
           $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
         "401":

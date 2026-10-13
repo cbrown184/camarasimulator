@@ -12,11 +12,14 @@
 //!   Management, work-in-progress — no released version yet, so mounted at its
 //!   canonical `vwip` base path like the other unreleased CAMARA APIs).
 //!
-//! This first slice models only the stateless profile-inventory query
-//! (`POST /profile/downloaded-list`, operationId `profileList`); the three
-//! asynchronous, task-oriented lifecycle legs (`profileDownload`,
-//! `profileOperation`, `profileResultQuery`) are not in scope for this module
-//! yet.
+//! This module models the complete eSIM Remote Management vwip surface — all
+//! four upstream legs: the stateless profile-inventory query
+//! (`POST /profile/downloaded-list`, operationId `profileList`), the stateless
+//! result query (`POST /profile/result/query`, `profileResultQuery`), and the
+//! two command legs modelled as synchronous acknowledgements
+//! (`POST /profile/oper`, `profileOperation`; `POST /profile/download`,
+//! `profileDownload`). The actual eUICC state changes and `sink` callback
+//! delivery are documented cuts (no live eUICC engine).
 
 pub mod vwip;
 
