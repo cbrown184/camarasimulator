@@ -228,7 +228,23 @@ Verified sub-items:
   `replace`/`remove` ship in that same file. Added
   `vendored_error_example_messages_match_the_handler` pinning the four distinct 400
   example `message` bytes (no prior test guarded them, only `code`).
-- 🔧 subscription-status
+- 🔧 subscription-status — verified 2026-10-13: the one modelled operation
+  (`retrieveSubscriptionStatus`, `POST
+  /subscription-status/vwip/retrieve-subscription-status`) is implemented,
+  tested, and documented in `specs/subscription-status/vwip/openapi.yaml`;
+  the status-bitfield mapping (bit 0 → `voiceSmsIn`, bit 1 → `voiceSmsOut`,
+  `(d>>2)%3` → `dataService`) and the two-legged/three-legged identifier
+  resolution all match the handler. **Spec↔code drift found and fixed in the
+  vendored 422 `missingIdentifier` example:** it carried the truncated
+  `message: "The phone number cannot be identified."` but the handler emits the
+  full "…: supply `phoneNumber` or use a token that identifies a line." (the
+  same truncated-identifier-message drift class caught on media-streaming-rate
+  and optimal-edge-discovery). Corrected the example and added
+  `vendored_error_example_messages_match_the_handler` pinning the 400
+  `invalidArgument`, 422 `missingIdentifier`/`unnecessaryIdentifier`, and 422
+  `serviceNotApplicable` message bytes through the router. The 200 examples
+  (`…000`/`…001`/`…008`) and the `serviceNotApplicable`/`unnecessaryIdentifier`
+  messages already matched.
 - 🔧 device-authenticity
 - 🔧 session-insights
 - 🔧 consent-info
@@ -320,6 +336,48 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-13 — Phase 5 vwip verification pass (subscription-status). Audited the
+  eleventh vwip API in mount order. The single modelled operation
+  `retrieveSubscriptionStatus` (`POST
+  /subscription-status/vwip/retrieve-subscription-status`) is fully implemented
+  (`src/apis/subscription_status/vwip.rs`), routed, and well-tested (16 test fns
+  before this pass), and both module docs agree with the code: the deterministic
+  status-bitfield plane (identifier trailing digits `d` → bit 0 `voiceSmsIn`
+  suspended, bit 1 `voiceSmsOut` suspended, `(d>>2)%3` `dataService`
+  active/suspended/throttled), the reserved-error suffix plane, and the
+  two-legged/three-legged identifier resolution (`phoneNumber` only valid
+  two-legged; resubmitted on a line token → 422 `UNNECESSARY_IDENTIFIER`; absent
+  under a non-line subject → 422 `MISSING_IDENTIFIER`) all match the handler.
+  **Spec↔code drift found and fixed in the vendored 422 `missingIdentifier`
+  example** (`specs/subscription-status/vwip/openapi.yaml`): it carried the
+  truncated `message: "The phone number cannot be identified."` but
+  `resolve_identifier` emits the fuller "The phone number cannot be identified:
+  supply `phoneNumber` or use a token that identifies a line." — a consumer
+  reading the spec would expect different `message` bytes than the endpoint
+  returns (the identical truncated-identifier-message drift class caught on
+  media-streaming-rate and optimal-edge-discovery). Corrected the example to the
+  real bytes and added `vendored_error_example_messages_match_the_handler`, which
+  drives the endpoint and pins the exact `message` bytes of all four inline
+  example families unique to this spec — 400 `invalidArgument`, 422
+  `missingIdentifier`, 422 `unnecessaryIdentifier`, and the reserved-suffix 422
+  `serviceNotApplicable` — so they can never silently drift again (the
+  401/403/404/409/429/500/503 responses are `$ref`s into the shared catalog,
+  covered by its own tests). Spot-checked the rest of the spec and found no other
+  drift: the three 200 success examples (`…000` all-active, `…001` inbound
+  suspended, `…008` data throttled) match the bitfield mapping and are already
+  pinned by `all_active_healthy_default_for_zero_tail` /
+  `each_field_is_independently_controllable` / `data_service_covers_all_three_states`,
+  and the request/response/error schemas agree with the Rust types. This advances
+  the vwip audit cursor to the next API (device-authenticity). Spec + test change
+  (no behaviour/response change — the handler's output was already correct; only
+  the spec example was wrong); no new dependency. `cargo test` green: 3063 passed,
+  0 failed (+1, the new pinning test). `cargo build --release` green; binary =
+  5,430,424 bytes (unchanged vs. the prior ten passes on rustc 1.97.0 — the fix
+  touches only the spec and `#[cfg(test)]` code, not the release path). *Backlog
+  banner still stands:* the net-new feature backlog remains exhausted and the
+  human decision (authorise stateful infra, name an increment, or pause the
+  routine) is still open — this is the sanctioned per-API vwip verification
+  (backlog item 3), and this pass it caught a genuine documentation defect.
 - 2026-10-12 — Phase 5 vwip verification pass (application-profiles). Audited the
   tenth vwip API in mount order (first of the stateful `vwip` resources). All four
   modelled CRUD operations — `createApplicationProfile` (`POST

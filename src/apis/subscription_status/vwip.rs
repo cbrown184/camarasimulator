@@ -483,6 +483,57 @@ mod tests {
         assert_eq!(body["code"], "UNAUTHENTICATED");
     }
 
+    /// The vendored spec's inline error examples carry concrete `message` bytes
+    /// (`specs/subscription-status/vwip/openapi.yaml`). Pin each one through the
+    /// router so a documented message can never silently drift from the handler
+    /// (the truncation drift class caught earlier on media-streaming-rate and
+    /// optimal-edge-discovery). The 401/403/404/409/429/500/503 responses are
+    /// `$ref`s to the shared catalog and are covered by its own tests; only the
+    /// three inline examples unique to this spec (400 `invalidArgument`, 422
+    /// `missingIdentifier`, 422 `unnecessaryIdentifier`) plus the reserved-suffix
+    /// 422 `serviceNotApplicable` are pinned here.
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // 400 invalidArgument — the non-E.164 `phoneNumber` message.
+        let (status, _, body) = retrieve_ok(r#"{"phoneNumber":"0123"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            body["message"],
+            "`phoneNumber` must be in E.164 format (e.g. +123456789)."
+        );
+
+        // 422 missingIdentifier — the full message, not the truncated form the
+        // spec example used to carry.
+        let (status, _, body) = retrieve_ok("{}").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "MISSING_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "The phone number cannot be identified: supply `phoneNumber` or use a token that identifies a line."
+        );
+
+        // 422 unnecessaryIdentifier — number resubmitted on a three-legged line token.
+        let token = mint_token_with_client(RETRIEVE_SCOPE, "+123456789012").await;
+        let (status, _, body) =
+            post_retrieve(Some(&token), r#"{"phoneNumber":"+123456789012"}"#, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "The phone number is already identified by the access token."
+        );
+
+        // 422 serviceNotApplicable — the reserved `…422` suffix from the shared catalog.
+        let (status, _, body) = retrieve_ok(r#"{"phoneNumber":"+123456789422"}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "SERVICE_NOT_APPLICABLE");
+        assert_eq!(
+            body["message"],
+            "The service is not available for the provided identifier."
+        );
+    }
+
     #[tokio::test]
     async fn x_correlator_is_echoed_on_success_and_error() {
         let token = mint_token(RETRIEVE_SCOPE).await;
