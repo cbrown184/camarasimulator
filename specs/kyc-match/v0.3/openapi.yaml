@@ -262,7 +262,14 @@ components:
           description: E-mail address (RFC-compliant).
         gender:
           type: string
-          description: Gender of the customer.
+          description: >-
+            Gender of the customer. Canonical CAMARA KYC Match 0.3.0 constrains
+            this to the enum below; CamaraSim does **not** enforce it. Like every
+            other attribute, `gender` is classified by the uniform value-marker
+            plane (docs/DESIGN.md §7): a value containing `nomatch` → `false`,
+            `unavailable` → `not_available`, any other value → `true`. So values
+            outside the enum — including the `nomatch`/`unavailable` markers — are
+            accepted and drive the verdict. Documented divergence, not drift.
           enum: [MALE, FEMALE, OTHER]
 
     MatchResult:

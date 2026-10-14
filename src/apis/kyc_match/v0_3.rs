@@ -509,6 +509,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gender_is_classified_by_value_not_enforced_against_the_enum() {
+        // The vendored schema lists `enum: [MALE, FEMALE, OTHER]` for `gender`
+        // (faithful to canonical CAMARA 0.3.0), but CamaraSim does NOT enforce it:
+        // `gender` rides the same uniform value-marker plane as every other
+        // attribute. Pin that behaviour so the spec's "documented divergence, not
+        // drift" note can't silently become real drift.
+
+        // An in-enum value with no marker → plain "true"; gender is boolean-only
+        // (no score key), so never a score.
+        let (status, _, body) = match_ok_token(r#"{"gender":"MALE"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["genderMatch"], "true");
+        assert!(body.get("genderMatchScore").is_none());
+
+        // A value OUTSIDE the enum is accepted (not a 400) and classified by value.
+        let (status, _, body) = match_ok_token(r#"{"gender":"banana"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["genderMatch"], "true");
+
+        // The `nomatch` marker → "false"; boolean-only, so still no score.
+        let (status, _, body) = match_ok_token(r#"{"gender":"nomatch"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["genderMatch"], "false");
+        assert!(body.get("genderMatchScore").is_none());
+
+        // The `unavailable` marker → "not_available".
+        let (status, _, body) = match_ok_token(r#"{"gender":"unavailable"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["genderMatch"], "not_available");
+    }
+
+    #[tokio::test]
+    async fn vendored_examples_match_the_handler() {
+        // Pin the vendored `specs/kyc-match/v0.3/openapi.yaml` examples against the
+        // exact bytes the real router emits, so they can't silently drift.
+
+        // 200 `allMatch`: every plain value → "true", no scores, no extra keys.
+        let (status, _, body) =
+            match_ok_token(r#"{"name":"John Smith","email":"j@example.com","country":"GB"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "nameMatch": "true",
+                "emailMatch": "true",
+                "countryMatch": "true"
+            })
+        );
+
+        // 200 `partialMatch`: a score-bearing `nomatch` → "false" + score 90.
+        let (status, _, body) = match_ok_token(r#"{"name":"nomatch"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"nameMatch": "false", "nameMatchScore": 90}));
+
+        // 200 `notAvailable`: an `unavailable` value → "not_available", no score.
+        let (status, _, body) = match_ok_token(r#"{"address":"unavailable"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"addressMatch": "not_available"}));
+
+        // 400 `invalidArgument`: a malformed body (unknown field) → the documented
+        // status/code/message bytes.
+        let (status, _, body) = match_ok_token(r#"{"name":"Jane","x":1}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["message"], "Request body is not a valid KYC_MatchRequestBody.");
+
+        // 400 `invalidParamCombination`: only `phoneNumber` → the documented bytes.
+        let (status, _, body) = match_ok_token(r#"{"phoneNumber":"+123456789012"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "KNOW_YOUR_CUSTOMER.INVALID_PARAM_COMBINATION");
+        assert_eq!(
+            body["message"],
+            "At least one attribute other than `phoneNumber` must be provided."
+        );
+    }
+
+    #[tokio::test]
     async fn x_correlator_is_echoed_on_success_and_error() {
         let token = mint_token(MATCH_SCOPE).await;
         let (status, headers, _) =

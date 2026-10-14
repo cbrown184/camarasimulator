@@ -942,6 +942,35 @@ Respect phase order. Preferred next work:
      change, no new dependency. *This shows item 2 is **not** a pure contract-test
      treadmill: the same deterministic-value drift the vwip sweep found also hides in
      stable-API examples.* Next in phase order: kyc-match v0.3.
+   - ✅ kyc-match v0.3 — verified 2026-10-14: the one operation (`matchCustomer`,
+     `POST /kyc-match/v0.3/match`) is implemented (`src/apis/kyc_match/v0_3.rs`),
+     routed, and well-tested. The two control planes (top-level reserved-error
+     suffix on the identifier; per-attribute value-marker verdict with a fixed
+     90 partial score for the score-bearing attributes) match the handler, the
+     request/response schemas cover the same 20 attributes and the same 13
+     score-bearing fields, and the 200 (`allMatch`/`partialMatch`/`notAvailable`)
+     and 400 (`invalidArgument`/`invalidParamCombination`) examples are byte-accurate.
+     **Spec↔code inconsistency found and fixed — the documented-divergence /
+     unenforced-constraint class** (as on device-authenticity's
+     `IDENTIFIER_NOT_FOUND`/`QUOTA_EXCEEDED` schema enums): the `gender` request
+     property declared `enum: [MALE, FEMALE, OTHER]`, implying the server rejects
+     any other value, but the handler treats `gender` as a plain `Option<String>`
+     and classifies it by the same uniform value-marker plane as every other
+     attribute (so `"banana"`, `"nomatch"`, `"unavailable"` are all accepted and
+     drive the verdict) — the enum is never enforced, which also silently
+     contradicts CamaraSim's own "each attribute is classified by its value"
+     functional-case plane. Kept the enum (faithful to canonical CAMARA 0.3.0) but
+     documented the divergence on the property ("CamaraSim does NOT enforce it …
+     documented divergence, not drift"), converting undocumented drift into an
+     explicit divergence note. Added `gender_is_classified_by_value_not_enforced_against_the_enum`
+     (pins MALE→true/no-score, out-of-enum `banana`→true accepted-not-400,
+     `nomatch`→false/no-score boolean-only, `unavailable`→not_available) and
+     `vendored_examples_match_the_handler` (pins the three 200 example bodies as
+     exact objects + the two 400 `status`/`code`/`message` byte strings through the
+     router, which prior tests guarded only by `code`). Spec + `#[cfg(test)]` change
+     only — no behaviour/response change (the handler was already correct; the enum
+     was an unenforced schema claim), no new dependency. Next in phase order:
+     device-reachability-status v1 (Phase 2).
 3. **Deepen `vwip` APIs** (🔧) one endpoint/scenario at a time, in mount order,
    only after the earlier phases are verified. **The per-API vwip verification sweep
    is complete (2026-10-13); further deepening needs the deferred stateful /
@@ -952,6 +981,30 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-14 — Phase 1 stable-API audit (backlog item 2) — kyc-match v0.3
+  (third and last Phase 1 API). Audited the one operation (`matchCustomer`,
+  `POST /kyc-match/v0.3/match`) against `specs/kyc-match/v0.3/openapi.yaml`:
+  the reserved-error-suffix + per-attribute value-marker planes, the 20-attribute
+  request schema, the 13 score-bearing response fields, and the 200/400 examples
+  all matched the handler. **One spec↔code inconsistency found & fixed — the
+  documented-divergence / unenforced-constraint class** (device-authenticity's
+  schema-enum precedent): the `gender` request property carried
+  `enum: [MALE, FEMALE, OTHER]`, implying rejection of other values, but the
+  handler never enforces it — `gender` is classified by the uniform value-marker
+  plane like every other attribute, so out-of-enum values (and the
+  `nomatch`/`unavailable` markers) are accepted and drive the verdict. Kept the
+  enum (faithful to canonical CAMARA 0.3.0) and added a property note documenting
+  that CamaraSim does not enforce it ("documented divergence, not drift"),
+  converting undocumented drift into an explicit divergence. Added two tests:
+  `gender_is_classified_by_value_not_enforced_against_the_enum` (pins the
+  value-marker behaviour + out-of-enum acceptance) and
+  `vendored_examples_match_the_handler` (pins the three 200 example bodies and the
+  two 400 `status`/`code`/`message` byte strings through the router, previously
+  guarded only by `code`). Spec + `#[cfg(test)]` change only — no behaviour/response
+  change, no new dependency. `cargo test` 3092 green (+2); `cargo build --release`
+  ok, binary 5,446,808 bytes (5.2M, unchanged). This completes the Phase 1 stable
+  tier; next in phase order is Phase 2 (device-reachability-status v1). Branch
+  `agent/kyc-match/gender-enum-divergence`.
 - 2026-10-14 — Phase 1 stable-API audit (backlog item 2) begins — sim-swap v2
   drift found & fixed. With the vwip sweep (item 3) complete, extended the per-API
   spec↔code audit into the ✅ **stable** tier, in phase order. **number-verification
