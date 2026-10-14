@@ -98,7 +98,9 @@ Verified sub-items:
 - ✅ call-forwarding-signal v0.4
 - ✅ number-recycling v0.2
 - ✅ kyc-age-verification v0.1
-- ✅ device-swap v1
+- ✅ device-swap v1 — spec↔code audited 2026-10-14 (Phase 5 stable tier): fixed the
+  truncated 422 `missingIdentifier` example in both operations (`check`,
+  `retrieve-date`); handler already emitted the full message, added a pinning test.
 - ✅ kyc-fill-in v0.3
 - ✅ home-devices-qod v0.4
 - ✅ qos-profiles v1
@@ -1353,6 +1355,41 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-14 — Phase 5 stable/numbered-tier audit (backlog item 2) — device-swap v1
+  (fourth Phase 5 stable API), drift found & fixed. Audited both operations
+  (`checkDeviceSwap`, `POST /device-swap/v1/check`; `retrieveDeviceSwapDate`,
+  `POST /device-swap/v1/retrieve-date`) against `specs/device-swap/v1/openapi.yaml`:
+  the reserved-error-suffix plane, the swap-recency verdict (identifier trailing three
+  digits = hours-since-last-swap, `swapped` iff `< maxAge`, default 240 h — a genuine
+  second control plane, exercised both directions by existing tests), the `maxAge`
+  `[1,2400]` range plane, the `retrieve-date` monitored-period/`latestDeviceChange`
+  companion mapping (same hours-ago, `null` outside 240 h), the genuinely-enforced
+  E.164 pattern, and the two-legged/three-legged identifier resolution all match the
+  handler; the 200 examples are illustrative scalar/timestamp shapes (`latestDeviceChange`
+  is `rfc3339_utc(now − hoursAgo)`, wall-clock dependent) and the 400
+  `invalidArgument`/`outOfRange`, 422 `unnecessaryIdentifier`/`serviceNotApplicable`
+  inline examples already byte-match, and every other 4xx/5xx `$ref`s the shared catalog.
+  **Drift found — the truncated-identifier-message class** (number-recycling /
+  kyc-age-verification / call-forwarding-signal / subscription-status / media-streaming-rate
+  / consent-info / most-frequent-location precedent): the 422 `missingIdentifier` example
+  in **both** operations showed the short "The phone number cannot be identified." but
+  `resolve_identifier` emits "…: supply `phoneNumber` or use a token that identifies a
+  line." Corrected both and added `vendored_error_example_messages_match_the_handler`
+  pinning the exact `status`/`code`/`message` bytes of all router-reachable inline error
+  families through the real router — `/check` 400 `invalidArgument`/`outOfRange`, 422
+  `missingIdentifier` (reachable: a `client_credentials` `sub` is a non-line client id) /
+  `unnecessaryIdentifier`/`serviceNotApplicable`; `/retrieve-date` 400 `invalidArgument`,
+  422 `missingIdentifier`/`unnecessaryIdentifier`. `cargo test` 3108 green (+1);
+  `cargo build --release` ok, binary 5,455,000 bytes (5.3M, byte-identical to the
+  kyc-age-verification pass — the YAML message correction fit within the current allocation
+  page and the new test is `#[cfg(test)]`-only, outside the release path). Spec +
+  `#[cfg(test)]` change only — no behaviour/response change (the handler was already
+  correct; only the two examples were truncated), no new dependency. Next in phase order:
+  kyc-fill-in v0.3 (next stateless Phase 5 stable; carrier-billing /
+  blockchain-public-address, which carry a `store.rs`, wait for the stateless APIs).
+  Branch `agent/device-swap/audit-v1`. **Integration note:** on entry HEAD was detached
+  at `origin/main` (`2b343ab`, kyc-age-verification); local `main` ref was stale
+  (`f15d2f9`) and was fast-forwarded to `origin/main` before branching.
 - 2026-10-14 — Phase 5 stable/numbered-tier audit (backlog item 2) — kyc-age-verification
   v0.1 (third Phase 5 stable API), drift found & fixed. Audited the one operation
   (`verifyAge`, `POST /kyc-age-verification/v0.1/verify`) against

@@ -850,4 +850,74 @@ mod tests {
             Some("corr-rd")
         );
     }
+
+    // --- Spec ↔ handler: inline error-example messages ---------------------
+
+    /// Every inline error example in `specs/device-swap/v1/openapi.yaml` is
+    /// driven through the real router and its exact `status`/`code`/`message`
+    /// bytes pinned, so the vendored spec cannot silently drift from the handler
+    /// (the truncated-identifier-message class caught on number-recycling /
+    /// call-forwarding-signal / media-streaming-rate). Existing error tests
+    /// assert only `status`/`code`; this guards the `message` strings too.
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // The full message the vendored `missingIdentifier` examples must carry —
+        // the short "The phone number cannot be identified." was the drift fixed
+        // in this pass.
+        let missing_identifier =
+            "The phone number cannot be identified: supply `phoneNumber` or use a token that identifies a line.";
+        let invalid_argument = "`phoneNumber` must be in E.164 format (e.g. +123456789).";
+        let unnecessary_identifier =
+            "The phone number is already identified by the access token.";
+
+        // Assert a response's exact status/code/message bytes.
+        let pin = |status: StatusCode, body: &Value, want_status: u16, want_code: &str, want_msg: &str| {
+            assert_eq!(status.as_u16(), want_status, "{want_code}: status");
+            assert_eq!(body["status"], want_status, "{want_code}: body.status");
+            assert_eq!(body["code"], want_code, "{want_code}: code");
+            assert_eq!(body["message"], want_msg, "{want_code}: message");
+        };
+
+        // A non-line (`client_credentials`) token and an E.164-line token, so
+        // both identifier-resolution branches are reachable.
+        let line_token = mint_token_with_client(CHECK_SCOPE, "+123456789012").await;
+        let rd_line_token = mint_token_with_client(RETRIEVE_DATE_SCOPE, "+123456789012").await;
+
+        // --- /check -------------------------------------------------------
+        // 400 invalidArgument
+        let (s, _, b) = check_ok(r#"{"phoneNumber":"0123"}"#).await;
+        pin(s, &b, 400, "INVALID_ARGUMENT", invalid_argument);
+        // 400 outOfRange
+        let (s, _, b) = check_ok(r#"{"phoneNumber":"+123456789012","maxAge":2401}"#).await;
+        pin(s, &b, 400, "OUT_OF_RANGE", "`maxAge` must be between 1 and 2400 hours.");
+        // 422 missingIdentifier (non-line subject, no phoneNumber)
+        let (s, _, b) = check_ok(r#"{}"#).await;
+        pin(s, &b, 422, "MISSING_IDENTIFIER", missing_identifier);
+        // 422 unnecessaryIdentifier (phoneNumber on a line token)
+        let (s, _, b) =
+            post_check(Some(&line_token), r#"{"phoneNumber":"+123456789012"}"#, None).await;
+        pin(s, &b, 422, "UNNECESSARY_IDENTIFIER", unnecessary_identifier);
+        // 422 serviceNotApplicable (reserved …422 suffix)
+        let (s, _, b) = check_ok(r#"{"phoneNumber":"+123456789422"}"#).await;
+        pin(
+            s,
+            &b,
+            422,
+            "SERVICE_NOT_APPLICABLE",
+            "The service is not available for the provided identifier.",
+        );
+
+        // --- /retrieve-date -----------------------------------------------
+        // 400 invalidArgument
+        let (s, _, b) = retrieve_date_ok(r#"{"phoneNumber":"0123"}"#).await;
+        pin(s, &b, 400, "INVALID_ARGUMENT", invalid_argument);
+        // 422 missingIdentifier
+        let (s, _, b) = retrieve_date_ok(r#"{}"#).await;
+        pin(s, &b, 422, "MISSING_IDENTIFIER", missing_identifier);
+        // 422 unnecessaryIdentifier
+        let (s, _, b) =
+            post_retrieve_date(Some(&rd_line_token), r#"{"phoneNumber":"+123456789012"}"#, None)
+                .await;
+        pin(s, &b, 422, "UNNECESSARY_IDENTIFIER", unnecessary_identifier);
+    }
 }
