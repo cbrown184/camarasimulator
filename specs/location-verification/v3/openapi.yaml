@@ -102,19 +102,39 @@ paths:
               examples:
                 inside:
                   summary: Device inside the area (default happy path / even tail)
+                  description: >-
+                    `lastLocationTime` is **illustrative**: the handler stamps it
+                    `now` (wall-clock dependent), so the concrete timestamp shown
+                    will not reproduce — only its *presence* (an RFC-3339 UTC
+                    instant) is part of the contract. The `verificationResult`
+                    (derived from the identifier's trailing digits) and the echoed
+                    `device` are reproducible. The frozen value below is the
+                    module's RFC-3339 reference epoch, shown for shape only.
                   value:
                     verificationResult: "TRUE"
                     lastLocationTime: "2026-08-03T14:27:08Z"
                     device:
                       phoneNumber: "+123456789012"
                 partly:
-                  summary: Device partly inside (odd tail)
+                  summary: Device partly inside (odd tail, no device → token subject)
+                  description: >-
+                    `lastLocationTime` is **illustrative** (stamped `now`, as on
+                    `inside`); the frozen value shows the shape only. The
+                    `verificationResult` and `matchRate` = `(digits % 99) + 1` are
+                    reproducible — here from a subject ending `…011` with no
+                    `device` supplied, so no `device` is echoed.
                   value:
                     verificationResult: "PARTIAL"
                     matchRate: 12
                     lastLocationTime: "2026-08-03T14:27:08Z"
                 outside:
-                  summary: Device outside the area (…000 tail)
+                  summary: Device outside the area (…000 tail, no device → token subject)
+                  description: >-
+                    `lastLocationTime` is **illustrative** (stamped `now`, as on
+                    `inside`); the frozen value shows the shape only. The
+                    `verificationResult` `FALSE` is reproducible — here from a
+                    subject ending `…000` with no `device` supplied, so no `device`
+                    is echoed.
                   value:
                     verificationResult: "FALSE"
                     lastLocationTime: "2026-08-03T14:27:08Z"

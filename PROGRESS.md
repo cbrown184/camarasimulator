@@ -1124,6 +1124,42 @@ Respect phase order. Preferred next work:
      two illustrative-timestamp examples + doc staleness), no new dependency. **This
      completes the Phase 3 stable tier;** next in phase order is Phase 4 (spatial):
      location-verification v3.
+   - ✅ location-verification v3 — verified 2026-10-14 (first Phase 4 API,
+     CamaraSim's first **spatial** API): the one operation (`verifyLocation`,
+     `POST /location-verification/v3/verify`) is implemented
+     (`src/apis/location_verification/v3.rs`), routed, and well-tested. The two
+     control planes match the handler/spec: the identifier (first present device
+     id, else token `sub`) trailing-three-digits verdict plane
+     (reserved-error-suffix → canonical CAMARA error; `…000` → `FALSE`; odd →
+     `PARTIAL` with `matchRate = (digits % 99) + 1`; else `TRUE`), and the circle
+     `radius` area plane (`< 2000 m` regulatory minimum → 422
+     `LOCATION_VERIFICATION.INVALID_AREA`; `< 1 m` or center lat/long out of range
+     → 400 `OUT_OF_RANGE`; `areaType ≠ CIRCLE` → 400 `INVALID_ARGUMENT`), with the
+     `phoneNumber` E.164 pattern and `maxAge` range genuinely enforced. All four
+     inline error-example messages (400 `invalidArgument`/`outOfRange`, 422
+     `invalidArea`/`missingIdentifier`) already byte-match the handler.
+     **Spec↔code consistency defect found and fixed — the illustrative-timestamp
+     class** (as on sim-swap `latestSimChange` / device-identifier `lastChecked` /
+     quality-on-demand `startedAt`): all three 200 success examples
+     (`inside`/`partly`/`outside`) presented `lastLocationTime` as a frozen literal
+     (`2026-08-03T14:27:08Z`), but the handler stamps `rfc3339_utc(now_unix_secs())`
+     (wall-clock dependent), so that literal can never reproduce. Marked
+     `lastLocationTime` **illustrative** on all three examples with a derivation
+     note (its presence as an RFC-3339 UTC instant is the contract; the
+     `verificationResult`/`matchRate`/echoed `device` are reproducible), and
+     clarified the `partly`/`outside` summaries as subject-driven (no `device`
+     echoed). Added `vendored_success_examples_match_the_handler` (drives
+     `inside` via a device …012, `partly` via a subject …011, `outside` via a
+     subject …000 through the router, pins the reproducible fields as exact
+     objects minus the illustrative `lastLocationTime`, asserting it is UTC but ≠
+     the frozen literal) and `vendored_error_example_messages_match_the_handler`
+     (pins the exact `status`/`code`/`message` bytes of the three router-reachable
+     inline error families; the 422 `missingIdentifier` example is documented not
+     router-reachable — its branch needs an empty-`sub` token the endpoint never
+     issues, the quality-on-demand / session-insights precedent). Spec +
+     `#[cfg(test)]` change only — no behaviour/response change (the handler was
+     already correct; only the three illustrative timestamps lacked their caveat),
+     no new dependency. Next in phase order: location-retrieval v0.4 (Phase 4).
 3. **Deepen `vwip` APIs** (🔧) one endpoint/scenario at a time, in mount order,
    only after the earlier phases are verified. **The per-API vwip verification sweep
    is complete (2026-10-13); further deepening needs the deferred stateful /
@@ -1134,6 +1170,48 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-14 — Phase 4 stable-API audit (backlog item 2) begins —
+  location-verification v3 (first Phase 4 API, CamaraSim's first **spatial** API),
+  drift found & fixed. With the Phase 3 stable tier complete, moved the per-API
+  spec↔code audit into Phase 4 (spatial) in phase order. Audited the one operation
+  (`verifyLocation`, `POST /location-verification/v3/verify`) against
+  `specs/location-verification/v3/openapi.yaml`: the identifier
+  trailing-three-digits verdict plane (reserved-error-suffix → canonical CAMARA
+  error; `…000` → `FALSE`; odd → `PARTIAL` with `matchRate = (digits % 99) + 1`;
+  else `TRUE`), the circle `radius` area plane (`< 2000 m` regulatory minimum →
+  422 `LOCATION_VERIFICATION.INVALID_AREA`; `< 1 m` / center out of range → 400
+  `OUT_OF_RANGE`; non-CIRCLE `areaType` → 400 `INVALID_ARGUMENT`), the
+  genuinely-enforced `phoneNumber` E.164 pattern + `maxAge` range, the
+  two-legged/three-legged identifier resolution, and the reserved-suffix set all
+  match the handler, and all four inline error-example messages byte-match.
+  **Defect found — the illustrative-timestamp class** (sim-swap `latestSimChange` /
+  device-identifier `lastChecked` / quality-on-demand `startedAt` precedent): all
+  three 200 success examples (`inside`/`partly`/`outside`) showed
+  `lastLocationTime` as a frozen literal (`2026-08-03T14:27:08Z`), but the handler
+  stamps `rfc3339_utc(now_unix_secs())` (wall-clock dependent) so it can't
+  reproduce. Marked `lastLocationTime` illustrative on all three examples with a
+  derivation note (its presence as an RFC-3339 UTC instant is the contract; the
+  `verificationResult`/`matchRate`/echoed `device` are reproducible) and clarified
+  the `partly`/`outside` summaries as subject-driven (no `device` echoed). Added
+  `vendored_success_examples_match_the_handler` (drives `inside` via a device …012,
+  `partly` via a subject …011, `outside` via a subject …000 through the router,
+  pins the reproducible fields as exact objects minus the illustrative timestamp,
+  asserting it is UTC but ≠ the frozen literal) and
+  `vendored_error_example_messages_match_the_handler` (pins the exact
+  `status`/`code`/`message` bytes of the three router-reachable inline error
+  families — 400 `invalidArgument`/`outOfRange`, 422 `invalidArea`; the 422
+  `missingIdentifier` example is documented not router-reachable — empty-`sub`
+  token the endpoint never issues, the quality-on-demand / session-insights
+  precedent). `cargo test` 3100 green (+2); `cargo build --release` ok, binary
+  5,450,904 bytes (5.2M, byte-identical to the quality-on-demand pass — the ~1.5 KB
+  of added example descriptions fit within the current allocation page; the new
+  tests are `#[cfg(test)]`-only, outside the release path). Spec + `#[cfg(test)]`
+  change only — no behaviour/response change (the handler was already correct;
+  only the three illustrative timestamps lacked their caveat), no new dependency.
+  Next in phase order: location-retrieval v0.4 (Phase 4). Branch
+  `agent/location-verification/audit-v3`. **Integration note:** on entry HEAD was
+  detached at `origin/main` (`40e5982`, quality-on-demand); local `main` ref was
+  stale (`f15d2f9`) and was fast-forwarded to `origin/main` before branching.
 - 2026-10-14 — Phase 3 stable-API audit (backlog item 2) — quality-on-demand v1
   (second Phase 3 API; the session-lifecycle + CloudEvents-notifications API),
   drift found & fixed. Audited all five operations (`createSession`, `getSession`,

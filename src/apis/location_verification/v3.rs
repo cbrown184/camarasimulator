@@ -791,4 +791,119 @@ mod tests {
             Some("corr-err")
         );
     }
+
+    // --- Vendored-example pins (spec ↔ code) -------------------------------
+
+    /// The frozen `lastLocationTime` in the vendored 200 examples. It is the
+    /// module's RFC-3339 reference epoch, shown for shape only: the handler
+    /// stamps `now`, so this literal must never come back from the router.
+    const FROZEN_LAST_LOCATION_TIME: &str = "2026-08-03T14:27:08Z";
+
+    /// Pin the three vendored `200` success examples
+    /// (`specs/location-verification/v3/openapi.yaml`) against the real router.
+    /// The reproducible fields (`verificationResult`, `matchRate`, the echoed
+    /// `device`) are pinned as exact objects; `lastLocationTime` is documented
+    /// **illustrative** (stamped `now`), so it is asserted present as an RFC-3339
+    /// UTC instant but *not* equal to the frozen literal the examples carry.
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        // Strip the illustrative `lastLocationTime`, asserting it is a non-frozen
+        // UTC instant, and return the remaining body for an exact-object compare.
+        fn without_illustrative_time(mut body: Value) -> Value {
+            let t = body
+                .as_object_mut()
+                .and_then(|o| o.remove("lastLocationTime"))
+                .expect("lastLocationTime present");
+            let t = t.as_str().expect("lastLocationTime is a string");
+            assert!(t.ends_with('Z'), "lastLocationTime is UTC: {t}");
+            assert_ne!(
+                t, FROZEN_LAST_LOCATION_TIME,
+                "the illustrative frozen timestamp must not be a returned literal"
+            );
+            body
+        }
+
+        // `inside`: device phoneNumber +123456789012 (even tail) → TRUE, device echoed.
+        let (status, _, body) =
+            verify_ok_token(&body_with_device(r#"{"phoneNumber":"+123456789012"}"#)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            without_illustrative_time(body),
+            json!({
+                "verificationResult": "TRUE",
+                "device": { "phoneNumber": "+123456789012" },
+            })
+        );
+
+        // `partly`: subject +123456789011 (odd tail), no device → PARTIAL matchRate 12,
+        // no device echo — exactly the shape of the vendored `partly` example.
+        let token = mint_token_with_client(VERIFY_SCOPE, "+123456789011").await;
+        let (status, _, body) = post_verify(Some(&token), &format!(r#"{{{OK_AREA}}}"#), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            without_illustrative_time(body),
+            json!({ "verificationResult": "PARTIAL", "matchRate": 12 })
+        );
+
+        // `outside`: subject +123456789000 (…000 tail), no device → FALSE, no device echo.
+        let token = mint_token_with_client(VERIFY_SCOPE, "+123456789000").await;
+        let (status, _, body) = post_verify(Some(&token), &format!(r#"{{{OK_AREA}}}"#), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            without_illustrative_time(body),
+            json!({ "verificationResult": "FALSE" })
+        );
+    }
+
+    /// Pin the exact `status`/`code`/`message` bytes of the vendored inline error
+    /// examples against the real router. Existing error tests guard only `code`,
+    /// so a reworded example `message` could silently drift from the handler.
+    ///
+    /// Three of the four inline examples are router-reachable: the 400
+    /// `invalidArgument` / `outOfRange` and the 422
+    /// `LOCATION_VERIFICATION.INVALID_AREA`. The 422 `missingIdentifier` example is
+    /// **not** router-reachable — its branch needs a token with an empty `sub`,
+    /// which the token endpoint never issues (an unresolvable `client_id` fails
+    /// with `invalid_client`, line 31-32 of `src/auth/token.rs`), the
+    /// quality-on-demand / session-insights precedent — so it is left undocumented
+    /// here beyond this note.
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        async fn assert_error(body: &str, status: StatusCode, code: &str, message: &str) {
+            let (got_status, _, got) = verify_ok_token(body).await;
+            assert_eq!(got_status, status, "status for {code}");
+            assert_eq!(got["status"], status.as_u16(), "status field for {code}");
+            assert_eq!(got["code"], code);
+            assert_eq!(got["message"], message, "message for {code}");
+        }
+
+        // 400 invalidArgument — a non-CIRCLE areaType.
+        assert_error(
+            r#"{"device":{"phoneNumber":"+123456789012"},"area":{"areaType":"POLYGON"}}"#,
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            "Only `CIRCLE` `areaType` is supported.",
+        )
+        .await;
+
+        // 400 outOfRange — radius below the schema minimum of 1 m.
+        assert_error(
+            r#"{"device":{"phoneNumber":"+123456789012"},"area":{"areaType":"CIRCLE","center":{"latitude":51.5,"longitude":-0.12},"radius":0}}"#,
+            StatusCode::BAD_REQUEST,
+            "OUT_OF_RANGE",
+            "`area.radius` must be at least 1 metre.",
+        )
+        .await;
+
+        // 422 LOCATION_VERIFICATION.INVALID_AREA — radius below the 2000 m minimum.
+        assert_error(
+            r#"{"device":{"phoneNumber":"+123456789012"},"area":{"areaType":"CIRCLE","center":{"latitude":51.5,"longitude":-0.12},"radius":500}}"#,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "LOCATION_VERIFICATION.INVALID_AREA",
+            "The requested area is invalid: a circle radius must be at least 2000 metres.",
+        )
+        .await;
+
+        // 422 missingIdentifier — not router-reachable (see the doc comment).
+    }
 }
