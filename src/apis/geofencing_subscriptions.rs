@@ -13,8 +13,11 @@
 //! - [`v0_4`] — mounted at `/geofencing-subscriptions/v0.4` (CAMARA
 //!   geofencing-subscriptions 0.4.0, release r3.2 — the latest published version,
 //!   mounted at its real sub-1.0 version like KYC Match / Device Identifier /
-//!   Location Retrieval). First slice: `POST /subscriptions` +
-//!   `GET /subscriptions/{subscriptionId}`.
+//!   Location Retrieval). Serves the full subscription CRUD: `POST /subscriptions`
+//!   (create), `GET /subscriptions` (list), `GET /subscriptions/{subscriptionId}`
+//!   (read-back), and `DELETE /subscriptions/{subscriptionId}` (delete), plus
+//!   initial-event / movement / expiry / max-events CloudEvent delivery to the
+//!   subscription `sink`.
 
 pub mod notifications;
 pub mod store;

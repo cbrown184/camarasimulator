@@ -206,6 +206,18 @@ paths:
               examples:
                 active:
                   summary: Subscription active (happy path)
+                  description: >-
+                    `id` and `startsAt` are **illustrative**: `id` is a fresh
+                    opaque UUID minted per request (a monotonic counter + the
+                    clock, not derived from the input), and `startsAt` is
+                    `rfc3339_utc(now)` (wall-clock dependent), so the concrete
+                    values shown will not reproduce — only their *presence* (a
+                    UUID-shaped `id`, an RFC-3339 UTC `startsAt`) is part of the
+                    contract. The echoed `protocol`, `sink`, `types`, `config`
+                    (device + area), and the `status` (`ACTIVE`, from the even
+                    non-reserved …012 tail) are reproducible. The frozen
+                    `startsAt` below is the module's RFC-3339 reference epoch,
+                    kept only to show the response shape.
                   value:
                     id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
                     protocol: HTTP

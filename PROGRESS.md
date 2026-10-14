@@ -1197,6 +1197,48 @@ Respect phase order. Preferred next work:
      was already correct; only the one illustrative timestamp lacked its caveat), no
      new dependency. Next in phase order: geofencing-subscriptions v0.4 (Phase 4,
      last Phase 4 API).
+   - ✅ geofencing-subscriptions v0.4 — verified 2026-10-14 (third and last Phase 4
+     API; CamaraSim's first **event-subscription** API): all **four** modelled CRUD
+     operations (`createSubscription` `POST /subscriptions`, `retrieveSubscriptionList`
+     `GET /subscriptions`, `retrieveSubscription` `GET …/{subscriptionId}`,
+     `deleteSubscription` `DELETE …/{subscriptionId}`) are implemented
+     (`src/apis/geofencing_subscriptions/v0_4.rs` + an in-memory `store.rs` +
+     `notifications.rs` firing initial-event / movement / expiry / max-events
+     CloudEvents), routed, and well-tested (72 test fns before this pass). The two
+     create control planes (the identifier reserved-error-suffix plane; the
+     trailing-three-digits status plane — `…000`/no-digits → `ACTIVATION_REQUESTED`
+     else `ACTIVE`, plus the `…001`/`…002` movement and even/odd initial-event
+     position markers) and the circle `radius` area plane (`< 2000`/`> 200000` m or
+     center out of range → 400 `OUT_OF_RANGE`; non-CIRCLE / missing area → 400
+     `INVALID_ARGUMENT`) match the handler, the `phoneNumber` E.164 pattern is
+     genuinely enforced, and both inline 400 error-example messages
+     (`invalidArgument` "Only `CIRCLE` …", `outOfRange` "…between 2000 and 200000
+     metres.") and the 422 `missingIdentifier` example byte-match the handler.
+     **Spec↔code consistency defect found and fixed — the illustrative-timestamp +
+     minted-id class** (as on quality-on-demand `sessionId`/`startedAt` /
+     location-verification `lastLocationTime` / application-profiles minted ids): the
+     `active` 201 success example presented `startsAt` as a frozen literal
+     (`2026-08-03T14:27:08Z`), but the handler stamps `rfc3339_utc(now_unix_secs())`
+     (wall-clock dependent), and `id` is minted (counter+clock, not request-derived),
+     so neither can reproduce. Marked `id`/`startsAt` **illustrative** with a
+     derivation note (their presence — a UUID `id`, an RFC-3339 UTC `startsAt` — is
+     the contract; the echoed `protocol`/`sink`/`types`/`config` and `status` are
+     reproducible). Added `vendored_success_example_matches_the_handler` (drives the
+     example's exact request through the router, pins every reproducible field as an
+     exact object minus the illustrative `id`/`startsAt`, asserting `startsAt` is UTC
+     but ≠ the frozen literal) and `vendored_error_example_messages_match_the_handler`
+     (pins the two router-reachable inline 400 families' exact `status`/`code`/`message`
+     bytes; the 422 `missingIdentifier` example is documented not router-reachable —
+     its branch needs an empty-`sub` token the endpoint never issues, the
+     quality-on-demand / location-verification precedent). **Stale "First slice: POST
+     /subscriptions + GET …/{subscriptionId}" parent module doc fixed**
+     (`src/apis/geofencing_subscriptions.rs`) though all four CRUD legs + the
+     notification machinery ship — the stale-slice-doc trap caught on
+     device-data-volume / session-insights / quality-on-demand / dedicated-network-*.
+     Spec + doc + `#[cfg(test)]` change only — no behaviour/response change (the
+     handler was already correct; only the one illustrative example lacked its
+     caveat), no new dependency. **This completes the Phase 4 spatial tier, and with
+     it backlog item 2's stable-API audit across every ✅ API in Phases 1–4.**
 3. **Deepen `vwip` APIs** (🔧) one endpoint/scenario at a time, in mount order,
    only after the earlier phases are verified. **The per-API vwip verification sweep
    is complete (2026-10-13); further deepening needs the deferred stateful /
@@ -1207,6 +1249,48 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-14 — Phase 4 stable-API audit (backlog item 2) — geofencing-subscriptions
+  v0.4 (third and last Phase 4 API; CamaraSim's first event-subscription API), drift
+  found & fixed. Completed the Phase 4 (spatial) tier in phase order. Audited all four
+  CRUD operations (`createSubscription`, `retrieveSubscriptionList`,
+  `retrieveSubscription`, `deleteSubscription`) against
+  `specs/geofencing-subscriptions/v0.4/openapi.yaml`, the in-memory `store.rs`, and
+  `notifications.rs`: the create identifier plane (reserved-error-suffix → canonical
+  CAMARA error; `…000`/no-digits → ACTIVATION_REQUESTED else ACTIVE; `…001`/`…002`
+  movement + even/odd initial-event position markers), the circle `radius` area plane
+  (`< 2000`/`> 200000` m or center out of range → 400 OUT_OF_RANGE; non-CIRCLE/missing
+  area → 400 INVALID_ARGUMENT), the genuinely-enforced `phoneNumber` E.164 pattern, and
+  the two-legged/three-legged identifier resolution all match the handler, and both
+  inline 400 example messages + the 422 `missingIdentifier` example byte-match.
+  **Defect found — the illustrative-timestamp + minted-id class** (quality-on-demand
+  `sessionId`/`startedAt` / location-verification `lastLocationTime` precedent): the
+  `active` 201 success example showed `startsAt` as a frozen literal
+  (`2026-08-03T14:27:08Z`), but the handler stamps `rfc3339_utc(now_unix_secs())`
+  (wall-clock dependent) and `id` is minted (counter+clock, not request-derived), so
+  neither can reproduce. Marked `id`/`startsAt` illustrative with a derivation note
+  (their presence is the contract; the echoed `protocol`/`sink`/`types`/`config` +
+  `status` are reproducible). Added `vendored_success_example_matches_the_handler`
+  (drives the example's exact request through the router, pins every reproducible field
+  as an exact object minus the illustrative `id`/`startsAt`, asserting `startsAt` is UTC
+  but ≠ the frozen literal) and `vendored_error_example_messages_match_the_handler`
+  (pins the two router-reachable inline 400 families' exact status/code/message bytes;
+  the 422 `missingIdentifier` example is documented not router-reachable — empty-`sub`
+  token the endpoint never issues, the quality-on-demand / location-verification
+  precedent). Fixed the stale "First slice: POST /subscriptions + GET …/{subscriptionId}"
+  parent module doc (`src/apis/geofencing_subscriptions.rs`) though all four CRUD legs +
+  the notification machinery ship (the stale-slice-doc trap). `cargo test` 3104 green
+  (+2); `cargo build --release` ok, binary 5,455,000 bytes (5.2M, byte-identical to the
+  location-retrieval pass — the ~0.7 KB illustrative-example note fit within the current
+  allocation page; the new tests are `#[cfg(test)]`-only, outside the release path).
+  Spec + doc + `#[cfg(test)]` change only — no behaviour/response change (the handler
+  was already correct; only the one illustrative example lacked its caveat), no new
+  dependency. **This completes the Phase 4 spatial tier, and with it backlog item 2's
+  stable-API audit across every ✅ API in Phases 1–4.** Next in phase order: the vwip
+  deepening (item 3) remains human-gated (see the decision point); the next idle pass
+  should confirm nothing changed and stop without committing unless a human names work.
+  Branch `agent/geofencing-subscriptions/audit-v0_4`. **Integration note:** on entry
+  HEAD was detached at `origin/main` (`58b4ca0`, location-retrieval); local `main` ref
+  was stale (`f15d2f9`) and was fast-forwarded to `origin/main` before branching.
 - 2026-10-14 — Phase 4 stable-API audit (backlog item 2) — location-retrieval v0.4
   (second Phase 4 API), drift found & fixed. Continued the per-API spec↔code audit
   in phase order. Audited the one operation (`retrieveLocation`,

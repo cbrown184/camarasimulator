@@ -2156,4 +2156,108 @@ mod tests {
         let (status, _) = get_subscription(&token, &id).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
+
+    // --- vendored-spec example pins ----------------------------------------
+
+    #[tokio::test]
+    async fn vendored_success_example_matches_the_handler() {
+        // Drive the exact request behind the spec's `active` 201 example
+        // (phoneNumber +123456789012, sink example.com/callback, one event type,
+        // a 5000 m CIRCLE, no initialEvent / movement tail / expiry / maxEvents →
+        // no callback fires) and pin every reproducible field as an exact object.
+        // `id` (minted: counter+clock) and `startsAt` (rfc3339_utc(now)) are
+        // illustrative, so they are asserted for shape only, never against the
+        // frozen example literals.
+        let body = json!({
+            "protocol": "HTTP",
+            "sink": "https://example.com/callback",
+            "types": [TYPE_ENTERED],
+            "config": {
+                "subscriptionDetail": {
+                    "device": { "phoneNumber": "+123456789012" },
+                    "area": {
+                        "areaType": "CIRCLE",
+                        "center": { "latitude": 51.5, "longitude": -0.12 },
+                        "radius": 5000,
+                    },
+                },
+            },
+        })
+        .to_string();
+        let (status, _, mut resp) = create_ok(&body).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // The illustrative fields: present and well-shaped, but NOT the frozen
+        // example literals.
+        let id = resp["id"].as_str().expect("id is a string");
+        assert!(id.contains('-'), "id is UUID-shaped: {id}");
+        let starts_at = resp["startsAt"].as_str().expect("startsAt is a string");
+        assert!(starts_at.ends_with('Z'), "startsAt is RFC-3339 UTC: {starts_at}");
+        assert_ne!(
+            starts_at, "2026-08-03T14:27:08Z",
+            "startsAt is the live clock, not the frozen example literal"
+        );
+
+        // Everything else must equal the vendored example, exactly.
+        resp.as_object_mut().unwrap().remove("id");
+        resp.as_object_mut().unwrap().remove("startsAt");
+        assert_eq!(
+            resp,
+            json!({
+                "protocol": "HTTP",
+                "sink": "https://example.com/callback",
+                "types": [TYPE_ENTERED],
+                "config": {
+                    "subscriptionDetail": {
+                        "device": { "phoneNumber": "+123456789012" },
+                        "area": {
+                            "areaType": "CIRCLE",
+                            "center": { "latitude": 51.5, "longitude": -0.12 },
+                            "radius": 5000.0,
+                        },
+                    },
+                },
+                "status": "ACTIVE",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // Pin the two inline Generic400 example bodies (the only inline error
+        // examples — 422 MISSING_IDENTIFIER is documented not router-reachable
+        // below) as exact {status,code,message} through the real router, so a
+        // reworded handler message can't silently drift from the spec.
+
+        // invalidArgument — a non-CIRCLE areaType (the spec example's message).
+        let body = format!(
+            r#"{{"protocol":"HTTP","sink":"https://example.com/cb","types":["{TYPE_ENTERED}"],"config":{{"subscriptionDetail":{{"device":{{"phoneNumber":"+123456789012"}},"area":{{"areaType":"POLYGON"}}}}}}}}"#
+        );
+        let (status, _, resp) = create_ok(&body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["status"], 400);
+        assert_eq!(resp["code"], "INVALID_ARGUMENT");
+        assert_eq!(resp["message"], "Only `CIRCLE` `areaType` is supported.");
+
+        // outOfRange — a radius below the 2000 m minimum (the spec example's message).
+        let body = format!(
+            r#"{{"protocol":"HTTP","sink":"https://example.com/cb","types":["{TYPE_ENTERED}"],"config":{{"subscriptionDetail":{{"device":{{"phoneNumber":"+123456789012"}},"area":{{"areaType":"CIRCLE","center":{{"latitude":51.5,"longitude":-0.12}},"radius":500}}}}}}}}"#
+        );
+        let (status, _, resp) = create_ok(&body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["status"], 400);
+        assert_eq!(resp["code"], "OUT_OF_RANGE");
+        assert_eq!(
+            resp["message"],
+            "`area.radius` must be between 2000 and 200000 metres."
+        );
+
+        // The 422 `missingIdentifier` example is NOT router-reachable: its branch
+        // (resolve_identifier, no `device` + empty token `sub`) needs an empty-sub
+        // token the token endpoint never issues (client_credentials always stamps
+        // the client_id as `sub`), the quality-on-demand / location-verification
+        // precedent — so it is documented, not pinned, here. Its example message
+        // ("No `device` supplied and the access token identifies no device.")
+        // is the same byte string the handler emits in `resolve_identifier`.
+    }
 }
