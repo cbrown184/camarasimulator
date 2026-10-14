@@ -572,6 +572,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        // Pins the two vendored `200` success example bodies
+        // (`specs/device-roaming-status/v1/openapi.yaml`) as EXACT objects through
+        // the real router, so a stray/renamed/extra response field (e.g. an
+        // accidental `lastStatusTime`, which the spec documents as omitted) can't
+        // slip past the field-by-field assertions above. Each example is driven by
+        // a concrete input that reproduces it: the `roaming` example (262/["DE"],
+        // the "non-zero tail" summary) by a …012 tail → 12 % 6 = 0 → Germany; the
+        // `home` example by a …000 tail.
+        let token = mint_token(RETRIEVE_SCOPE).await;
+
+        // `roaming` example.
+        let (status, _, body) = post_retrieve(
+            Some(&token),
+            r#"{"device":{"phoneNumber":"+123456789012"}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({ "roaming": true, "countryCode": 262, "countryName": ["DE"] })
+        );
+
+        // `home` example (…000 tail → not roaming, no country fields).
+        let (status, _, body) = post_retrieve(
+            Some(&token),
+            r#"{"device":{"phoneNumber":"+123456789000"}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "roaming": false }));
+    }
+
+    #[tokio::test]
     async fn x_correlator_is_echoed_on_success_and_error() {
         let token = mint_token(RETRIEVE_SCOPE).await;
         let (status, headers, _) = post_retrieve(

@@ -994,6 +994,33 @@ Respect phase order. Preferred next work:
      whole-object pin kyc-match added). `#[cfg(test)]`-only change — no
      behaviour/spec change (the spec was already correct), no new dependency. Next in
      phase order: device-roaming-status v1 (Phase 2).
+   - ✅ device-roaming-status v1 — verified 2026-10-14 (second Phase 2 API): the
+     one operation (`getRoamingStatus`,
+     `POST /device-roaming-status/v1/retrieve`) is implemented
+     (`src/apis/device_roaming_status/v1.rs`), routed, and well-tested. The two
+     control planes (the identifier reserved-error-suffix plane; the
+     trailing-three-digits roaming plane — `…000`/no-digits → not roaming, else
+     roaming with the visited country `COUNTRIES[digits % 6]` over the fixed table
+     `[(262,DE),(234,GB),(208,FR),(310,US),(440,JP),(505,AU)]` so the country is a
+     second control plane) match the handler, the `phoneNumber` E.164 pattern is
+     genuinely enforced (`is_valid_e164` == the spec's `^\+[1-9][0-9]{4,14}$`, so no
+     unenforced-constraint divergence like kyc-match's gender enum), the
+     reserved-suffix set (400/401/403/404/409/422/429/500/503, 409/500 noted as
+     CamaraSim extensions) equals `scenarios::RESERVED_ERROR_SUFFIXES`, and the
+     optional `lastStatusTime` is correctly documented as omitted. **No spec↔code
+     drift found** — the two 200 examples (`roaming` → `262`/`["DE"]`, `home` →
+     `{roaming:false}`) are reproducible scalar shapes matching the handler, and
+     every 4xx/5xx `$ref`s the shared catalog (no inline error examples to drift),
+     the device-reachability-status / number-verification posture. **Small tested
+     increment:** the existing router tests asserted the 200 examples only
+     field-by-field (`roaming`/`countryCode`/`countryName` separately), so a
+     stray/renamed/extra field (e.g. an accidental `lastStatusTime`) could slip
+     past; added `vendored_success_examples_match_the_handler` pinning both
+     documented example bodies as **exact objects** through the real router (the
+     whole-object pin device-reachability-status / kyc-match added).
+     `#[cfg(test)]`-only change — no behaviour/spec change (the spec was already
+     correct), no new dependency. Next in phase order: device-identifier v0.3
+     (Phase 2).
 3. **Deepen `vwip` APIs** (🔧) one endpoint/scenario at a time, in mount order,
    only after the earlier phases are verified. **The per-API vwip verification sweep
    is complete (2026-10-13); further deepening needs the deferred stateful /
@@ -1004,6 +1031,34 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-14 — Phase 2 stable-API audit (backlog item 2) — device-roaming-status
+  v1 (second Phase 2 API), verified clean. Continued the per-API spec↔code audit in
+  phase order. Audited the one operation (`getRoamingStatus`,
+  `POST /device-roaming-status/v1/retrieve`) against
+  `specs/device-roaming-status/v1/openapi.yaml`: the identifier
+  reserved-error-suffix plane, the trailing-three-digits roaming plane (`…000`/
+  no-digits → not roaming; else roaming with visited country `COUNTRIES[digits % 6]`
+  over `[(262,DE),(234,GB),(208,FR),(310,US),(440,JP),(505,AU)]`), the
+  genuinely-enforced `phoneNumber` E.164 pattern, the request/response schemas, the
+  reserved-suffix set (= `scenarios::RESERVED_ERROR_SUFFIXES`, 409/500 noted as
+  extensions), the deliberately-omitted optional `lastStatusTime`, and the module
+  docs all match the handler. **No drift found** — the two 200 examples (`roaming`
+  → `262`/`["DE"]`, `home` → `{roaming:false}`) are reproducible scalar shapes and
+  every error `$ref`s the shared catalog (no inline examples to drift), the
+  device-reachability-status / number-verification posture (not a
+  documented-divergence like sim-swap's illustrative timestamp or kyc-match's
+  unenforced gender enum). **Small tested increment:** existing router tests pinned
+  the 200 examples only field-by-field, so added
+  `vendored_success_examples_match_the_handler` pinning both documented example
+  bodies (`roaming` via a …012 tail → 262/["DE"], `home` via a …000 tail) as exact
+  objects through the real router (the device-reachability-status whole-object pin).
+  `cargo test` 3094 green (+1); `cargo build --release` ok, binary 5,446,808 bytes
+  (5.2M, byte-identical to the device-reachability-status pass — `#[cfg(test)]`-only
+  change, outside the release path). Next in phase order: device-identifier v0.3.
+  Branch `agent/device-roaming-status/pin-success-examples`. **Integration note:**
+  on entry HEAD was detached at `origin/main` (`364aa24`,
+  device-reachability-status); local `main` ref was stale (`f15d2f9`) and was
+  updated to `origin/main` before branching.
 - 2026-10-14 — Phase 2 stable-API audit (backlog item 2) begins —
   device-reachability-status v1, verified clean. With Phase 1 complete, moved the
   per-API spec↔code audit into Phase 2 (stateless device queries) in phase order.
