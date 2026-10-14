@@ -659,4 +659,85 @@ mod tests {
             Some("corr-err")
         );
     }
+
+    // --- Vendored-example pins (spec ↔ handler) ---------------------------
+
+    /// The frozen `lastLocationTime` literal in the vendored `located` 200
+    /// example. It is deliberately illustrative — the handler stamps the current
+    /// time — so it must never appear as a returned value.
+    const FROZEN_LAST_LOCATION_TIME: &str = "2026-08-03T14:27:08Z";
+
+    #[tokio::test]
+    async fn vendored_success_example_matches_the_handler() {
+        // Strip the illustrative `lastLocationTime`, asserting it is a non-frozen
+        // UTC instant, and return the remaining body for an exact-object compare.
+        fn without_illustrative_time(mut body: Value) -> Value {
+            let t = body
+                .as_object_mut()
+                .and_then(|o| o.remove("lastLocationTime"))
+                .expect("lastLocationTime present");
+            let t = t.as_str().expect("lastLocationTime is a string");
+            assert!(t.ends_with('Z'), "lastLocationTime is UTC: {t}");
+            assert_ne!(
+                t, FROZEN_LAST_LOCATION_TIME,
+                "the illustrative frozen timestamp must not be a returned literal"
+            );
+            body
+        }
+
+        // The `located` example, bound to device phoneNumber +123456789012:
+        // trailing digits 012 → centre (51.512, -0.108), radius 300 m. The f64
+        // arithmetic is exact (51.5 + 12*0.001 == 51.512, -0.12 + 12*0.001 ==
+        // -0.108), so the documented literals are byte-accurate.
+        let (status, _, body) =
+            retrieve_ok_token(r#"{"device":{"phoneNumber":"+123456789012"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            without_illustrative_time(body),
+            json!({
+                "area": {
+                    "areaType": "CIRCLE",
+                    "center": { "latitude": 51.512, "longitude": -0.108 },
+                    "radius": 300.0,
+                },
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        async fn assert_error(body: &str, status: StatusCode, code: &str, message: &str) {
+            let (got_status, _, got) = retrieve_ok_token(body).await;
+            assert_eq!(got_status, status, "status for {code}");
+            assert_eq!(got["status"], status.as_u16(), "status field for {code}");
+            assert_eq!(got["code"], code);
+            assert_eq!(got["message"], message, "message for {code}");
+        }
+
+        // 400 invalidArgument — a malformed phoneNumber.
+        assert_error(
+            r#"{"device":{"phoneNumber":"0123"}}"#,
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            "`phoneNumber` must be in E.164 format (e.g. +123456789).",
+        )
+        .await;
+
+        // 400 outOfRange — maxAge below the 60 s minimum.
+        assert_error(
+            r#"{"device":{"phoneNumber":"+123456789012"},"maxAge":30}"#,
+            StatusCode::BAD_REQUEST,
+            "OUT_OF_RANGE",
+            "`maxAge` must be between 60 and 2147483647 seconds.",
+        )
+        .await;
+
+        // 422 missingIdentifier — not router-reachable: the handler emits it only
+        // when no `device` is supplied AND the token subject is empty, but the
+        // token endpoint always stamps a non-empty `sub` (the client_id), so this
+        // branch is unreachable through the router (the location-verification /
+        // quality-on-demand / session-insights precedent). The example message
+        // ("No `device` supplied and the access token identifies no device.")
+        // matches the `resolve_identifier` MISSING_IDENTIFIER arm by inspection.
+    }
 }
