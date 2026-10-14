@@ -170,6 +170,15 @@ paths:
               examples:
                 recentSwap:
                   summary: Swap within the monitored period (recent-swap tail)
+                  description: >-
+                    `latestSimChange` is **illustrative**: the handler returns
+                    *now* minus the identifier's encoded hours-since-swap (here a
+                    recent-swap tail such as `…012` = 12 h ago), so the concrete
+                    timestamp shown is wall-clock dependent and will not
+                    reproduce — only its *presence* (non-null) and
+                    `monitoredPeriod` (a fixed 10 days) are part of the contract.
+                    The frozen value below is the module's RFC-3339 reference
+                    epoch, kept only to show the response shape.
                   value:
                     latestSimChange: "2024-01-01T14:27:08Z"
                     monitoredPeriod: 10

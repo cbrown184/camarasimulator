@@ -750,6 +750,47 @@ mod tests {
         );
     }
 
+    /// The vendored spec's success examples, pinned through the real router so
+    /// they can't silently drift (DESIGN §9). Both `/check` booleans and both
+    /// `/retrieve-date` shapes are reproducible; `retrieve-date`'s
+    /// `latestSimChange` is deliberately **illustrative** (now − hoursAgo,
+    /// wall-clock dependent), so only its presence/absence and the documented
+    /// `monitoredPeriod` literal are part of the contract — this test also proves
+    /// the frozen 2024 timestamp in the spec example is *not* a value the handler
+    /// returns, guarding against someone "correcting" the example to a literal.
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        // `/check` `swapped` example: a recent-swap tail (…012 = 12 h ago) → true.
+        let (status, _, body) = check_ok_token(r#"{"phoneNumber":"+123456789012"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "swapped": true }));
+
+        // `/check` `notSwapped` example: a tail past the default window → false.
+        let (status, _, body) = check_ok_token(r#"{"phoneNumber":"+123456789365"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "swapped": false }));
+
+        // `/retrieve-date` `recentSwap` example: a recent-swap tail → a non-null
+        // RFC 3339 UTC timestamp and the documented `monitoredPeriod` literal 10.
+        let (status, _, body) = retrieve_ok_token(r#"{"phoneNumber":"+123456789012"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["monitoredPeriod"], 10); // the vendored example's literal
+        let ts = body["latestSimChange"].as_str().expect("a non-null timestamp");
+        assert!(ts.contains('T') && ts.ends_with('Z'), "RFC 3339 UTC, got {ts}");
+        // Illustrative: the handler returns `now − 12 h`, never the spec's frozen
+        // reference epoch — so the example value must not be taken as a literal.
+        assert_ne!(
+            ts, "2024-01-01T14:27:08Z",
+            "the recentSwap example timestamp is illustrative, not a returned literal"
+        );
+
+        // `/retrieve-date` `noSwapInPeriod` example: a tail past the monitored
+        // period → null, with the same documented `monitoredPeriod` literal 10.
+        let (status, _, body) = retrieve_ok_token(r#"{"phoneNumber":"+123456789365"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "latestSimChange": null, "monitoredPeriod": 10 }));
+    }
+
     // --- End-to-end grant → resource-server seam --------------------------
     //
     // SIM Swap is a three-legged API (module docs): a production client presents

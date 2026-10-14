@@ -919,15 +919,60 @@ Respect phase order. Preferred next work:
      end-to-end scope→purpose mapping per endpoint.
 2. **Audit Phase 1–3 stable APIs** one at a time: confirm the full CAMARA error
    set and the parameter-driven scenario convention (DESIGN §7) are implemented
-   and documented in each endpoint's vendored spec, with contract tests.
+   and documented in each endpoint's vendored spec, with contract tests. *Now the
+   top open item — the vwip audit (item 3) completed 2026-10-13.*
+   - ✅ number-verification v1 — verified 2026-10-14: both operations
+     (`verifyPhoneNumber`, `phoneNumberShare`) implemented, tested, documented;
+     spec ↔ code ↔ module-docs consistent. **No drift:** the 200 success examples
+     (`true`/`false`/default line `+123456789012`) are reproducible scalars already
+     pinned by existing router tests, and every 4xx/5xx `$ref`s the shared catalog
+     (no inline examples to drift). Nothing to change.
+   - ✅ sim-swap v2 — verified 2026-10-14: both operations (`checkSimSwap`,
+     `retrieveSimSwapDate`) implemented and well-tested. **Spec↔code drift found and
+     fixed — the wall-clock / illustrative-value class** (as on verified-caller's
+     `expiresAt`): the `/retrieve-date` `recentSwap` 200 example presented
+     `latestSimChange: "2024-01-01T14:27:08Z"` as a plain response value, but the
+     handler returns *now* − hoursAgo (wall-clock dependent), so that frozen value
+     (the module's RFC-3339 reference epoch) can never reproduce. Marked the example
+     `latestSimChange` illustrative (its *presence* + `monitoredPeriod` are the
+     contract) and added `vendored_success_examples_match_the_handler` pinning both
+     `/check` booleans and both `/retrieve-date` shapes (incl. the `monitoredPeriod`
+     literal 10 and the `null` case) through the router, asserting the illustrative
+     timestamp is not a returned literal. Spec + `#[cfg(test)]` change, no behaviour
+     change, no new dependency. *This shows item 2 is **not** a pure contract-test
+     treadmill: the same deterministic-value drift the vwip sweep found also hides in
+     stable-API examples.* Next in phase order: kyc-match v0.3.
 3. **Deepen `vwip` APIs** (🔧) one endpoint/scenario at a time, in mount order,
-   only after the earlier phases are verified.
+   only after the earlier phases are verified. **The per-API vwip verification sweep
+   is complete (2026-10-13); further deepening needs the deferred stateful /
+   provisioning-worker layer (human-gated, see the decision point above).**
 
 > The above is a reconstructed starting point. As each API is verified, replace
 > its bullet with concrete, checked-off sub-steps.
 
 ## Scan journal
 
+- 2026-10-14 — Phase 1 stable-API audit (backlog item 2) begins — sim-swap v2
+  drift found & fixed. With the vwip sweep (item 3) complete, extended the per-API
+  spec↔code audit into the ✅ **stable** tier, in phase order. **number-verification
+  v1:** verified clean — reproducible scalar success examples (`true`/`false`/
+  `+123456789012`), all errors `$ref` the shared catalog, already pinned by existing
+  router tests; nothing to change. **sim-swap v2:** found the `/retrieve-date`
+  `recentSwap` 200 example showing a frozen `latestSimChange` (`2024-01-01T14:27:08Z`)
+  though `last_swap_timestamp` returns *now* − hoursAgo — the wall-clock /
+  illustrative-value drift class (verified-caller's `expiresAt`). Marked the example
+  illustrative (its presence + `monitoredPeriod` are the contract) and added
+  `vendored_success_examples_match_the_handler` pinning the four reproducible
+  success-example parts through the router (both `/check` booleans; `/retrieve-date`
+  `monitoredPeriod` literal 10, the non-null recent case, and the `null` case),
+  asserting the illustrative timestamp is not a returned literal. Spec +
+  `#[cfg(test)]` change only — no behaviour/response change (the handler was already
+  correct; only the one example lacked its illustrative caveat), no new dependency.
+  `cargo test` 3090 green (+1); `cargo build --release` ok, binary 5,446,808 bytes
+  (5.2M, unchanged). This confirms backlog item 2 is real work (not a contract-test
+  treadmill): the deterministic-value drift the vwip sweep caught also hides in
+  stable-API examples. Branch `agent/sim-swap/retrieve-date-illustrative-example`.
+  Next in phase order: kyc-match v0.3.
 - 2026-10-13 — Phase 5 vwip verification pass (network-access-domains) — **the
   last unaudited vwip API; the per-API vwip sweep (backlog item 3) is now
   complete.** Audited the thirty-first and final vwip API in mount order (the
