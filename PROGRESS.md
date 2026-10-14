@@ -895,6 +895,15 @@ Verified sub-items:
 > pass should confirm nothing changed and **stop without committing** — do not add a
 > contract-test member, do not repeat the seam check, and do not append a duplicate
 > idle note (this one stands for the whole idle period).
+>
+> **Update (2026-10-14):** the item-2 per-API spec↔code audit has *not* been idle —
+> it found genuine drift (truncated error messages, placeholder/deterministic-value
+> examples, illustrative timestamps, stale slice docs) in nearly every ✅ API across
+> Phases 1–4 and the entire vwip tier, and has now moved into the **Phase 5
+> stable/numbered tier** (~18 APIs that were covered by neither the Phase 1–4 audit
+> nor the vwip sweep; see item 2 below). Each is a real one-pass unit. This block's
+> "idle pass → stop without committing" guidance applies only to a pass that finds
+> no drift to fix, not to auditing a never-audited API.
 
 Respect phase order. Preferred next work:
 
@@ -1238,7 +1247,41 @@ Respect phase order. Preferred next work:
      Spec + doc + `#[cfg(test)]` change only — no behaviour/response change (the
      handler was already correct; only the one illustrative example lacked its
      caveat), no new dependency. **This completes the Phase 4 spatial tier, and with
-     it backlog item 2's stable-API audit across every ✅ API in Phases 1–4.**
+     it backlog item 2's stable-API audit across every ✅ API in Phases 1–4.** The
+     ~18 Phase 5 stable/numbered APIs (inventory above) were covered by neither this
+     Phase 1–4 audit nor the vwip sweep, so auditing them one at a time (stateless
+     before stateful, per phase order) is the now-active continuation of item 2:
+   - ✅ call-forwarding-signal v0.4 — verified 2026-10-14 (first **Phase 5**
+     stable/numbered API audited). Both operations
+     (`retrieveUnconditionalCallForwarding` `POST /unconditional-call-forwardings`,
+     `retrieveCallForwarding` `POST /call-forwardings`) are implemented
+     (`src/apis/call_forwarding_signal/v0_4.rs`), routed, and well-tested. The two
+     control planes match the handler/spec: the identifier reserved-error-suffix
+     plane and, once resolved, the trailing-three-digits result — unconditional
+     endpoint: **odd** tail → `active:true`, even (incl. `…000`) → `active:false`;
+     `/call-forwardings`: `digits % 16` 4-bit mask over `[unconditional,
+     conditional_busy, conditional_not_reachable, conditional_no_answer]`, zero mask
+     → `["inactive"]` — plus the two-legged/three-legged identifier resolution, all
+     matching. The 200 examples are byte-accurate reproducible shapes (incl. `…012` →
+     mask `0b1100` → `["conditional_not_reachable","conditional_no_answer"]`, already
+     pinned), and every 400/401/403/404/409/429/500/503 response `$ref`s the shared
+     catalog (no inline examples to drift). **Spec↔code drift found and fixed — the
+     truncated-identifier-message class** (as on subscription-status /
+     media-streaming-rate / consent-info / most-frequent-location): the 422
+     `missingIdentifier` example in **both** operations carried the short
+     `message: "The phone number cannot be identified."`, but `resolve_identifier`
+     emits the full "…: supply `phoneNumber` or use a token that identifies a line."
+     Corrected both and added `vendored_error_example_messages_match_the_handler`
+     pinning the exact `status`/`code`/`message` bytes of all three router-reachable
+     inline 422 families — `missingIdentifier` (reachable here, unlike several vwip
+     APIs: a `client_credentials` token's `sub` is the non-line client id),
+     `unnecessaryIdentifier`, `serviceNotApplicable` — through the real router (the
+     existing tests guarded only `code`). Spec + `#[cfg(test)]` change only — no
+     behaviour/response change (the handler was already correct; only the two
+     examples were truncated), no new dependency. Next in phase order:
+     number-recycling v0.2 (the next stateless Phase 5 stable API; the stateful
+     Phase 5 stable APIs — carrier-billing v0.5, blockchain-public-address v0.3 —
+     follow the stateless ones).
 3. **Deepen `vwip` APIs** (🔧) one endpoint/scenario at a time, in mount order,
    only after the earlier phases are verified. **The per-API vwip verification sweep
    is complete (2026-10-13); further deepening needs the deferred stateful /
@@ -1249,6 +1292,37 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-14 — Phase 5 **stable/numbered**-tier audit (backlog item 2) begins —
+  call-forwarding-signal v0.4, drift found & fixed. The Phase 1–4 stable audit and
+  the vwip sweep are complete, but the ~18 Phase 5 stable/numbered APIs (inventory)
+  were never audited by either; moved the per-API spec↔code audit into that tier in
+  phase order, stateless-first (so carrier-billing/blockchain-public-address, which
+  carry a `store.rs`, wait for the stateless APIs). Audited both operations
+  (`retrieveUnconditionalCallForwarding`, `retrieveCallForwarding`) against
+  `specs/call-forwarding-signal/v0.4/openapi.yaml`: the reserved-error-suffix plane,
+  the odd/even `active` plane + the `digits % 16` 4-bit forwarding-type mask (zero →
+  `["inactive"]`), the genuinely-enforced E.164 pattern, and the
+  two-legged/three-legged identifier resolution all match the handler; the 200
+  examples (incl. `…012` → `["conditional_not_reachable","conditional_no_answer"]`)
+  are byte-accurate and already pinned, and every 4xx/5xx `$ref`s the shared catalog
+  except the inline 422s. **Drift found — the truncated-identifier-message class**
+  (subscription-status / media-streaming-rate / consent-info / most-frequent-location
+  precedent): the 422 `missingIdentifier` example in **both** operations showed the
+  short "The phone number cannot be identified." but `resolve_identifier` emits
+  "…: supply `phoneNumber` or use a token that identifies a line." Corrected both and
+  added `vendored_error_example_messages_match_the_handler` pinning the exact
+  `status`/`code`/`message` bytes of all three router-reachable inline 422 families
+  (`missingIdentifier` — reachable here, a `client_credentials` `sub` is a non-line
+  client id; `unnecessaryIdentifier`; `serviceNotApplicable`) through the real router.
+  `cargo test` 3105 green (+1); `cargo build --release` ok, binary 5,455,000 bytes
+  (5.2M, byte-identical to the geofencing-subscriptions pass — the message correction
+  fit within the current allocation page; the new test is `#[cfg(test)]`-only, outside
+  the release path). Spec + `#[cfg(test)]` change only — no behaviour/response change
+  (the handler was already correct; only the two examples were truncated), no new
+  dependency. Next in phase order: number-recycling v0.2 (Phase 5 stable). Branch
+  `agent/call-forwarding-signal/audit-v0_4`. **Integration note:** on entry HEAD was
+  detached at `origin/main` (`865f02c`, geofencing-subscriptions); local `main` ref
+  was stale (`f15d2f9`) and was fast-forwarded to `origin/main` before branching.
 - 2026-10-14 — Phase 4 stable-API audit (backlog item 2) — geofencing-subscriptions
   v0.4 (third and last Phase 4 API; CamaraSim's first event-subscription API), drift
   found & fixed. Completed the Phase 4 (spatial) tier in phase order. Audited all four

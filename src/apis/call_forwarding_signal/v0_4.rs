@@ -726,4 +726,67 @@ mod tests {
             Some("corr-cf")
         );
     }
+
+    // --- Spec ↔ handler: inline 422 error-example messages -----------------
+
+    // The exact `message` bytes of the three inline 422 examples in the vendored
+    // `specs/call-forwarding-signal/v0.4/openapi.yaml`. Every error example in
+    // this spec is an inline 422 (the 400/401/403/404/409/429/500/503 responses
+    // `$ref` the shared catalog), and the existing tests above assert only
+    // `status`/`code`. Pinning the full `{status,code,message}` bytes through the
+    // real router stops the truncated-identifier-message drift (the …`cannot be
+    // identified.` short form the subscription-status / media-streaming-rate /
+    // consent-info / most-frequent-location audits caught) from creeping back.
+    const MSG_MISSING_IDENTIFIER: &str =
+        "The phone number cannot be identified: supply `phoneNumber` or use a token that identifies a line.";
+    const MSG_UNNECESSARY_IDENTIFIER: &str =
+        "The phone number is already identified by the access token.";
+    const MSG_SERVICE_NOT_APPLICABLE: &str =
+        "The service is not available for the provided identifier.";
+
+    fn assert_error(body: &Value, status: u16, code: &str, message: &str) {
+        assert_eq!(body["status"], json!(status), "status for {code}");
+        assert_eq!(body["code"], json!(code), "code");
+        assert_eq!(body["message"], json!(message), "message for {code}");
+    }
+
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // --- /unconditional-call-forwardings: all three 422 examples ---------
+
+        // missingIdentifier — a two-legged token (sub = non-line `cfs-client`)
+        // with no phoneNumber cannot identify the line.
+        let token = mint_token(UNCONDITIONAL_SCOPE).await;
+        let (status, _, body) = post_unconditional(Some(&token), r#"{}"#, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_error(&body, 422, "MISSING_IDENTIFIER", MSG_MISSING_IDENTIFIER);
+
+        // unnecessaryIdentifier — a phoneNumber resubmitted on a three-legged
+        // (line-subject) token.
+        let line_token = mint_token_with_client(UNCONDITIONAL_SCOPE, "+123456789012").await;
+        let (status, _, body) =
+            post_unconditional(Some(&line_token), r#"{"phoneNumber":"+123456789012"}"#, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_error(&body, 422, "UNNECESSARY_IDENTIFIER", MSG_UNNECESSARY_IDENTIFIER);
+
+        // serviceNotApplicable — the reserved `…422` suffix (shared catalog).
+        let (status, _, body) =
+            post_unconditional(Some(&token), r#"{"phoneNumber":"+123456789422"}"#, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_error(&body, 422, "SERVICE_NOT_APPLICABLE", MSG_SERVICE_NOT_APPLICABLE);
+
+        // --- /call-forwardings: the two 422 examples ------------------------
+
+        let cf_token = mint_token(CALL_FORWARDINGS_SCOPE).await;
+        let (status, _, body) = post_call_forwardings(Some(&cf_token), r#"{}"#, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_error(&body, 422, "MISSING_IDENTIFIER", MSG_MISSING_IDENTIFIER);
+
+        let cf_line_token = mint_token_with_client(CALL_FORWARDINGS_SCOPE, "+123456789012").await;
+        let (status, _, body) =
+            post_call_forwardings(Some(&cf_line_token), r#"{"phoneNumber":"+123456789012"}"#, None)
+                .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_error(&body, 422, "UNNECESSARY_IDENTIFIER", MSG_UNNECESSARY_IDENTIFIER);
+    }
 }
