@@ -1282,6 +1282,35 @@ Respect phase order. Preferred next work:
      number-recycling v0.2 (the next stateless Phase 5 stable API; the stateful
      Phase 5 stable APIs — carrier-billing v0.5, blockchain-public-address v0.3 —
      follow the stateless ones).
+   - ✅ number-recycling v0.2 — verified 2026-10-14 (second Phase 5 stable/numbered
+     API). The one operation (`checkNumberRecycling`,
+     `POST /number-recycling/v0.2/check`) is implemented
+     (`src/apis/number_recycling/v0_2.rs`), routed, and well-tested. The two control
+     planes match the handler/spec: the identifier reserved-error-suffix plane and,
+     once resolved, the recycling verdict (the identifier's trailing three digits are
+     days-since-the-last-subscriber-change; recycled iff that change is strictly after
+     `specifiedDate`, so `specifiedDate` is a genuine second control plane), plus the
+     `specifiedDate` validation (malformed/impossible → 400 `INVALID_ARGUMENT`; future
+     → 400 `OUT_OF_RANGE`), the genuinely-enforced E.164 pattern, and the
+     two-legged/three-legged identifier resolution. The 200 verdict shape and the 400
+     `invalidArgument`/`outOfRange` and 422 `unnecessaryIdentifier`/`serviceNotApplicable`
+     inline examples already byte-match the handler, and every 401/403/404/409/429/500/503
+     response `$ref`s the shared catalog. **Spec↔code drift found and fixed — the
+     truncated-identifier-message class** (as on call-forwarding-signal /
+     subscription-status / media-streaming-rate / consent-info / most-frequent-location):
+     the 422 `missingIdentifier` example carried the short `message: "The phone number
+     cannot be identified."`, but `resolve_identifier` emits the full "…: supply
+     `phoneNumber` or use a token that identifies a line." Corrected the example and added
+     `vendored_error_example_messages_match_the_handler` pinning the exact
+     `status`/`code`/`message` bytes of all five router-reachable inline error families —
+     400 `invalidArgument`/`outOfRange`, 422 `missingIdentifier` (reachable here, as on
+     call-forwarding-signal: a `client_credentials` token's `sub` is a non-line client
+     id), `unnecessaryIdentifier`, `serviceNotApplicable` — through the real router (the
+     existing tests guarded only `code`). Spec + `#[cfg(test)]` change only — no
+     behaviour/response change (the handler was already correct; only the one example was
+     truncated), no new dependency. Next in phase order: kyc-age-verification v0.1 (the
+     next stateless Phase 5 stable API; the stateful ones — carrier-billing v0.5,
+     blockchain-public-address v0.3 — follow).
 3. **Deepen `vwip` APIs** (🔧) one endpoint/scenario at a time, in mount order,
    only after the earlier phases are verified. **The per-API vwip verification sweep
    is complete (2026-10-13); further deepening needs the deferred stateful /
@@ -1292,6 +1321,36 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-14 — Phase 5 stable/numbered-tier audit (backlog item 2) — number-recycling
+  v0.2 (second Phase 5 stable API), drift found & fixed. Audited the one operation
+  (`checkNumberRecycling`, `POST /number-recycling/v0.2/check`) against
+  `specs/number-recycling/v0.2/openapi.yaml`: the reserved-error-suffix plane, the
+  recycling verdict (trailing-three-digits = days-since-last-subscriber-change, recycled
+  iff strictly after `specifiedDate` — a genuine second control plane), the
+  `specifiedDate` validation (malformed → 400 `INVALID_ARGUMENT`, future → 400
+  `OUT_OF_RANGE`), the genuinely-enforced E.164 pattern, and the two-legged/three-legged
+  identifier resolution all match the handler; the 200 shape + the 400
+  `invalidArgument`/`outOfRange` and 422 `unnecessaryIdentifier`/`serviceNotApplicable`
+  inline examples already byte-match, and every other 4xx/5xx `$ref`s the shared catalog.
+  **Drift found — the truncated-identifier-message class** (call-forwarding-signal /
+  subscription-status / media-streaming-rate / consent-info / most-frequent-location
+  precedent): the 422 `missingIdentifier` example showed the short "The phone number
+  cannot be identified." but `resolve_identifier` emits "…: supply `phoneNumber` or use a
+  token that identifies a line." Corrected it and added
+  `vendored_error_example_messages_match_the_handler` pinning the exact
+  `status`/`code`/`message` bytes of all five router-reachable inline error families (400
+  `invalidArgument`/`outOfRange`; 422 `missingIdentifier` — reachable, a
+  `client_credentials` `sub` is a non-line client id; `unnecessaryIdentifier`;
+  `serviceNotApplicable`) through the real router. `cargo test` 3106 green (+1);
+  `cargo build --release` ok, binary 5,455,000 bytes (5.3M, byte-identical to the
+  call-forwarding-signal pass — the YAML message correction isn't compiled in and the new
+  test is `#[cfg(test)]`-only, outside the release path). Spec + `#[cfg(test)]` change
+  only — no behaviour/response change (the handler was already correct; only the one
+  example was truncated), no new dependency. Next in phase order: kyc-age-verification
+  v0.1 (next stateless Phase 5 stable). Branch `agent/number-recycling/audit-v0_2`.
+  **Integration note:** on entry HEAD was detached at `origin/main` (`67dd79f`,
+  call-forwarding-signal); local `main` ref was stale (`f15d2f9`) and was
+  fast-forwarded to `origin/main` before branching.
 - 2026-10-14 — Phase 5 **stable/numbered**-tier audit (backlog item 2) begins —
   call-forwarding-signal v0.4, drift found & fixed. The Phase 1–4 stable audit and
   the vwip sweep are complete, but the ~18 Phase 5 stable/numbered APIs (inventory)

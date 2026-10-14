@@ -176,7 +176,7 @@ paths:
                   value:
                     status: 422
                     code: MISSING_IDENTIFIER
-                    message: The phone number cannot be identified.
+                    message: "The phone number cannot be identified: supply `phoneNumber` or use a token that identifies a line."
                 unnecessaryIdentifier:
                   summary: The number is already identified by the token
                   value:

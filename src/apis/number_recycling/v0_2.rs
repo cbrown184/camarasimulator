@@ -644,4 +644,78 @@ mod tests {
             Some("corr-err")
         );
     }
+
+    // --- Vendored-spec example fidelity ------------------------------------
+
+    /// The vendored spec's inline error examples must byte-match what the handler
+    /// actually returns (`status`/`code`/`message`). Existing error tests above
+    /// guard only `code`; this pins the full `message` bytes of every
+    /// router-reachable inline error family so they can't silently drift (the
+    /// truncated-`missingIdentifier`-message class this audit pass closed — the
+    /// call-forwarding-signal / subscription-status / media-streaming-rate /
+    /// consent-info / most-frequent-location precedent).
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        let line_token = mint_token_with_client(CHECK_SCOPE, "+123456789012").await;
+
+        // 400 invalidArgument — the `specifiedDate` example message. An impossible
+        // calendar date drives `parse_date` → None → the spec example's text.
+        let (status, _, body) =
+            check_ok(r#"{"phoneNumber":"+123456789012","specifiedDate":"2026-02-30"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            body["message"],
+            "`specifiedDate` must be a valid RFC 3339 full-date (YYYY-MM-DD)."
+        );
+
+        // 400 outOfRange — a reference date in the future.
+        let future = format!(
+            r#"{{"phoneNumber":"+123456789012","specifiedDate":"{}"}}"#,
+            ymd_days_ago(-3)
+        );
+        let (status, _, body) = check_ok(&future).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "OUT_OF_RANGE");
+        assert_eq!(body["message"], "`specifiedDate` must not be in the future.");
+
+        // 422 missingIdentifier — no phoneNumber, non-line (client-credentials)
+        // subject. This is the previously-truncated example.
+        let (status, _, body) = check_ok(r#"{"specifiedDate":"2000-01-01"}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "MISSING_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "The phone number cannot be identified: supply `phoneNumber` or use a token that identifies a line."
+        );
+
+        // 422 unnecessaryIdentifier — phoneNumber submitted on a three-legged line token.
+        let (status, _, body) = post_check(
+            Some(&line_token),
+            r#"{"phoneNumber":"+123456789012","specifiedDate":"2000-01-01"}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "The phone number is already identified by the access token."
+        );
+
+        // 422 serviceNotApplicable — the reserved `…422` suffix (shared catalog).
+        let (status, _, body) =
+            check_ok(r#"{"phoneNumber":"+123456789422","specifiedDate":"2000-01-01"}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "SERVICE_NOT_APPLICABLE");
+        assert_eq!(
+            body["message"],
+            "The service is not available for the provided identifier."
+        );
+    }
 }
