@@ -702,4 +702,84 @@ mod tests {
             Some("corr-err")
         );
     }
+
+    // --- Vendored inline error examples match the handler byte-for-byte -----
+
+    /// Every inline error example in `specs/kyc-age-verification/v0.1/openapi.yaml`
+    /// must match the bytes the handler returns. The other error tests above
+    /// guard only `code`; this pins the exact `status`/`code`/`message` of all
+    /// five router-reachable inline families (the two 400s and the three 422s) so
+    /// a reworded handler message or a re-truncated example can't silently drift
+    /// (the number-recycling / call-forwarding-signal truncated-message precedent).
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        let two_legged = mint_token(VERIFY_SCOPE).await; // non-line subject
+        let line_token = mint_token_with_client(VERIFY_SCOPE, "+123456789012").await;
+
+        // 400 invalidArgument — a malformed phone number.
+        let (status, _, body) =
+            post_verify(Some(&two_legged), r#"{"phoneNumber":"0123","ageThreshold":18}"#, None)
+                .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            body["message"],
+            "`phoneNumber` must be in E.164 format (e.g. +123456789)."
+        );
+
+        // 400 outOfRange — ageThreshold outside 0..=120.
+        let (status, _, body) = post_verify(
+            Some(&two_legged),
+            r#"{"phoneNumber":"+123456789025","ageThreshold":121}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "OUT_OF_RANGE");
+        assert_eq!(body["message"], "`ageThreshold` must be between 0 and 120.");
+
+        // 422 missingIdentifier — no phoneNumber, non-line (client-credentials)
+        // subject. This is the previously-truncated example.
+        let (status, _, body) =
+            post_verify(Some(&two_legged), r#"{"ageThreshold":18}"#, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "MISSING_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "The phone number cannot be identified: supply `phoneNumber` or use a token that identifies a line."
+        );
+
+        // 422 unnecessaryIdentifier — phoneNumber submitted on a three-legged line token.
+        let (status, _, body) = post_verify(
+            Some(&line_token),
+            r#"{"phoneNumber":"+123456789025","ageThreshold":18}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "The phone number is already identified by the access token."
+        );
+
+        // 422 serviceNotApplicable — the reserved `…422` suffix (shared catalog).
+        let (status, _, body) = post_verify(
+            Some(&two_legged),
+            r#"{"phoneNumber":"+123456789422","ageThreshold":18}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "SERVICE_NOT_APPLICABLE");
+        assert_eq!(
+            body["message"],
+            "The service is not available for the provided identifier."
+        );
+    }
 }

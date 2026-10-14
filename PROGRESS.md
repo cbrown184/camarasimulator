@@ -1311,6 +1311,38 @@ Respect phase order. Preferred next work:
      truncated), no new dependency. Next in phase order: kyc-age-verification v0.1 (the
      next stateless Phase 5 stable API; the stateful ones — carrier-billing v0.5,
      blockchain-public-address v0.3 — follow).
+   - ✅ kyc-age-verification v0.1 — verified 2026-10-14 (third Phase 5 stable/numbered
+     API). The one operation (`verifyAge`, `POST /kyc-age-verification/v0.1/verify`) is
+     implemented (`src/apis/kyc_age_verification/v0_1.rs`), routed, and well-tested. The
+     two control planes match the handler/spec: the identifier reserved-error-suffix
+     plane and, once resolved, the age verdict — the identifier's trailing three digits
+     encode the held age as `d % 100`, `ageCheck = "true"` iff that age ≥ the requested
+     `ageThreshold` (so `ageThreshold` is a genuine second control plane), `…000` →
+     `"not_available"` — plus the optional-field planes (`identityMatchScore` fixed 90
+     when any identity attribute is supplied, `verifiedStatus: true` when an `idDocument`
+     is, the opt-in `contentLock`/`parentalControl` minor signals), the genuinely-enforced
+     E.164 pattern + `ageThreshold` 0..=120 range, and the two-legged/three-legged
+     identifier resolution. The four 200 success examples are reproducible scalar shapes
+     already pinned by existing router tests (`withIdentityAndLocks` is internally
+     consistent — a minor at `ageCheck:false` with both locks `"true"`), the 400
+     `invalidArgument`/`outOfRange` and 422 `unnecessaryIdentifier`/`serviceNotApplicable`
+     inline examples already byte-match the handler, and every 401/403/404/409/429/500/503
+     response `$ref`s the shared catalog. **Spec↔code drift found and fixed — the
+     truncated-identifier-message class** (as on number-recycling / call-forwarding-signal /
+     subscription-status / media-streaming-rate / consent-info / most-frequent-location):
+     the 422 `missingIdentifier` example carried the short `message: "The phone number
+     cannot be identified."`, but `resolve_identifier` emits the full "…: supply
+     `phoneNumber` or use a token that identifies a line." Corrected the example and added
+     `vendored_error_example_messages_match_the_handler` pinning the exact
+     `status`/`code`/`message` bytes of all five router-reachable inline error families —
+     400 `invalidArgument`/`outOfRange`, 422 `missingIdentifier` (reachable here, as on
+     call-forwarding-signal / number-recycling: a `client_credentials` token's `sub` is a
+     non-line client id), `unnecessaryIdentifier`, `serviceNotApplicable` — through the
+     real router (the existing tests guarded only `code`). Spec + `#[cfg(test)]` change
+     only — no behaviour/response change (the handler was already correct; only the one
+     example was truncated), no new dependency. Next in phase order: device-swap v1 (the
+     next stateless Phase 5 stable API; the stateful ones — carrier-billing v0.5,
+     blockchain-public-address v0.3 — follow).
 3. **Deepen `vwip` APIs** (🔧) one endpoint/scenario at a time, in mount order,
    only after the earlier phases are verified. **The per-API vwip verification sweep
    is complete (2026-10-13); further deepening needs the deferred stateful /
@@ -1321,6 +1353,38 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-14 — Phase 5 stable/numbered-tier audit (backlog item 2) — kyc-age-verification
+  v0.1 (third Phase 5 stable API), drift found & fixed. Audited the one operation
+  (`verifyAge`, `POST /kyc-age-verification/v0.1/verify`) against
+  `specs/kyc-age-verification/v0.1/openapi.yaml`: the reserved-error-suffix plane, the age
+  verdict (trailing three digits = held age `d % 100`, `ageCheck:"true"` iff ≥
+  `ageThreshold` — a genuine second control plane, `…000` → `"not_available"`), the
+  optional-field planes (`identityMatchScore` fixed 90 on any identity attribute,
+  `verifiedStatus` on `idDocument`, opt-in `contentLock`/`parentalControl` minor signals),
+  the genuinely-enforced E.164 pattern + `ageThreshold` 0..=120 range, and the
+  two-legged/three-legged identifier resolution all match the handler; the four 200
+  success examples are reproducible scalar shapes already pinned, the 400
+  `invalidArgument`/`outOfRange` and 422 `unnecessaryIdentifier`/`serviceNotApplicable`
+  inline examples already byte-match, and every other 4xx/5xx `$ref`s the shared catalog.
+  **Drift found — the truncated-identifier-message class** (number-recycling /
+  call-forwarding-signal / subscription-status / media-streaming-rate / consent-info /
+  most-frequent-location precedent): the 422 `missingIdentifier` example showed the short
+  "The phone number cannot be identified." but `resolve_identifier` emits "…: supply
+  `phoneNumber` or use a token that identifies a line." Corrected it and added
+  `vendored_error_example_messages_match_the_handler` pinning the exact
+  `status`/`code`/`message` bytes of all five router-reachable inline error families (400
+  `invalidArgument`/`outOfRange`; 422 `missingIdentifier` — reachable, a
+  `client_credentials` `sub` is a non-line client id; `unnecessaryIdentifier`;
+  `serviceNotApplicable`) through the real router. `cargo test` 3107 green (+1);
+  `cargo build --release` ok, binary 5,455,000 bytes (5.3M, byte-identical to the
+  number-recycling pass — the YAML message correction fit within the current allocation
+  page and the new test is `#[cfg(test)]`-only, outside the release path). Spec +
+  `#[cfg(test)]` change only — no behaviour/response change (the handler was already
+  correct; only the one example was truncated), no new dependency. Next in phase order:
+  device-swap v1 (next stateless Phase 5 stable). Branch
+  `agent/kyc-age-verification/audit-v0_1`. **Integration note:** on entry HEAD was detached
+  at `origin/main` (`7aadf29`, number-recycling); local `main` ref was stale (`f15d2f9`)
+  and was fast-forwarded to `origin/main` before branching.
 - 2026-10-14 — Phase 5 stable/numbered-tier audit (backlog item 2) — number-recycling
   v0.2 (second Phase 5 stable API), drift found & fixed. Audited the one operation
   (`checkNumberRecycling`, `POST /number-recycling/v0.2/check`) against
