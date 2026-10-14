@@ -1077,6 +1077,53 @@ Respect phase order. Preferred next work:
      device-authenticity / network-health-assessment pinning). `#[cfg(test)]`-only
      change — no behaviour/spec change (the spec was already correct), no new
      dependency. Next in phase order: quality-on-demand v1 (Phase 3).
+   - ✅ quality-on-demand v1 — verified 2026-10-14 (second Phase 3 API, the
+     session-lifecycle + CloudEvents-notifications API): all **five** modelled
+     operations — `createSession` (`POST /sessions`), `getSession`
+     (`GET /sessions/{id}`), `deleteSession` (`DELETE /sessions/{id}`),
+     `extendQosSession` (`POST /sessions/{id}/extend`), and
+     `retrieveSessionsByDevice` (`POST /retrieve-sessions`) — are implemented
+     (`src/apis/quality_on_demand/v1.rs` + an in-memory `store.rs` +
+     `notifications.rs` firing the `qos-status-changed` CloudEvents), routed, and
+     well-tested, and the vendored `specs/quality-on-demand/v1/openapi.yaml` is
+     consistent with the code: the three createSession control planes (identifier
+     reserved-error-suffix → canonical CAMARA error incl. `…409` CONFLICT; the
+     trailing-three-digits grant plane `…000`/no-digits → REQUESTED else AVAILABLE
+     with `…001` → early NETWORK_TERMINATED; `duration` `<1`→INVALID_ARGUMENT,
+     `>86400`→DURATION_OUT_OF_RANGE; a `qosProfile` name containing "unavailable" →
+     QOS_PROFILE_NOT_APPLICABLE), and the extend/delete/retrieve state planes, all
+     match the handler, and **all inline error-example messages across all five
+     operations byte-match** (create 400 `invalidArgument`/`durationOutOfRange`,
+     422 `missingIdentifier`/`qosProfileNotApplicable`; extend 400
+     `invalidArgument`/`durationOutOfRange`). **Spec↔code consistency defect found
+     and fixed — the illustrative-timestamp class** (as on sim-swap's
+     `latestSimChange` / device-identifier's `lastChecked`): the createSession
+     `available` and retrieve-sessions `some` success examples presented
+     `startedAt`/`expiresAt` as frozen literals (`2024-01-01T14:27:08Z` /
+     `…15:27:08Z`), but `build_session_info` stamps `now` / `now + duration`
+     (wall-clock dependent) — those literals can never reproduce; the `sessionId`
+     is likewise minted (counter+clock), the application-profiles posture. Marked
+     all three example families' `sessionId`/`startedAt`/`expiresAt` **illustrative**
+     with a derivation note (keeping the frozen values to show the shape), the
+     reproducible echoed fields staying contract. Added
+     `vendored_success_examples_match_the_handler` (drives createSession
+     available/requested + retrieve-sessions some/none through the router, pins the
+     reproducible fields as exact objects minus the illustrative ones, asserts
+     `expiresAt == startedAt + duration` and that the illustrative values are NOT
+     the frozen literals) and `vendored_error_example_messages_match_the_handler`
+     (pins the exact `status`/`code`/`message` bytes of all six router-reachable
+     inline error families; the 422 `missingIdentifier` example is documented as
+     not router-reachable — its branch needs an empty-`sub` token the token
+     endpoint never issues, the session-insights precedent). **Stale "First slice:
+     POST /sessions + GET /sessions/{id}" parent module doc fixed** (the
+     stale-slice-doc trap caught on device-data-volume / session-insights /
+     dedicated-network-*), plus two stale `store.rs` doc lines ("in later passes —
+     DELETE / extend"; "transitions arrive with DELETE / notifications") though all
+     five legs + notifications ship. Spec + doc + `#[cfg(test)]` change only — no
+     behaviour/response change (the handlers were already correct; the drift was
+     two illustrative-timestamp examples + doc staleness), no new dependency. **This
+     completes the Phase 3 stable tier;** next in phase order is Phase 4 (spatial):
+     location-verification v3.
 3. **Deepen `vwip` APIs** (🔧) one endpoint/scenario at a time, in mount order,
    only after the earlier phases are verified. **The per-API vwip verification sweep
    is complete (2026-10-13); further deepening needs the deferred stateful /
@@ -1087,6 +1134,42 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-14 — Phase 3 stable-API audit (backlog item 2) — quality-on-demand v1
+  (second Phase 3 API; the session-lifecycle + CloudEvents-notifications API),
+  drift found & fixed. Audited all five operations (`createSession`, `getSession`,
+  `deleteSession`, `extendQosSession`, `retrieveSessionsByDevice`) against
+  `specs/quality-on-demand/v1/openapi.yaml`, the in-memory `store.rs`, and
+  `notifications.rs`. All inline error-example messages byte-match the handler
+  (create 400 invalidArgument/durationOutOfRange, 422 qosProfileNotApplicable;
+  extend 400 invalidArgument/durationOutOfRange). **Defect found — the
+  illustrative-timestamp class** (sim-swap `latestSimChange` / device-identifier
+  `lastChecked` precedent): the createSession `available` and retrieve-sessions
+  `some` 200 examples showed `startedAt`/`expiresAt` as frozen literals, but
+  `build_session_info` stamps `now` / `now + duration` (wall-clock dependent) so
+  they can't reproduce; `sessionId` is likewise minted (counter+clock, the
+  application-profiles posture). Marked `sessionId`/`startedAt`/`expiresAt`
+  illustrative on all three success-example families with derivation notes (the
+  reproducible echoed fields stay contract). Added
+  `vendored_success_examples_match_the_handler` (pins the reproducible fields as
+  exact objects through the router + the `expiresAt == startedAt + duration`
+  relation, asserting the illustrative values ≠ the frozen literals) and
+  `vendored_error_example_messages_match_the_handler` (pins the six
+  router-reachable inline error families' exact status/code/message bytes; the 422
+  `missingIdentifier` example is documented not router-reachable — empty-`sub`
+  token the endpoint never issues, the session-insights precedent). Fixed the stale
+  "First slice: POST /sessions + GET /sessions/{id}" parent module doc and two
+  stale `store.rs` "later passes — DELETE / extend / notifications" doc lines
+  though all five legs + notifications ship (the stale-slice-doc trap). `cargo test`
+  3098 green (+2); `cargo build --release` ok, binary 5,450,904 bytes (5.2M,
+  byte-identical to the one-time-password-sms pass — the ~1.5 KB of embedded
+  example descriptions fit within the current allocation page; the new tests are
+  `#[cfg(test)]`-only). Spec + doc + `#[cfg(test)]` change only — no
+  behaviour/response change (the handlers were already correct), no new dependency.
+  **This completes the Phase 3 stable tier;** next in phase order is Phase 4
+  (spatial): location-verification v3. Branch `agent/quality-on-demand/audit-v1`.
+  **Integration note:** on entry HEAD was detached at `origin/main` (`34bd37c`,
+  one-time-password-sms); local `main` ref was stale (`f15d2f9`) and was
+  fast-forwarded to `origin/main` before branching.
 - 2026-10-14 — Phase 3 stable-API audit (backlog item 2) begins —
   one-time-password-sms v1 (first Phase 3 API, CamaraSim's first stateful API),
   verified clean. With the Phase 2 tier complete, moved the per-API spec↔code

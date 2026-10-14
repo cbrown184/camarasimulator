@@ -1943,4 +1943,171 @@ mod tests {
             Some("corr-get")
         );
     }
+
+    // --- Vendored-example pins (spec ↔ handler) ----------------------------
+
+    /// Drive the `openapi.yaml` success examples through the real router and pin
+    /// their **reproducible** fields, so the spec can't drift from the handler.
+    /// The illustrative fields (`sessionId`, and for an `AVAILABLE` session
+    /// `startedAt`/`expiresAt` — all minted / wall-clock-derived, documented as
+    /// such on each example) are asserted present and well-shaped but deliberately
+    /// not pinned to the frozen literals the spec shows for illustration.
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        let token = mint_token(CREATE_SCOPE).await;
+
+        // createSession `available` example: device …012 → AVAILABLE, times set.
+        let (status, _, body) =
+            post_sessions(Some(&token), &create_body("+123456789012", "QOS_L", 3600), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let sid = body["sessionId"].as_str().unwrap();
+        assert_eq!(sid.split('-').count(), 5);
+        assert_ne!(sid, "11111111-1111-4111-8111-111111111111");
+        let started = body["startedAt"].as_str().unwrap();
+        let expires = body["expiresAt"].as_str().unwrap();
+        assert!(started.ends_with('Z') && expires.ends_with('Z'));
+        assert_ne!(started, "2024-01-01T14:27:08Z");
+        // The one timestamp relationship that IS contract: expiresAt = startedAt + duration.
+        assert_eq!(
+            parse_rfc3339_utc(expires),
+            parse_rfc3339_utc(started).map(|s| s + 3600)
+        );
+        // The remaining fields are reproducible; pin them as an exact object.
+        let mut reproducible = body.as_object().unwrap().clone();
+        for k in ["sessionId", "startedAt", "expiresAt"] {
+            reproducible.remove(k);
+        }
+        assert_eq!(
+            Value::Object(reproducible),
+            json!({
+                "device": { "phoneNumber": "+123456789012" },
+                "applicationServer": { "ipv4Address": "203.0.113.0/24" },
+                "qosProfile": "QOS_L",
+                "duration": 3600,
+                "qosStatus": "AVAILABLE",
+            })
+        );
+
+        // createSession `requested` example: device …000 → REQUESTED, no times.
+        let (status, _, body) =
+            post_sessions(Some(&token), &create_body("+123456789000", "QOS_L", 60), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(body.get("startedAt").is_none() && body.get("expiresAt").is_none());
+        let mut reproducible = body.as_object().unwrap().clone();
+        reproducible.remove("sessionId");
+        assert_eq!(
+            Value::Object(reproducible),
+            json!({
+                "device": { "phoneNumber": "+123456789000" },
+                "applicationServer": { "ipv4Address": "203.0.113.0/24" },
+                "qosProfile": "QOS_L",
+                "duration": 60,
+                "qosStatus": "REQUESTED",
+            })
+        );
+
+        // retrieve-sessions `some`/`none` examples. A device unique to this test so
+        // the process-global store returns exactly its one session (…012 tail →
+        // AVAILABLE, the documented `some` body shape).
+        let phone = "+198765430012";
+        let (status, _, created) =
+            post_sessions(Some(&token), &create_body(phone, "QOS_L", 3600), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let retrieve = mint_token(RETRIEVE_SCOPE).await;
+        let (status, _, list) =
+            retrieve_sessions_req(Some(&retrieve), &retrieve_body(phone), None).await;
+        assert_eq!(status, StatusCode::OK);
+        // `some`: exactly one element, the stored SessionInfo returned verbatim.
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert_eq!(list[0], created);
+        // `none`: a device with no sessions → `200 []`.
+        let (status, _, empty) =
+            retrieve_sessions_req(Some(&retrieve), &retrieve_body("+198765439999"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(empty, json!([]));
+    }
+
+    /// Pin the exact `status`/`code`/`message` bytes of every router-reachable
+    /// inline error example in `openapi.yaml`, so a reworded handler message can't
+    /// silently drift from the spec. The createSession 422 `missingIdentifier`
+    /// example is intentionally not pinned: its branch needs an empty-`sub` token,
+    /// which the token endpoint never issues (so it is not router-reachable).
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        let create = mint_token(CREATE_SCOPE).await;
+
+        // createSession 400 invalidArgument — omit `qosProfile`.
+        let b = json!({
+            "device": { "phoneNumber": "+123456789012" },
+            "applicationServer": { "ipv4Address": "203.0.113.0/24" },
+            "duration": 60,
+        })
+        .to_string();
+        let (status, _, body) = post_sessions(Some(&create), &b, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"].as_i64(), Some(400));
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["message"], "`qosProfile` is required.");
+
+        // createSession 400 durationOutOfRange.
+        let (status, _, body) = post_sessions(
+            Some(&create),
+            &create_body("+123456789012", "QOS_L", MAX_DURATION_SECS + 1),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"].as_i64(), Some(400));
+        assert_eq!(body["code"], "QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE");
+        assert_eq!(
+            body["message"],
+            "The requested duration is out of the allowed range for the QoS profile."
+        );
+
+        // createSession 422 qosProfileNotApplicable — profile name contains "unavailable".
+        let (status, _, body) = post_sessions(
+            Some(&create),
+            &create_body("+123456789012", "QOS_UNAVAILABLE", 60),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"].as_i64(), Some(422));
+        assert_eq!(body["code"], "QUALITY_ON_DEMAND.QOS_PROFILE_NOT_APPLICABLE");
+        assert_eq!(
+            body["message"],
+            "The requested QoS profile is not applicable for this session."
+        );
+
+        // extendQosSession 400 invalidArgument — missing `requestedAdditionalDuration`
+        // (the required-field check precedes the store lookup, so any id reaches it).
+        let update = mint_token(UPDATE_SCOPE).await;
+        let (status, _, body) = extend_session_req(
+            Some(&update),
+            "11111111-1111-4111-8111-111111111111",
+            "{}",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"].as_i64(), Some(400));
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["message"], "`requestedAdditionalDuration` is required.");
+
+        // extendQosSession 400 durationOutOfRange (shares the create message).
+        let (status, _, body) = extend_session_req(
+            Some(&update),
+            "11111111-1111-4111-8111-111111111111",
+            &extend_body(MAX_DURATION_SECS + 1),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"].as_i64(), Some(400));
+        assert_eq!(body["code"], "QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE");
+        assert_eq!(
+            body["message"],
+            "The requested duration is out of the allowed range for the QoS profile."
+        );
+    }
 }

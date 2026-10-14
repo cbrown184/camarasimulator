@@ -9,7 +9,11 @@
 //!
 //! One submodule per major version (docs/DESIGN.md §5, §9). So far:
 //! - [`v1`] — mounted at `/quality-on-demand/v1` (CAMARA quality-on-demand
-//!   1.1.0, release r3.2). First slice: `POST /sessions` + `GET /sessions/{id}`.
+//!   1.1.0, release r3.2). The full session lifecycle: `POST /sessions`
+//!   (create), `GET /sessions/{id}` (read), `DELETE /sessions/{id}` (delete),
+//!   `POST /sessions/{id}/extend` (extend duration), and
+//!   `POST /retrieve-sessions` (list a device's sessions), plus `sink`-driven
+//!   `qos-status-changed` CloudEvents notifications (see [`v1::notifications`]).
 
 pub mod notifications;
 pub mod store;

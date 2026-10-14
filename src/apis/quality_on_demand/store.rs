@@ -3,8 +3,9 @@
 //!
 //! Quality on Demand is a **stateful, resource-oriented** API: `POST /sessions`
 //! creates a QoS session and mints a `sessionId`, and later requests
-//! (`GET /sessions/{sessionId}`, and — in later passes — `DELETE` / `extend`)
-//! address that resource by its id. This module is the state that bridges those
+//! (`GET /sessions/{sessionId}`, `DELETE /sessions/{sessionId}`,
+//! `POST /sessions/{sessionId}/extend`, and `POST /retrieve-sessions`) address
+//! that resource by its id. This module is the state that bridges those
 //! requests.
 //!
 //! ## Simulator constraints
@@ -17,9 +18,10 @@
 //!   `SessionInfo.sessionId` is `format: uuid`) from a monotonic counter and the
 //!   clock, so ids are unique without a `uuid`/`rand` dependency.
 //! - The stored value is the session's rendered `SessionInfo` JSON, returned
-//!   verbatim by `GET` — the created representation is the source of truth for
-//!   this slice (time-based `qosStatus` transitions arrive with DELETE /
-//!   notifications).
+//!   verbatim by `GET` and `retrieve-sessions`. `extend` mutates it in place
+//!   (via [`update`]); `delete` evicts it (via [`remove`]); and the timer-driven
+//!   `DURATION_EXPIRED` / `NETWORK_TERMINATED` transitions evict it and fire a
+//!   `qos-status-changed` CloudEvent to the session's `sink`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

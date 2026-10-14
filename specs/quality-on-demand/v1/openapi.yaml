@@ -125,6 +125,17 @@ paths:
               examples:
                 available:
                   summary: Session granted (AVAILABLE)
+                  description: >-
+                    `sessionId`, `startedAt`, and `expiresAt` are **illustrative**:
+                    `sessionId` is a fresh opaque UUID minted per request (a
+                    monotonic counter + the clock, not derived from the input), and
+                    `startedAt`/`expiresAt` are `now` / `now + duration`
+                    (wall-clock dependent), so the concrete values shown will not
+                    reproduce — only their *presence* (and `expiresAt` = `startedAt`
+                    + `duration`) is part of the contract. The echoed `device`,
+                    `applicationServer`, `qosProfile`, `duration`, and `qosStatus`
+                    are reproducible. The frozen timestamps below are the module's
+                    RFC-3339 reference epoch, kept only to show the response shape.
                   value:
                     sessionId: "11111111-1111-4111-8111-111111111111"
                     device:
@@ -138,6 +149,11 @@ paths:
                     expiresAt: "2024-01-01T15:27:08Z"
                 requested:
                   summary: Session pending (REQUESTED — identifier ends in …000)
+                  description: >-
+                    `sessionId` is **illustrative** (a fresh opaque UUID minted per
+                    request, not derived from the input). A REQUESTED session
+                    carries no `startedAt`/`expiresAt` yet; everything else echoes
+                    the request.
                   value:
                     sessionId: "22222222-2222-4222-8222-222222222222"
                     device:
@@ -537,6 +553,13 @@ paths:
               examples:
                 some:
                   summary: One active session for the device
+                  description: >-
+                    Each element is a stored `SessionInfo`, so the same fields are
+                    **illustrative** as on `createSession` (`sessionId` a fresh
+                    opaque UUID; `startedAt`/`expiresAt` = `now` / `now + duration`,
+                    wall-clock dependent) — the frozen values below show the shape
+                    only; the echoed `device`/`applicationServer`/`qosProfile`/
+                    `duration`/`qosStatus` are reproducible.
                   value:
                     - sessionId: "11111111-1111-4111-8111-111111111111"
                       device:
