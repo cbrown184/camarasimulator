@@ -1021,6 +1021,35 @@ Respect phase order. Preferred next work:
      `#[cfg(test)]`-only change — no behaviour/spec change (the spec was already
      correct), no new dependency. Next in phase order: device-identifier v0.3
      (Phase 2).
+   - ✅ device-identifier v0.3 — verified 2026-10-14 (third and last Phase 2 API):
+     all three operations (`retrieveType`, `retrieveIdentifier`, `retrievePPID`,
+     `POST /device-identifier/v0.3/retrieve-{type,identifier,ppid}`) are
+     implemented (`src/apis/device_identifier/v0_3.rs`), routed, and well-tested.
+     The two shared control planes (the identifier reserved-error-suffix plane; the
+     trailing-three-digits `DEVICE_TYPES[digits % 6]` device-type plane with the
+     IMEI/IMEISV synthesised from the selected TAC + zero-padded serial + Luhn
+     check digit, and the PPID = SHA-256(identifier) UUID-shaped) and the
+     two-legged/three-legged identifier resolution all match the handler; every
+     4xx/5xx `$ref`s the shared catalog (no inline error examples to drift).
+     **Spec↔code drift found and fixed — the deterministic-value / placeholder
+     class** (as on verified-caller / click-to-dial / network-access-domains): the
+     `retrieve-ppid` 200 `ppid` example was bound to `phoneNumber "+123456789001"`
+     but carried a placeholder `ppid: "b1d5781d-1141-df9d-6d76-2f8e70edb19c"`,
+     whereas `ppid_from` returns SHA-256("+123456789001") rendered UUID-shaped =
+     `5dacd245-aaf6-fa2e-ce77-e48eaabc4064`; corrected it and bound the example to
+     its derivation. Also marked all three examples' frozen `lastChecked`
+     **illustrative** (the handler stamps the current time, the sim-swap
+     `latestSimChange` convention) with a derivation note on each. Added
+     `vendored_success_examples_match_the_handler` driving all three documented
+     requests through the real router and pinning each body as an exact object
+     (minus the illustrative `lastChecked`, asserted present/UTC but ≠ the frozen
+     literal), with the ppid pinned both as the literal and against `ppid_from`.
+     The `type`/`identifier` example values (TAC 35847104 / OnePlus 12, imei
+     `358471040000011`, imeisv `3584710400000100`) were already byte-accurate.
+     Spec + `#[cfg(test)]` change only — no behaviour/response change (the handler
+     was already correct; only the one example value was a placeholder), no new
+     dependency. **This completes the Phase 2 stable tier;** next in phase order is
+     Phase 3 (one-time-password-sms v1 / quality-on-demand v1).
 3. **Deepen `vwip` APIs** (🔧) one endpoint/scenario at a time, in mount order,
    only after the earlier phases are verified. **The per-API vwip verification sweep
    is complete (2026-10-13); further deepening needs the deferred stateful /
@@ -1031,6 +1060,42 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-14 — Phase 2 stable-API audit (backlog item 2) — device-identifier v0.3
+  (third and last Phase 2 API) — drift found & fixed. Continued the per-API
+  spec↔code audit in phase order. Audited all three operations (`retrieveType`,
+  `retrieveIdentifier`, `retrievePPID`) against
+  `specs/device-identifier/v0.3/openapi.yaml`: the identifier reserved-error-suffix
+  plane, the trailing-three-digits `DEVICE_TYPES[digits % 6]` type plane (…000 / no
+  digits → the default Apple entry), the synthesised IMEI (TAC + zero-padded serial
+  + Luhn check digit, verified by hand: 35847104000001 → check digit 1) / IMEISV
+  (+ "00" SVN), the PPID = SHA-256(identifier) UUID-shaped, and the
+  two-legged/three-legged identifier resolution all match the handler; every error
+  `$ref`s the shared catalog (no inline error examples). **Drift found — the
+  deterministic-value / placeholder class** (verified-caller / click-to-dial /
+  network-access-domains precedent): the `retrieve-ppid` 200 `ppid` example, bound
+  to `phoneNumber "+123456789001"`, carried a placeholder
+  `b1d5781d-1141-df9d-6d76-2f8e70edb19c`, but `ppid_from("+123456789001")` =
+  `5dacd245-aaf6-fa2e-ce77-e48eaabc4064` (verified: `sha256sum` of the identifier,
+  first 16 bytes). Corrected it and bound the example to its derivation. Also marked
+  all three examples' frozen `lastChecked` **illustrative** (the handler stamps the
+  current time — the sim-swap `latestSimChange` convention) with a derivation note
+  on each. Added `vendored_success_examples_match_the_handler` driving all three
+  documented requests through the real router and pinning each body as an exact
+  object (minus the illustrative `lastChecked`, asserted present/UTC but ≠ the
+  frozen literal); the ppid is pinned both as the corrected literal and against
+  `ppid_from`. The `type`/`identifier` example values were already byte-accurate.
+  `cargo test` 3095 green (+1); `cargo build --release` ok, binary 5,450,904 bytes
+  (5.2M, up one 4,096-byte page from the device-roaming-status pass's 5,446,808 —
+  the embedded vendored spec grew with the corrected ppid value + the three
+  illustrative example notes; the new test is `#[cfg(test)]`-only, outside the
+  release path). Spec + `#[cfg(test)]` change only — no behaviour/response change
+  (the handler was already correct; only the one example value was a placeholder),
+  no new dependency. **This completes the Phase 2 stable tier;** next in phase order
+  is Phase 3 (one-time-password-sms v1). Branch
+  `agent/device-identifier/pin-success-examples`. **Integration note:** on entry
+  HEAD was detached at `origin/main` (`0066dd8`, device-roaming-status); local
+  `main` ref was stale (`f15d2f9`) and was fast-forwarded to `origin/main` before
+  branching.
 - 2026-10-14 — Phase 2 stable-API audit (backlog item 2) — device-roaming-status
   v1 (second Phase 2 API), verified clean. Continued the per-API spec↔code audit in
   phase order. Audited the one operation (`getRoamingStatus`,

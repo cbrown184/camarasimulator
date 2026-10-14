@@ -1241,4 +1241,76 @@ mod tests {
             Some("corr-ppid")
         );
     }
+
+    // --- Vendored spec examples --------------------------------------------
+
+    /// Pins each operation's vendored 200 success example — all bound to
+    /// `phoneNumber "+123456789001"` — against the real router, so the documented
+    /// bodies can't silently drift from the handler (the same whole-object pin the
+    /// device-reachability-status / device-roaming-status passes added). The
+    /// `ppid` example previously carried a placeholder that did not match
+    /// `ppid_from`; this test pins the real derived value (and the derivation
+    /// itself) so it can't regress. `lastChecked` is illustrative (the handler
+    /// stamps the current time), so it is asserted present and UTC but *not* equal
+    /// to the frozen literal the examples show; every other field is pinned exactly.
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        const FROZEN: &str = "2024-01-01T14:27:08Z";
+        let req = r#"{"device":{"phoneNumber":"+123456789001"}}"#;
+
+        // retrieve-type `type` example (tail 001 → DEVICE_TYPES[1] = OnePlus 12).
+        let (status, _, mut body) = retrieve_type_ok(req).await;
+        assert_eq!(status, StatusCode::OK);
+        let last = body["lastChecked"].as_str().unwrap().to_string();
+        assert!(
+            last.ends_with('Z') && last != FROZEN,
+            "lastChecked is the current time, not the frozen example literal"
+        );
+        body.as_object_mut().unwrap().remove("lastChecked");
+        assert_eq!(
+            body,
+            json!({
+                "tac": "35847104",
+                "manufacturer": "OnePlus",
+                "model": "OnePlus 12",
+                "device": { "phoneNumber": "+123456789001" }
+            })
+        );
+
+        // retrieve-identifier `identifier` example (imei/imeisv synthesised from
+        // TAC 35847104 + serial 000001).
+        let (status, _, mut body) = retrieve_identifier_ok(req).await;
+        assert_eq!(status, StatusCode::OK);
+        let last = body["lastChecked"].as_str().unwrap().to_string();
+        assert!(last.ends_with('Z') && last != FROZEN);
+        body.as_object_mut().unwrap().remove("lastChecked");
+        assert_eq!(
+            body,
+            json!({
+                "imei": "358471040000011",
+                "imeisv": "3584710400000100",
+                "tac": "35847104",
+                "manufacturer": "OnePlus",
+                "model": "OnePlus 12",
+                "device": { "phoneNumber": "+123456789001" }
+            })
+        );
+
+        // retrieve-ppid `ppid` example — SHA-256("+123456789001") UUID-shaped.
+        let (status, _, mut body) = retrieve_ppid_ok(req).await;
+        assert_eq!(status, StatusCode::OK);
+        let last = body["lastChecked"].as_str().unwrap().to_string();
+        assert!(last.ends_with('Z') && last != FROZEN);
+        // Pin both the documented literal and its derivation so neither can drift.
+        assert_eq!(body["ppid"], "5dacd245-aaf6-fa2e-ce77-e48eaabc4064");
+        assert_eq!(body["ppid"], ppid_from("+123456789001"));
+        body.as_object_mut().unwrap().remove("lastChecked");
+        assert_eq!(
+            body,
+            json!({
+                "ppid": "5dacd245-aaf6-fa2e-ce77-e48eaabc4064",
+                "device": { "phoneNumber": "+123456789001" }
+            })
+        );
+    }
 }

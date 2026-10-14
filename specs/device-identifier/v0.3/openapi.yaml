@@ -106,6 +106,12 @@ paths:
               examples:
                 type:
                   summary: Device type for a non-error identifier
+                  description: >-
+                    Bound to `phoneNumber "+123456789001"` (tail `001` →
+                    `DEVICE_TYPES[1]` = OnePlus 12, TAC 35847104). `lastChecked`
+                    is **illustrative** — the handler returns the current time, so
+                    the frozen value shown is wall-clock dependent and will not
+                    reproduce; only its presence is part of the contract.
                   value:
                     lastChecked: "2024-01-01T14:27:08Z"
                     tac: "35847104"
@@ -197,6 +203,15 @@ paths:
               examples:
                 identifier:
                   summary: Device identity for a non-error identifier
+                  description: >-
+                    Bound to `phoneNumber "+123456789001"` (tail `001` →
+                    `DEVICE_TYPES[1]` = OnePlus 12, TAC 35847104, serial 000001):
+                    `imei` = TAC + serial + Luhn check digit = `358471040000011`,
+                    `imeisv` = TAC + serial + "00" = `3584710400000100`.
+                    `lastChecked` is **illustrative** — the handler returns the
+                    current time, so the frozen value shown is wall-clock
+                    dependent and will not reproduce; only its presence is part of
+                    the contract.
                   value:
                     lastChecked: "2024-01-01T14:27:08Z"
                     imei: "358471040000011"
@@ -292,9 +307,18 @@ paths:
               examples:
                 ppid:
                   summary: PPID for a non-error identifier
+                  description: >-
+                    Bound to `phoneNumber "+123456789001"`: the handler derives
+                    the `ppid` as the SHA-256 of that identifier rendered as a
+                    UUID-shaped token, so `+123456789001` →
+                    `5dacd245-aaf6-fa2e-ce77-e48eaabc4064` (the first 16 bytes of
+                    the digest). `lastChecked` is **illustrative** — the handler
+                    returns the current time, so the frozen value shown is
+                    wall-clock dependent and will not reproduce; only its presence
+                    is part of the contract.
                   value:
                     lastChecked: "2024-01-01T14:27:08Z"
-                    ppid: "b1d5781d-1141-df9d-6d76-2f8e70edb19c"
+                    ppid: "5dacd245-aaf6-fa2e-ce77-e48eaabc4064"
                     device:
                       phoneNumber: "+123456789001"
         "400":
