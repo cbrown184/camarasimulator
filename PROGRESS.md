@@ -971,6 +971,29 @@ Respect phase order. Preferred next work:
      only — no behaviour/response change (the handler was already correct; the enum
      was an unenforced schema claim), no new dependency. Next in phase order:
      device-reachability-status v1 (Phase 2).
+   - ✅ device-reachability-status v1 — verified 2026-10-14 (first Phase 2 API):
+     the one operation (`getReachabilityStatus`,
+     `POST /device-reachability-status/v1/retrieve`) is implemented
+     (`src/apis/device_reachability_status/v1.rs`), routed, and well-tested. The two
+     control planes (the identifier reserved-error-suffix plane; the
+     trailing-three-digits reachability plane — `…000` → not reachable, odd → SMS
+     only, else data+SMS) match the handler, the `phoneNumber` E.164 pattern is
+     genuinely enforced (`is_valid_e164` == the spec's `^\+[1-9][0-9]{4,14}$`, so no
+     unenforced-constraint divergence like kyc-match's gender enum), and the
+     request/response schemas match the Rust types. **No spec↔code drift found** —
+     the three 200 success examples (`reachableDataSms`/`reachableSmsOnly`/
+     `notReachable`) are reproducible scalar shapes that match the handler, every
+     4xx/5xx `$ref`s the shared catalog (no inline error examples to drift), and the
+     documented reserved-suffix set (400/401/403/404/409/422/429/500/503, 409/500
+     noted as CamaraSim extensions) equals `scenarios::RESERVED_ERROR_SUFFIXES`
+     exactly. **Small tested increment:** the existing router tests asserted the 200
+     examples only field-by-field (`reachable`/`connectivity` separately), so a
+     stray/renamed field could slip past; added
+     `vendored_success_examples_match_the_handler` pinning all three documented
+     example bodies as **exact objects** through the real router (the same
+     whole-object pin kyc-match added). `#[cfg(test)]`-only change — no
+     behaviour/spec change (the spec was already correct), no new dependency. Next in
+     phase order: device-roaming-status v1 (Phase 2).
 3. **Deepen `vwip` APIs** (🔧) one endpoint/scenario at a time, in mount order,
    only after the earlier phases are verified. **The per-API vwip verification sweep
    is complete (2026-10-13); further deepening needs the deferred stateful /
@@ -981,6 +1004,30 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-14 — Phase 2 stable-API audit (backlog item 2) begins —
+  device-reachability-status v1, verified clean. With Phase 1 complete, moved the
+  per-API spec↔code audit into Phase 2 (stateless device queries) in phase order.
+  Audited the one operation (`getReachabilityStatus`,
+  `POST /device-reachability-status/v1/retrieve`) against
+  `specs/device-reachability-status/v1/openapi.yaml`: the identifier
+  reserved-error-suffix plane, the trailing-three-digits reachability plane (`…000`
+  → not reachable / odd → SMS only / else data+SMS), the genuinely-enforced
+  `phoneNumber` E.164 pattern, the request/response schemas, the reserved-suffix set
+  (= `scenarios::RESERVED_ERROR_SUFFIXES`, 409/500 noted as extensions), and the
+  module docs all match the handler. **No drift found** — the three 200 examples are
+  reproducible scalar shapes and every error `$ref`s the shared catalog (no inline
+  examples to drift), the number-verification posture, **not** a documented-divergence
+  like sim-swap's illustrative timestamp or kyc-match's unenforced gender enum.
+  **Small tested increment:** existing router tests pinned the 200 examples only
+  field-by-field, so added `vendored_success_examples_match_the_handler` pinning all
+  three documented example bodies (`reachableDataSms`/`reachableSmsOnly`/
+  `notReachable`) as exact objects through the real router (the kyc-match whole-object
+  pin). `cargo test` 3093 green (+1); `cargo build --release` ok, binary 5,446,808
+  bytes (5.2M, byte-identical to the kyc-match pass — `#[cfg(test)]`-only change,
+  outside the release path). Next in phase order: device-roaming-status v1. Branch
+  `agent/device-reachability-status/pin-success-examples`. **Integration note:** on
+  entry HEAD was detached at `origin/main` (`5d76bf0`, kyc-match); local `main` ref
+  was stale (`f15d2f9`) and was updated to `origin/main` before branching.
 - 2026-10-14 — Phase 1 stable-API audit (backlog item 2) — kyc-match v0.3
   (third and last Phase 1 API). Audited the one operation (`matchCustomer`,
   `POST /kyc-match/v0.3/match`) against `specs/kyc-match/v0.3/openapi.yaml`:

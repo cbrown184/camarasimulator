@@ -432,6 +432,36 @@ mod tests {
         assert_eq!(body["connectivity"], json!([]));
     }
 
+    /// Pin the three vendored `200` success examples
+    /// (`specs/device-reachability-status/v1/openapi.yaml` — `reachableDataSms`,
+    /// `reachableSmsOnly`, `notReachable`) as **exact** response bodies through the
+    /// real router, so they can't silently drift from the handler. The examples
+    /// document output *shapes* for the even-tail / odd-tail / `…000`-tail input
+    /// classes; here one representative input of each class is driven and the whole
+    /// body asserted equal to the documented example object (the other success
+    /// tests assert `reachable`/`connectivity` field-by-field, not the exact
+    /// object, so a stray/renamed field would slip past them).
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        // `reachableDataSms` — reachable over data and SMS (even tail).
+        let (status, _, body) =
+            retrieve_ok_token(r#"{"device":{"phoneNumber":"+123456789012"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "reachable": true, "connectivity": ["DATA", "SMS"] }));
+
+        // `reachableSmsOnly` — reachable over SMS only (odd tail).
+        let (status, _, body) =
+            retrieve_ok_token(r#"{"device":{"phoneNumber":"+123456789011"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "reachable": true, "connectivity": ["SMS"] }));
+
+        // `notReachable` — not reachable (`…000` tail), empty `connectivity`.
+        let (status, _, body) =
+            retrieve_ok_token(r#"{"device":{"phoneNumber":"+123456789000"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "reachable": false, "connectivity": [] }));
+    }
+
     #[tokio::test]
     async fn reserved_suffix_selects_a_canonical_camara_error() {
         let (status, _, body) =
