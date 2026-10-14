@@ -1050,6 +1050,33 @@ Respect phase order. Preferred next work:
      was already correct; only the one example value was a placeholder), no new
      dependency. **This completes the Phase 2 stable tier;** next in phase order is
      Phase 3 (one-time-password-sms v1 / quality-on-demand v1).
+   - ✅ one-time-password-sms v1 — verified 2026-10-14 (first Phase 3 API,
+     CamaraSim's first **stateful** API): both operations (`sendCode`
+     `POST /one-time-password-sms/v1/send-code`, `validateCode`
+     `POST /one-time-password-sms/v1/validate-code`) are implemented
+     (`src/apis/one_time_password_sms/v1.rs` + an in-memory `store.rs`), routed,
+     and well-tested. The two control planes match the handler/spec: `send-code`
+     is keyed on the `phoneNumber` (trailing-three-digit reserved-error-suffix
+     plane → canonical CAMARA error; else issue an OTP whose code is the
+     zero-padded last six digits and return the `authenticationId`), with the
+     E.164 pattern and the `message` maxLength-160 + `{{code}}` placeholder
+     genuinely enforced; `validate-code` is keyed on the live store state
+     (matching code → 204 single-use consume; wrong code → `INVALID_OTP` until
+     the 3-attempt budget exhausts → `VERIFICATION_FAILED`; unknown/consumed/
+     expired id → `VERIFICATION_EXPIRED`, all HTTP 400). **No spec↔code drift
+     found** — all four inline `validate-code` 400 example messages
+     (`invalidArgument`/`invalidOtp`/`verificationFailed`/`verificationExpired`)
+     already byte-match the handler, and `send-code`'s 200 `authenticationId`
+     example is a counter/clock-derived opaque token, so it stays legitimately
+     illustrative (the application-profiles posture) — not the deterministic-value
+     drift class. **Small tested increment:** the existing router tests guarded
+     those four 400 examples only by `code`, so a reworded `message` could
+     silently drift from the spec; added
+     `vendored_error_example_messages_match_the_handler` pinning the exact
+     `status`/`code`/`message` bytes of all four through the real router (the
+     device-authenticity / network-health-assessment pinning). `#[cfg(test)]`-only
+     change — no behaviour/spec change (the spec was already correct), no new
+     dependency. Next in phase order: quality-on-demand v1 (Phase 3).
 3. **Deepen `vwip` APIs** (🔧) one endpoint/scenario at a time, in mount order,
    only after the earlier phases are verified. **The per-API vwip verification sweep
    is complete (2026-10-13); further deepening needs the deferred stateful /
@@ -1060,6 +1087,37 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-14 — Phase 3 stable-API audit (backlog item 2) begins —
+  one-time-password-sms v1 (first Phase 3 API, CamaraSim's first stateful API),
+  verified clean. With the Phase 2 tier complete, moved the per-API spec↔code
+  audit into Phase 3 (stateful, non-spatial) in phase order. Audited both
+  operations (`sendCode` `POST /one-time-password-sms/v1/send-code`, `validateCode`
+  `POST /one-time-password-sms/v1/validate-code`) against
+  `specs/one-time-password-sms/v1/openapi.yaml` and the in-memory `store.rs`: the
+  `send-code` phoneNumber control plane (reserved-error-suffix → canonical CAMARA
+  error; else an OTP whose code is the zero-padded last six digits, returning the
+  `authenticationId`), the genuinely-enforced E.164 pattern + `message`
+  maxLength-160/`{{code}}`-placeholder validation, and the `validate-code` live-state
+  plane (match → 204 single-use; wrong code → `INVALID_OTP` until the 3-attempt
+  budget → `VERIFICATION_FAILED`; unknown/consumed/expired id → `VERIFICATION_EXPIRED`,
+  all HTTP 400) all match the handler. **No drift found** — all four inline
+  `validate-code` 400 example messages already byte-match the handler, and
+  `send-code`'s 200 `authenticationId` example is a counter/clock-derived opaque
+  token (base64url of SHA-256(counter‖now)), so it stays legitimately illustrative
+  (the application-profiles posture), not the deterministic-value drift class.
+  **Small tested increment:** existing router tests guarded those four 400 examples
+  only by `code`, so added `vendored_error_example_messages_match_the_handler`
+  pinning the exact `status`/`code`/`message` bytes of all four
+  (`invalidArgument`/`invalidOtp`/`verificationFailed`/`verificationExpired`)
+  through the real router (the device-authenticity / network-health-assessment
+  message-pin). `cargo test` 3096 green (+1); `cargo build --release` ok, binary
+  5,450,904 bytes (5.2M, byte-identical to the device-identifier pass — the new
+  test is `#[cfg(test)]`-only, outside the release path). Next in phase order:
+  quality-on-demand v1 (Phase 3). Branch
+  `agent/one-time-password-sms/pin-error-examples`. **Integration note:** on entry
+  HEAD was detached at `origin/main` (`0dc8fa4`, device-identifier); local `main`
+  ref was stale (`f15d2f9`) and was fast-forwarded to `origin/main` before
+  branching.
 - 2026-10-14 — Phase 2 stable-API audit (backlog item 2) — device-identifier v0.3
   (third and last Phase 2 API) — drift found & fixed. Continued the per-API
   spec↔code audit in phase order. Audited all three operations (`retrieveType`,

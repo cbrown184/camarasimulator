@@ -488,6 +488,67 @@ mod tests {
         assert_eq!(json["code"], "UNAUTHENTICATED");
     }
 
+    /// Pin the exact `status`/`code`/`message` bytes of the four inline `400`
+    /// examples the vendored `validate-code` spec declares, driving each
+    /// documented failure mode through the real router. The existing tests
+    /// guarded only `code` (and `send-code`'s 200 `authenticationId` is a
+    /// counter/clock-derived opaque token, so it stays legitimately
+    /// illustrative and is not pinned here), so a reworded handler `message`
+    /// could silently drift from the spec example; this closes that gap (the
+    /// device-authenticity / network-health-assessment pinning).
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        let token = mint_token(SCOPE).await;
+
+        // `invalidArgument` example — a malformed body (here, missing
+        // `authenticationId`) → INVALID_ARGUMENT.
+        let body = json!({ "code": "123456" }).to_string();
+        let (status, _, json) = post_json(VALIDATE, Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["status"].as_u64(), Some(400));
+        assert_eq!(json["code"], "INVALID_ARGUMENT");
+        assert_eq!(json["message"], "`authenticationId` is required.");
+
+        // `verificationExpired` example — an unknown authenticationId.
+        let body = json!({ "authenticationId": "no-such-id", "code": "123456" }).to_string();
+        let (status, _, json) = post_json(VALIDATE, Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["status"].as_u64(), Some(400));
+        assert_eq!(json["code"], "ONE_TIME_PASSWORD_SMS.VERIFICATION_EXPIRED");
+        assert_eq!(json["message"], "The authenticationId is unknown or has expired.");
+
+        // `invalidOtp` example — a wrong code while attempts remain.
+        let phone = "+123456789012";
+        let id = send_ok(phone).await;
+        let body = json!({ "authenticationId": id, "code": "000000" }).to_string();
+        let (status, _, json) = post_json(VALIDATE, Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["status"].as_u64(), Some(400));
+        assert_eq!(json["code"], "ONE_TIME_PASSWORD_SMS.INVALID_OTP");
+        assert_eq!(
+            json["message"],
+            "The provided OTP is not valid for this authenticationId."
+        );
+
+        // `verificationFailed` example — the wrong attempt that exhausts the
+        // 3-attempt budget. Use a fresh id so the exhausting attempt is
+        // deterministic (the first MAX_ATTEMPTS-1 are INVALID_OTP).
+        let id = send_ok(phone).await;
+        let body = json!({ "authenticationId": id, "code": "000000" }).to_string();
+        for _ in 0..(store::MAX_ATTEMPTS - 1) {
+            let (_, _, j) = post_json(VALIDATE, Some(&token), &body, None).await;
+            assert_eq!(j["code"], "ONE_TIME_PASSWORD_SMS.INVALID_OTP");
+        }
+        let (status, _, json) = post_json(VALIDATE, Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["status"].as_u64(), Some(400));
+        assert_eq!(json["code"], "ONE_TIME_PASSWORD_SMS.VERIFICATION_FAILED");
+        assert_eq!(
+            json["message"],
+            "The maximum number of validation attempts has been exceeded."
+        );
+    }
+
     #[tokio::test]
     async fn x_correlator_is_echoed_on_send_success_and_validate_204() {
         let phone = "+123456789012";
