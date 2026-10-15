@@ -102,9 +102,17 @@ paths:
                 $ref: "#/components/schemas/MessageResponse"
               examples:
                 sent:
-                  summary: SMS sent
+                  summary: >-
+                    SMS sent — `message` "hi" from `+123456789111` to the single
+                    recipient `+123456789012`. `msgId` is the deterministic
+                    SHA-256-derived handle for exactly that request (bound to the
+                    concrete parties + text, so it reproduces byte-for-byte);
+                    `timestamp` is illustrative — the handler stamps the current
+                    instant (RFC 3339 UTC, `Z` offset), so it varies per call and
+                    cannot be reproduced. Its presence and shape are the contract,
+                    not the frozen value.
                   value:
-                    msgId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    msgId: ceb0abb4-354b-46af-a9f3-845e4bd92fb0
                     timestamp: "2024-01-01T14:27:08Z"
         "400":
           headers:

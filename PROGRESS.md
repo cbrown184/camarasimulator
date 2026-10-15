@@ -325,7 +325,37 @@ Verified sub-items:
   change (the handler was already correct; one example `count` was hand-derived), no
   new dependency.
 - ✅ qos-provisioning v0.3
-- ✅ sms v0alpha1
+- ✅ sms v0alpha1 — spec↔code audited 2026-10-15 (Phase 5 stable tier, sixteenth; the next
+  **stateless** stable API after region-device-count, taken before the two remaining stateful
+  ones — qos-provisioning v0.3, in-home-device-management v1 — per phase order). The one
+  operation (`send-sms`, `POST /sms/v0alpha1/short-message`) reviewed end to end against
+  `specs/sms/v0alpha1/openapi.yaml`. The handler is faithful — two-legged/business-facing (both
+  `from` and `to` in the body, no subject fallback, so no identifier dance), the first-recipient
+  control plane (`to[0]`'s reserved trailing suffix → the canonical shared CAMARA error; a
+  reserved suffix on `from` or on a later recipient is **not** the error plane), the deterministic
+  SHA-256 `msgId` (over `from` + all of `to` + `message`, v4-shaped, no `uuid`/`rand` dep), and
+  the full validation set (malformed/unknown-field/unknown-category body, empty `to`, non-E.164
+  `from`/recipient, empty `message` → 400 `INVALID_ARGUMENT`) all match, and the scope + `x-correlator`
+  echo are genuinely enforced. **Drift found & fixed — the deterministic-value/placeholder +
+  illustrative-timestamp classes** (verified-caller / device-identifier / connected-network-type
+  precedent): the 200 `sent` example carried a Swagger-placeholder `msgId`
+  (`3fa85f64-5717-4562-b3fc-2c963f66afa6`) bound to no request though `msgId` is fully
+  reproducible, and a frozen `timestamp` (`2024-01-01T14:27:08Z`) though the handler stamps the
+  current instant (wall-clock, can never reproduce). Bound the example to the concrete request
+  (`"hi"` from `+123456789111` to `+123456789012`), corrected `msgId` to the real derived value
+  `ceb0abb4-354b-46af-a9f3-845e4bd92fb0`, and marked `timestamp` illustrative with a derivation
+  note (its presence/RFC-3339-UTC shape is the contract, not the value). The 400 `invalidArgument`
+  example message already byte-matched the handler; every 401/403/404/409/422/429/500/503 response
+  `$ref`s the shared catalog (no other inline examples to drift), and the parent/version module
+  docs were already accurate (one operation, the delivery-notification-subscription surface a
+  documented cut) — no stale-slice drift. Added `vendored_sent_example_matches_the_handler`
+  (drives the bound request through the real router, pins `msgId` against both the spec literal and
+  `message_id()`, pins the `timestamp` shape as UTC) and `vendored_invalid_argument_example_matches_the_handler`
+  (pins the 400 example's exact `status`/`code`/`message` bytes; prior error tests guarded only
+  `code`). Spec + `#[cfg(test)]` change only — no behaviour/response change (the handler was
+  already correct; one example placeholder + one illustrative timestamp), no new dependency.
+  Binary 5,459,096 bytes. Next in phase order: the two remaining stateful Phase 5 stable APIs —
+  qos-provisioning v0.3, then in-home-device-management v1.
 - ✅ in-home-device-management v1
 
 ### Phase 5 — Remaining APIs (CAMARA `vwip` — deepen scenarios/errors/contracts)
@@ -1568,6 +1598,23 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — sms v0alpha1 (sixteenth
+  Phase 5 stable API, the next **stateless** one, taken ahead of the two remaining stateful
+  stable APIs per phase order), drift found & fixed. Audited the one operation (`send-sms`,
+  `POST /sms/v0alpha1/short-message`) against `specs/sms/v0alpha1/openapi.yaml`; handler faithful
+  (two-legged/business-facing, the `to[0]`-reserved-suffix error plane, the deterministic SHA-256
+  `msgId`, the full 400 `INVALID_ARGUMENT` validation set, scope + `x-correlator` echo). **Drift —
+  the deterministic-value/placeholder + illustrative-timestamp classes:** the 200 `sent` example
+  carried a Swagger-placeholder `msgId` (`3fa85f64-…`) bound to no request though `msgId` is fully
+  reproducible, and a frozen wall-clock `timestamp`. Bound it to the concrete request, corrected
+  `msgId` to the real `ceb0abb4-354b-46af-a9f3-845e4bd92fb0`, marked `timestamp` illustrative. The
+  400 `invalidArgument` example already byte-matched; all other 4xx/5xx `$ref` the shared catalog;
+  module docs already accurate (no stale-slice drift). Added two pinning tests
+  (`vendored_sent_example_matches_the_handler` — pins `msgId` vs the spec literal and `message_id()`
+  + the `timestamp` UTC shape through the router; `vendored_invalid_argument_example_matches_the_handler`
+  — pins the 400 example's exact status/code/message bytes). `cargo test` green: 3121 passed, 0 failed.
+  `cargo build --release` green; binary = 5,459,096 bytes. Spec + `#[cfg(test)]` change only, no
+  behaviour change, no new dependency.
 - 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — region-device-count v0.2
   (fifteenth Phase 5 stable API), drift found & fixed. Audited the one operation (`count`,
   `POST /region-device-count/v0.2/count`) against `specs/region-device-count/v0.2/openapi.yaml`.

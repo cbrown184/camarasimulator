@@ -584,4 +584,56 @@ mod tests {
             Some("corr-err")
         );
     }
+
+    // --- Vendored-example pinning ------------------------------------------
+    //
+    // Guards the vendored `specs/sms/v0alpha1/openapi.yaml` examples against
+    // drift: the 200 `sent` example's `msgId` is deterministic (SHA-256 of the
+    // parties + text) and must equal both the spec literal and the handler's own
+    // `message_id`; its `timestamp` is wall-clock, so only its shape is pinned.
+    // The 400 `invalidArgument` example's exact status/code/message bytes are
+    // pinned through the real router (the error tests above guarded only `code`).
+
+    #[tokio::test]
+    async fn vendored_sent_example_matches_the_handler() {
+        // The exact request the `sent` example is bound to.
+        let body = r#"{"to":["+123456789012"],"from":"+123456789111","message":"hi"}"#;
+        let (status, _, out) = call_ok(body).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // `msgId` reproduces byte-for-byte: the spec literal, and independently
+        // the handler's `message_id` for the same request.
+        const SPEC_MSG_ID: &str = "ceb0abb4-354b-46af-a9f3-845e4bd92fb0";
+        let expected = message_id(&req(&["+123456789012"], "+123456789111", "hi"));
+        assert_eq!(
+            expected, SPEC_MSG_ID,
+            "the vendored `sent` example's msgId must equal message_id() for its request"
+        );
+        assert_eq!(
+            out["msgId"].as_str(),
+            Some(SPEC_MSG_ID),
+            "the router must return the vendored example's msgId for its request"
+        );
+
+        // `timestamp` is illustrative (current instant): pin only its shape —
+        // RFC 3339 UTC with a `Z` offset — not the frozen literal in the spec.
+        let ts = out["timestamp"].as_str().expect("timestamp present");
+        assert_eq!(ts.len(), 20, "RFC 3339 `YYYY-MM-DDThh:mm:ssZ`");
+        assert!(ts.ends_with('Z'), "UTC `Z` offset");
+    }
+
+    #[tokio::test]
+    async fn vendored_invalid_argument_example_matches_the_handler() {
+        // The `invalidArgument` example shows the non-E.164-recipient message;
+        // drive exactly that case and pin status + code + message bytes.
+        let body = r#"{"to":["0123"],"from":"+123456789111","message":"hi"}"#;
+        let (status, _, out) = call_ok(body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(out["status"], 400);
+        assert_eq!(out["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            out["message"],
+            "Each `to` recipient must be in E.164 format (e.g. +123456789)."
+        );
+    }
 }
