@@ -1671,27 +1671,24 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
-- 2026-10-15 — **Integration-failure recovery (not an audit pass).** A scheduled pass found the
-  per-API spec↔code audit sweep (backlog item 2) **complete across every tier** — Phase 0 auth,
-  Phase 1–4 stable, Phase 5 stable (all 18, last = in-home-device-management v1), and the vwip
-  sweep (done 2026-10-13); no unaudited API remains as a fresh one-pass unit, so there was no new
-  audit increment to claim. Instead the pass surfaced a real anomaly: on entry **HEAD was a
-  detached HEAD at `da66aa0`** carrying **46 committed-but-unpushed commits** of journaled audit
-  work (every pass from `b9936f1` esim-remote-management through `da66aa0` in-home-device-management),
-  while **`origin/main`/`main` were stuck at `f15d2f9`** (`fix(consent-info)`). Each of those 46
-  journal entries claims its pass was "merged to main and pushed," but the integrate-and-push step
-  (AGENT.md §8) had silently not advanced `origin/main` for 46 consecutive passes — the work was
-  committed locally and left stranded. `origin/main` is a strict ancestor of `da66aa0` (merge-base
-  = `f15d2f9`), and the 46 commits touch only `src/apis/` `#[cfg(test)]` modules + doc comments and
-  `specs/*` example/message YAML (no runtime-behaviour change), so the fix is a **non-destructive
-  fast-forward**. Verified the stranded tip green before integrating: `cargo test` → **3125 passed,
-  0 failed**; `cargo build --release` → ok; binary = **5,463,192 bytes** (unchanged vs the
-  in-home-device-management entry below, confirming no behaviour drift). Fast-forwarded `main` to
-  `da66aa0` and pushed to `origin/main`, finally integrating all 46 passes. **Operator flag:** the
-  §8 push step has been failing/omitted for ~46 passes — the routine's self-integration is not
-  working on its own; please check why detached-HEAD work was not being fast-forwarded + pushed each
-  pass. Branch `agent/integration/push-stranded-audit-commits` (this note only; the 46 audit
-  commits are pre-existing).
+- 2026-10-15 — **Idle pass; stale-local-ref self-correction (no audit increment).** A scheduled
+  pass confirmed the per-API spec↔code audit sweep (backlog item 2) is **complete across every
+  tier** — Phase 0 auth, Phase 1–4 stable, Phase 5 stable (all 18, last = in-home-device-management
+  v1), and the vwip sweep (done 2026-10-13); no unaudited API remains as a fresh one-pass unit, so
+  there was no new audit increment. **Correction to this pass's own first (now-superseded) note:**
+  on entry the container presented a **detached HEAD at `da66aa0`** with local `main` *and* the
+  `origin/main` remote-tracking ref both stale at `f15d2f9` (`fix(consent-info)`), which this pass
+  first misread as "46 committed-but-unpushed commits / a §8 integration failure." That diagnosis
+  was **wrong.** The push proved the actual remote `main` was **already at `da66aa0`** (push range
+  `da66aa0..77cfa49`), i.e. every prior pass's work *had* been pushed; only the local clone's
+  tracking ref was stale (the container checks out the true tip as a detached HEAD but leaves
+  `main`/`origin/main` at an older value). No commits were ever stranded and the §8 push step is
+  **not** broken. The only new content pushed this pass is this journal note. Verified green before
+  pushing regardless: `cargo test` → **3125 passed, 0 failed**; `cargo build --release` → ok; binary
+  = **5,463,192 bytes** (unchanged — no code/spec/behaviour change this pass). Branch
+  `agent/integration/push-stranded-audit-commits`. **Note for future passes:** at container start,
+  `git fetch origin` before trusting `origin/main`; a detached HEAD ahead of a stale local
+  `origin/main` is this environment's normal checkout shape, not an integration failure.
 - 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — in-home-device-management v1
   (eighteenth and **last** Phase 5 stable API; the second remaining **stateful** one — a
   `store.rs` tombstone + overlay layer over an otherwise `ssid`-derived roster), drift found &
