@@ -102,10 +102,17 @@ paths:
                     - name: voice
                       description: Low-latency profile for real-time interactive voice.
                       status: ACTIVE
+                      targetMinUpstreamRate: { value: 64, unit: kbps }
+                      maxUpstreamRate: { value: 128, unit: kbps }
                       targetMinDownstreamRate: { value: 64, unit: kbps }
                       maxDownstreamRate: { value: 128, unit: kbps }
+                      minDuration: { value: 1, unit: Minutes }
+                      maxDuration: { value: 24, unit: Hours }
                       priority: 20
                       packetDelayBudget: { value: 100, unit: Milliseconds }
+                      jitter: { value: 20, unit: Milliseconds }
+                      packetErrorLossRate: 6
+                      l4sQueueType: non-l4s-queue
                       serviceClass: real_time_interactive
                 empty:
                   summary: No profile matches the filter
@@ -225,10 +232,17 @@ paths:
                     name: voice
                     description: Low-latency profile for real-time interactive voice.
                     status: ACTIVE
+                    targetMinUpstreamRate: { value: 64, unit: kbps }
+                    maxUpstreamRate: { value: 128, unit: kbps }
                     targetMinDownstreamRate: { value: 64, unit: kbps }
                     maxDownstreamRate: { value: 128, unit: kbps }
+                    minDuration: { value: 1, unit: Minutes }
+                    maxDuration: { value: 24, unit: Hours }
                     priority: 20
                     packetDelayBudget: { value: 100, unit: Milliseconds }
+                    jitter: { value: 20, unit: Milliseconds }
+                    packetErrorLossRate: 6
+                    l4sQueueType: non-l4s-queue
                     serviceClass: real_time_interactive
         "400":
           $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"

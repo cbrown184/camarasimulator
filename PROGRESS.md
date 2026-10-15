@@ -117,7 +117,19 @@ Verified sub-items:
   `vendored_error_example_messages_match_the_handler` pinning the exact
   `status`/`code`/`message` bytes of all seven through the router (existing error tests
   guarded only `status`/`code`); `#[cfg(test)]`-only, binary unchanged.
-- ✅ qos-profiles v1
+- ✅ qos-profiles v1 — spec↔code audited 2026-10-15 (Phase 5 stable tier, seventh):
+  both operations (`retrieveQoSProfiles`, `POST /retrieve-qos-profiles`; `getQosProfile`,
+  `GET /qos-profiles/{name}`) over a fixed in-memory catalog reviewed end to end. **Drift
+  found & fixed — the incomplete-example class:** the `voice` 200 example (shared by both
+  operations) showed only 7 of the 15 fields the handler returns for the fully
+  deterministic static `voice` profile (missing `targetMinUpstreamRate`, `maxUpstreamRate`,
+  `minDuration`, `maxDuration`, `jitter`, `packetErrorLossRate`, `l4sQueueType`). Since the
+  catalog is reproducible, the example must match byte-for-byte; expanded both to the full
+  profile and added `vendored_voice_example_matches_the_handler` pinning it as an exact
+  object through the router via both the single-lookup and the `name` filter. The two 422
+  inline examples (`serviceNotApplicable` = `for_status(422)`, `unnecessaryIdentifier` =
+  the handler's inline message) already byte-matched; all other 4xx/5xx `$ref` the shared
+  catalog.
 - ✅ kyc-tenure v0.2
 - ✅ blockchain-public-address v0.3
 - ✅ simple-edge-discovery v2
@@ -1369,6 +1381,38 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — qos-profiles v1
+  (seventh Phase 5 stable API), drift found & fixed. Audited both operations
+  (`retrieveQoSProfiles`, `POST /qos-profiles/v1/retrieve-qos-profiles`; `getQosProfile`,
+  `GET /qos-profiles/v1/qos-profiles/{name}`) against `specs/qos-profiles/v1/openapi.yaml`.
+  QoS Profiles is the read-only fixed-catalog companion to Quality on Demand: six static
+  profiles covering all three `QosProfileStatusEnum` states, narrowed by the `name`/`status`
+  filters, with an optional `device` acting only as an error plane (reserved-suffix + the
+  two-legged/three-legged `UNNECESSARY_IDENTIFIER` rule). All planes match the handler; the
+  `QosProfileName` pattern/length and the `status` enum are genuinely enforced (→ 400
+  `INVALID_ARGUMENT`), the `qos-profiles:read` scope gate and `x-correlator` echo are
+  correct, and the single-lookup 404s on an unknown name where the list returns `[]`. **Drift
+  found — the incomplete-example class (new to the tier):** the `voice` 200 example, shared
+  by both operations, carried only 7 of the 15 fields the handler returns for the fully
+  deterministic static `voice` profile (it dropped `targetMinUpstreamRate`, `maxUpstreamRate`,
+  `minDuration`, `maxDuration`, `jitter`, `packetErrorLossRate`, `l4sQueueType`). Because the
+  catalog is reproducible (not counter/clock/wall-clock derived), the documented example must
+  reproduce the response byte-for-byte; expanded both the list and single-lookup examples to
+  the full profile and added `vendored_voice_example_matches_the_handler`, which drives the
+  real router through both the `GET /qos-profiles/voice` lookup and the `{"name":"voice"}`
+  filter and pins the body as an exact object (resp. `[object]`). The two 422 inline examples
+  already byte-matched the handler (`serviceNotApplicable` = `CamaraError::for_status(422)`;
+  `unnecessaryIdentifier` = the handler's inline string), and every other 4xx/5xx `$ref`s the
+  shared catalog (no inline examples to drift). `cargo test` 3111 green (+1); `cargo build
+  --release` ok, binary 5,455,000 bytes (5.3M, byte-identical to the home-devices-qod pass —
+  the YAML example expansion is outside the release path and the new test is
+  `#[cfg(test)]`-only). Spec + `#[cfg(test)]` change only — no behaviour/response change (the
+  handler was already correct; only the example was abbreviated), no new dependency. Next in
+  phase order: kyc-tenure v0.2 (next stateless Phase 5 stable; the stateful carrier-billing
+  v0.5 / blockchain-public-address v0.3, which carry a `store.rs`, follow the stateless ones).
+  Branch `agent/qos-profiles/audit-v1`. **Integration note:** on entry HEAD was detached at
+  `origin/main` (`b3790a0`, home-devices-qod); local `main` ref was stale (`f15d2f9`) and was
+  fast-forwarded to `origin/main` before branching.
 - 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — home-devices-qod
   v0.4 (sixth Phase 5 stable API), no drift; message-byte pins added. Audited the one
   operation (`setQos`, `PUT /home-devices-qod/v0.4/qos`) against

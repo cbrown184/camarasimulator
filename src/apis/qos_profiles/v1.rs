@@ -828,6 +828,46 @@ mod tests {
         );
     }
 
+    /// Pin the vendored `voice` 200 example (used by both `retrieveQoSProfiles`
+    /// and `getQosProfile`) to the handler's actual output. The catalog is a
+    /// fixed, fully deterministic set, so the documented example is reproducible
+    /// and must match the response **byte-for-byte** — the earlier example was a
+    /// 7-field subset of the 15-field profile the handler returns, which this
+    /// guards against recurring. Driven through the real router via both the
+    /// single-profile lookup and the `name` filter.
+    #[tokio::test]
+    async fn vendored_voice_example_matches_the_handler() {
+        // The exact `voice` profile as documented in the vendored spec's 200
+        // examples (specs/qos-profiles/v1/openapi.yaml).
+        let documented_voice = json!({
+            "name": "voice",
+            "description": "Low-latency profile for real-time interactive voice.",
+            "status": "ACTIVE",
+            "targetMinUpstreamRate": { "value": 64, "unit": "kbps" },
+            "maxUpstreamRate": { "value": 128, "unit": "kbps" },
+            "targetMinDownstreamRate": { "value": 64, "unit": "kbps" },
+            "maxDownstreamRate": { "value": 128, "unit": "kbps" },
+            "minDuration": { "value": 1, "unit": "Minutes" },
+            "maxDuration": { "value": 24, "unit": "Hours" },
+            "priority": 20,
+            "packetDelayBudget": { "value": 100, "unit": "Milliseconds" },
+            "jitter": { "value": 20, "unit": "Milliseconds" },
+            "packetErrorLossRate": 6,
+            "l4sQueueType": "non-l4s-queue",
+            "serviceClass": "real_time_interactive"
+        });
+
+        // getQosProfile → the single object, exactly as documented.
+        let (status, _, body) = get_profile_ok("voice").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, documented_voice, "GET /qos-profiles/voice body");
+
+        // retrieveQoSProfiles with the `name` filter → `[ voice ]`, exactly.
+        let (status, _, body) = retrieve_ok(r#"{"name":"voice"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!([documented_voice]), "name-filtered list body");
+    }
+
     #[tokio::test]
     async fn x_correlator_is_echoed_on_success_and_error() {
         let token = mint_token(RETRIEVE_SCOPE).await;
