@@ -40,8 +40,12 @@
 //!
 //! An `AVAILABLE` assignment holds its derived `sinkCredential` `Authorization`
 //! (ACCESSTOKEN → Bearer, PLAIN → Basic) across callbacks (the AVAILABLE event
-//! *peeks* it; the terminal revoke / network-drop event *takes* it single-use). Only
-//! TLS (`https://` sink) delivery remains a documented cut.
+//! *peeks* it; the terminal revoke / network-drop event *takes* it single-use).
+//! Delivery is over `http://` (raw TCP) and `https://` (a `rustls` TLS session,
+//! the server certificate verified against the bundled Mozilla roots — see
+//! [`super::notifications`]). The documented cuts are the async `202 Accepted`
+//! revoke form and the `REFRESHTOKEN` `sinkCredential` (it needs a token-exchange
+//! round trip).
 //!
 //! ## Identifier resolution (two-legged vs three-legged)
 //!
@@ -209,9 +213,10 @@ async fn create_qos_assignment(claims: Claims, headers: HeaderMap, body: Bytes) 
 
     // An optional `sink` must be a well-formed `http://` or `https://` callback
     // URL → else 400 INVALID_SINK. CAMARA's schema requires `https://`; CamaraSim
-    // also accepts `http://` so a loopback test receiver can observe callbacks,
-    // and delivers only to `http://` (no TLS client — an `https://` sink is a
-    // documented no-op cut, mirroring QoD / Geofencing / Carrier Billing).
+    // also accepts `http://` so a loopback test receiver can observe callbacks. An
+    // `http://` sink is delivered over raw TCP; an `https://` sink over a `rustls`
+    // TLS session (server cert verified against the bundled Mozilla roots — see
+    // `super::notifications`), mirroring QoD.
     if let Some(sink) = &req.sink {
         if !is_valid_sink(sink) {
             return with_correlator(
@@ -1006,7 +1011,8 @@ mod tests {
     #[tokio::test]
     async fn http_sink_is_accepted_and_echoed() {
         // CamaraSim accepts `http://` sinks (for a loopback receiver) as well as
-        // `https://`, delivering only to `http://` (no TLS client).
+        // `https://`; an `http://` sink is delivered over raw TCP, an `https://`
+        // one over a `rustls` TLS session (see `super::notifications`).
         let token = mint_token(CREATE_SCOPE).await;
         let body = json!({
             "device": { "phoneNumber": "+123456789012" },
@@ -1571,5 +1577,237 @@ mod tests {
         let body = json!({ "device": { "phoneNumber": "+123456789521" } }).to_string();
         let (status, _, _) = retrieve_by_device(None, &body, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // --- Spec examples pinned to the handler ------------------------------
+
+    /// The vendored `specs/qos-provisioning/v0.3/openapi.yaml` 200/201 success
+    /// examples must match what the real router returns, pinned as **exact
+    /// objects** — minus `assignmentId` (a per-request minted UUID-shaped id: a
+    /// monotonic counter + the clock, not derived from the input) and `startedAt`
+    /// (the wall-clock current instant), which are illustrative and so asserted by
+    /// shape only (UUID-shaped; present + UTC `Z` for AVAILABLE, absent for
+    /// REQUESTED) and asserted *not* to equal the frozen literals the spec shows.
+    /// The existing create tests asserted these fields individually, so a
+    /// stray/renamed/extra field could slip past.
+    #[tokio::test]
+    async fn vendored_examples_match_the_handler() {
+        const FROZEN_ID_AVAILABLE: &str = "11111111-1111-4111-8111-111111111111";
+        const FROZEN_ID_REQUESTED: &str = "22222222-2222-4222-8222-222222222222";
+        const FROZEN_TIME: &str = "2024-01-01T14:27:08Z";
+
+        // 201 — createQosAssignment `available` (…012 → AVAILABLE, device echoed).
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, body) =
+            post_assignment(Some(&create), &create_body("+123456789012", "QOS_E"), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = body["assignmentId"].as_str().expect("minted assignmentId");
+        assert_eq!(id.split('-').count(), 5, "assignmentId is UUID-shaped: {id}");
+        assert_ne!(id, FROZEN_ID_AVAILABLE, "the spec literal is illustrative");
+        let started = body["startedAt"].as_str().expect("AVAILABLE startedAt");
+        assert!(started.ends_with('Z'), "startedAt is UTC: {started}");
+        assert_ne!(started, FROZEN_TIME, "the spec timestamp is illustrative");
+        let mut pinned = body.clone();
+        let obj = pinned.as_object_mut().unwrap();
+        obj.remove("assignmentId");
+        obj.remove("startedAt");
+        assert_eq!(
+            pinned,
+            json!({
+                "qosProfile": "QOS_E",
+                "status": "AVAILABLE",
+                "device": { "phoneNumber": "+123456789012" },
+            })
+        );
+
+        // 201 — createQosAssignment `requested` (…000 → REQUESTED, no startedAt).
+        let (status, _, body) =
+            post_assignment(Some(&create), &create_body("+123456789000", "QOS_E"), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = body["assignmentId"].as_str().expect("minted assignmentId");
+        assert_eq!(id.split('-').count(), 5, "assignmentId is UUID-shaped: {id}");
+        assert_ne!(id, FROZEN_ID_REQUESTED, "the spec literal is illustrative");
+        assert!(
+            body.get("startedAt").is_none(),
+            "a REQUESTED assignment carries no startedAt"
+        );
+        let mut pinned = body.clone();
+        pinned.as_object_mut().unwrap().remove("assignmentId");
+        assert_eq!(
+            pinned,
+            json!({
+                "qosProfile": "QOS_E",
+                "status": "REQUESTED",
+                "device": { "phoneNumber": "+123456789000" },
+            })
+        );
+
+        // 200 — retrieve-qos-assignment `available`: provision a device (a tail
+        // unique to this test so the process-global store can't hand back another
+        // test's assignment), then read it back by the same device. The stored
+        // AssignmentInfo comes back in the spec's `available` shape.
+        let (status, _, _) =
+            post_assignment(Some(&create), &create_body("+123456789517", "QOS_E"), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let read_by_device = mint_token(READ_BY_DEVICE_SCOPE).await;
+        let device_body = json!({ "device": { "phoneNumber": "+123456789517" } }).to_string();
+        let (status, _, body) = retrieve_by_device(Some(&read_by_device), &device_body, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let id = body["assignmentId"].as_str().expect("stored assignmentId");
+        assert_eq!(id.split('-').count(), 5, "assignmentId is UUID-shaped: {id}");
+        let started = body["startedAt"].as_str().expect("AVAILABLE startedAt");
+        assert!(started.ends_with('Z'), "startedAt is UTC: {started}");
+        let mut pinned = body.clone();
+        let obj = pinned.as_object_mut().unwrap();
+        obj.remove("assignmentId");
+        obj.remove("startedAt");
+        assert_eq!(
+            pinned,
+            json!({
+                "qosProfile": "QOS_E",
+                "status": "AVAILABLE",
+                "device": { "phoneNumber": "+123456789517" },
+            })
+        );
+    }
+
+    /// Every router-reachable inline error example in the vendored spec is pinned
+    /// to the handler by its exact `status`/`code`/`message` bytes (the existing
+    /// error tests guarded only `status`/`code`, so a reworded `message` could
+    /// drift). The other 4xx/5xx responses `$ref` the shared catalog, whose own
+    /// contract tests cover them.
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        let create = mint_token(CREATE_SCOPE).await;
+
+        // createQosAssignment 400 — invalidArgument (missing `qosProfile`).
+        let (status, _, body) = post_assignment(
+            Some(&create),
+            &json!({ "device": { "phoneNumber": "+123456789012" } }).to_string(),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            json!({ "status": 400, "code": "INVALID_ARGUMENT", "message": "`qosProfile` is required." })
+        );
+
+        // createQosAssignment 400 — invalidSink (a non-http(s) scheme).
+        let (status, _, body) = post_assignment(
+            Some(&create),
+            &json!({
+                "device": { "phoneNumber": "+123456789012" },
+                "qosProfile": "QOS_E",
+                "sink": "ftp://not-a-callback.example/x",
+            })
+            .to_string(),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            json!({
+                "status": 400,
+                "code": "INVALID_SINK",
+                "message": "`sink` must be a valid `http://` or `https://` callback URL.",
+            })
+        );
+
+        // createQosAssignment 409 — conflict (reserved `…409` suffix).
+        let (status, _, body) =
+            post_assignment(Some(&create), &create_body("+123456789409", "QOS_E"), None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body,
+            json!({ "status": 409, "code": "CONFLICT", "message": "A specified resource duplicate entry found." })
+        );
+
+        // createQosAssignment 422 — missingIdentifier (no device, non-line subject).
+        let (status, _, body) =
+            post_assignment(Some(&create), &json!({ "qosProfile": "QOS_E" }).to_string(), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({
+                "status": 422,
+                "code": "MISSING_IDENTIFIER",
+                "message": "The device cannot be identified: supply a `device` or use a token that identifies a device.",
+            })
+        );
+
+        // createQosAssignment 422 — unnecessaryIdentifier (device on a line token).
+        let line = mint_token_with_client(CREATE_SCOPE, "+123456789012").await;
+        let (status, _, body) =
+            post_assignment(Some(&line), &create_body("+123456789034", "QOS_E"), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({
+                "status": 422,
+                "code": "UNNECESSARY_IDENTIFIER",
+                "message": "The device is already identified by the access token.",
+            })
+        );
+
+        // createQosAssignment 422 — qosProfileNotApplicable (profile marked unavailable).
+        let (status, _, body) =
+            post_assignment(Some(&create), &create_body("+123456789012", "profile-unavailable"), None)
+                .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({
+                "status": 422,
+                "code": "QOS_PROVISIONING.QOS_PROFILE_NOT_APPLICABLE",
+                "message": "The requested QoS profile is not applicable for this device.",
+            })
+        );
+
+        // retrieve-qos-assignment 404 — notFound (a device with no assignment; a
+        // tail unique to this test so the process-global store has none for it).
+        let read_by_device = mint_token(READ_BY_DEVICE_SCOPE).await;
+        let (status, _, body) = retrieve_by_device(
+            Some(&read_by_device),
+            &json!({ "device": { "phoneNumber": "+123456789619" } }).to_string(),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            body,
+            json!({ "status": 404, "code": "NOT_FOUND", "message": "No assignment found for the provided device." })
+        );
+
+        // retrieve-qos-assignment 422 — missingIdentifier (empty body, non-line subject).
+        let (status, _, body) = retrieve_by_device(Some(&read_by_device), "{}", None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({
+                "status": 422,
+                "code": "MISSING_IDENTIFIER",
+                "message": "The device cannot be identified: supply a `device` or use a token that identifies a device.",
+            })
+        );
+
+        // retrieve-qos-assignment 422 — unnecessaryIdentifier (device on a line token).
+        let line_read = mint_token_with_client(READ_BY_DEVICE_SCOPE, "+123456789012").await;
+        let (status, _, body) = retrieve_by_device(
+            Some(&line_read),
+            &json!({ "device": { "phoneNumber": "+123456789034" } }).to_string(),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({
+                "status": 422,
+                "code": "UNNECESSARY_IDENTIFIER",
+                "message": "The device is already identified by the access token.",
+            })
+        );
     }
 }

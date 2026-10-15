@@ -139,18 +139,35 @@ paths:
                 $ref: "#/components/schemas/AssignmentInfo"
               examples:
                 available:
-                  summary: An AVAILABLE assignment (device echoed)
+                  summary: An AVAILABLE assignment (device echoed, …012)
+                  description: >-
+                    `assignmentId` and `startedAt` are **illustrative**:
+                    `assignmentId` is a fresh UUID-shaped id minted per request (a
+                    monotonic counter + the clock, not derived from the input), and
+                    `startedAt` is the current instant (`now`, wall-clock
+                    dependent), so the concrete values shown will not reproduce —
+                    only their *presence* is part of the contract. The echoed
+                    `device`, `qosProfile`, and `status` are reproducible (any tail
+                    other than …000 / a reserved suffix → `AVAILABLE`). The frozen
+                    timestamp below is the module's RFC-3339 reference epoch, kept
+                    only to show the response shape.
                   value:
-                    assignmentId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    assignmentId: "11111111-1111-4111-8111-111111111111"
                     qosProfile: QOS_E
                     status: AVAILABLE
                     startedAt: "2024-01-01T14:27:08Z"
                     device:
                       phoneNumber: "+123456789012"
                 requested:
-                  summary: A REQUESTED assignment (no startedAt yet)
+                  summary: A REQUESTED assignment (no startedAt yet, …000)
+                  description: >-
+                    `assignmentId` is **illustrative** (a fresh UUID-shaped id
+                    minted per request, not derived from the input). A REQUESTED
+                    assignment (identifier tail …000, or no trailing digits) carries
+                    no `startedAt` yet; `qosProfile`, `status`, and the echoed
+                    `device` are reproducible.
                   value:
-                    assignmentId: "3fa85f64-5717-4562-b3fc-2c963f66afa7"
+                    assignmentId: "22222222-2222-4222-8222-222222222222"
                     qosProfile: QOS_E
                     status: REQUESTED
                     device:
@@ -175,11 +192,11 @@ paths:
                     code: INVALID_ARGUMENT
                     message: "`qosProfile` is required."
                 invalidSink:
-                  summary: Sink is not a valid https URL
+                  summary: Sink is not a valid http(s) URL
                   value:
                     status: 400
                     code: INVALID_SINK
-                    message: "`sink` must be a valid `https://` callback URL."
+                    message: "`sink` must be a valid `http://` or `https://` callback URL."
         "401":
           $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
         "403":
@@ -203,7 +220,7 @@ paths:
                   value:
                     status: 409
                     code: CONFLICT
-                    message: There is a conflict with the current state of the resource.
+                    message: A specified resource duplicate entry found.
         "422":
           description: |
             422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
@@ -225,7 +242,7 @@ paths:
                   value:
                     status: 422
                     code: MISSING_IDENTIFIER
-                    message: The device cannot be identified.
+                    message: "The device cannot be identified: supply a `device` or use a token that identifies a device."
                 unnecessaryIdentifier:
                   summary: The device is already identified by the token
                   value:
@@ -505,8 +522,15 @@ paths:
               examples:
                 available:
                   summary: The device's AVAILABLE assignment
+                  description: >-
+                    `assignmentId` and `startedAt` are **illustrative** (as on
+                    `createQosAssignment`): `assignmentId` is the minted id of the
+                    device's stored assignment and `startedAt` the instant it became
+                    `AVAILABLE` (wall-clock dependent), so neither reproduces — only
+                    their presence is part of the contract. The echoed `device`,
+                    `qosProfile`, and `status` are the stored values.
                   value:
-                    assignmentId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    assignmentId: "11111111-1111-4111-8111-111111111111"
                     qosProfile: QOS_E
                     status: AVAILABLE
                     startedAt: "2024-01-01T14:27:08Z"
@@ -566,7 +590,7 @@ paths:
                   value:
                     status: 422
                     code: MISSING_IDENTIFIER
-                    message: The device cannot be identified.
+                    message: "The device cannot be identified: supply a `device` or use a token that identifies a device."
                 unnecessaryIdentifier:
                   summary: The device is already identified by the token
                   value:

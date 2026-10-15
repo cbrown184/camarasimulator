@@ -324,7 +324,48 @@ Verified sub-items:
   tests guarded only `code`). Spec + `#[cfg(test)]` change only — no behaviour/response
   change (the handler was already correct; one example `count` was hand-derived), no
   new dependency.
-- ✅ qos-provisioning v0.3
+- ✅ qos-provisioning v0.3 — spec↔code audited 2026-10-15 (Phase 5 stable tier, seventeenth;
+  the first of the two remaining **stateful** stable APIs — a `store.rs`-backed open-ended
+  provisioning lifecycle with a `notifications.rs` CloudEvent sink, the QoD sibling): all four
+  operations (`createQosAssignment` `POST /qos-assignments`, `getQosAssignmentById`
+  `GET /qos-assignments/{id}`, `revokeQosAssignment` `DELETE /qos-assignments/{id}`,
+  `getQosAssignmentByDevice` `POST /retrieve-qos-assignment`) reviewed end to end against
+  `specs/qos-provisioning/v0.3/openapi.yaml`. The control planes match the handler (identifier
+  reserved-error-suffix incl. `…409`→CONFLICT; the grant plane `…000`/no-digits → REQUESTED
+  without `startedAt`, else AVAILABLE with `startedAt`=now and no `expiresAt` — open-ended; a
+  `qosProfile` containing `unavailable` → 422 QOS_PROFILE_NOT_APPLICABLE; the `http(s)` `sink`
+  validation + the AVAILABLE/`…001` NETWORK_TERMINATED/DELETE_REQUESTED CloudEvents with
+  ACCESSTOKEN→Bearer / PLAIN→Basic auth), the two-legged/three-legged identifier resolution is
+  faithful, and the scopes + `x-correlator` echo are enforced. The minted `assignmentId`
+  (counter+clock `mint_uuid`) and wall-clock `startedAt` are legitimately illustrative (the QoD
+  posture). **Drift found & fixed — four message/example classes.** (1) The **truncated-identifier
+  -message class** (connected-network-type / simple-edge-discovery / carrier-billing precedent):
+  the 422 `missingIdentifier` example (in **both** createQosAssignment and retrieve) carried the
+  short "The device cannot be identified." but `resolve_identifier` emits the full "…: supply a
+  `device` or use a token that identifies a device." Corrected both. (2) The createQosAssignment
+  400 `invalidSink` example said "…valid `https://` callback URL." but the handler (which accepts
+  `http://` too) emits "…valid `http://` or `https://` callback URL." (3) The 409 `conflict`
+  example claimed "There is a conflict with the current state of the resource." but `…409` →
+  `for_status(409)` emits "A specified resource duplicate entry found." (4) The
+  deterministic/illustrative class: the three 200/201 success examples (createQosAssignment
+  `available`/`requested`, retrieve `available`) carried Swagger-placeholder `assignmentId`s
+  (`3fa85f64-…`) and frozen `startedAt`s with no illustrative note — marked `assignmentId`/
+  `startedAt` illustrative (the QoD `sessionId`/`startedAt` convention) with a derivation note.
+  **Stale-doc drift fixed — the no-op-TLS-cut class:** three code sites (the `v0_3.rs` header, the
+  create-handler sink comment, and a create test comment) claimed `https://` sink delivery was a
+  "documented no-op cut (no TLS client)", contradicting `notifications.rs` (which delivers over a
+  verified `rustls` TLS session) and the served spec — corrected all three. **Stale-slice-doc
+  drift fixed:** the parent `qos_provisioning.rs` module doc still said "First slice: POST
+  /qos-assignments + GET /…/{id}" though all four operations ship — corrected to the full surface.
+  Added `vendored_examples_match_the_handler` (drives the two 201 + the retrieve 200 through the
+  real router, pins each body as an **exact object** minus the illustrative `assignmentId`/
+  `startedAt`, asserted UUID-shaped/UTC and ≠ the frozen literals; prior tests asserted these
+  fields individually) and `vendored_error_example_messages_match_the_handler` (pins the exact
+  `status`/`code`/`message` bytes of all nine router-reachable inline error families across both
+  operations; prior error tests guarded only `status`/`code`). Spec + doc + `#[cfg(test)]` change
+  only — no behaviour/response change (the handlers were already correct; the drift was message
+  text, example placeholders, and stale docs), no new dependency. Only in-home-device-management v1
+  remains in the Phase 5 stable tier.
 - ✅ sms v0alpha1 — spec↔code audited 2026-10-15 (Phase 5 stable tier, sixteenth; the next
   **stateless** stable API after region-device-count, taken before the two remaining stateful
   ones — qos-provisioning v0.3, in-home-device-management v1 — per phase order). The one
@@ -1598,6 +1639,41 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — qos-provisioning v0.3
+  (seventeenth Phase 5 stable API; the first of the two remaining **stateful** ones — the QoD
+  sibling, `store.rs` provisioning lifecycle + `notifications.rs` CloudEvent sink), drift found &
+  fixed. Audited all four operations (`createQosAssignment`, `getQosAssignmentById`,
+  `revokeQosAssignment`, `getQosAssignmentByDevice`) against `specs/qos-provisioning/v0.3/openapi.yaml`;
+  handler/store/notifications faithful (grant plane `…000`→REQUESTED else AVAILABLE/no `expiresAt`;
+  `…409`→CONFLICT; `unavailable`-profile→422; `http(s)` sink + AVAILABLE/`NETWORK_TERMINATED`(`…001`)/
+  `DELETE_REQUESTED` CloudEvents with ACCESSTOKEN→Bearer/PLAIN→Basic; two-/three-legged resolution;
+  scopes + `x-correlator`). `assignmentId` (counter+clock `mint_uuid`) and `startedAt` (wall-clock)
+  are legitimately illustrative (QoD posture). **Message/example drift (four fixes):** (1) the 422
+  `missingIdentifier` example in **both** create and retrieve was truncated ("The device cannot be
+  identified.") vs the handler's full "…: supply a `device` or use a token that identifies a device."
+  (truncated-identifier-message class); (2) the create 400 `invalidSink` example said "valid
+  `https://` …" vs the handler's "valid `http://` or `https://` …"; (3) the create 409 `conflict`
+  example said "There is a conflict with the current state of the resource." vs the real
+  `for_status(409)` "A specified resource duplicate entry found."; (4) the three 200/201 success
+  examples carried Swagger-placeholder `assignmentId`s + frozen `startedAt`s — marked both
+  illustrative with a derivation note (QoD `sessionId`/`startedAt` convention). **Stale-doc drift:**
+  three code sites (v0_3.rs header, the create-handler sink comment, a create test comment) still
+  called `https://` sink delivery a "documented no-op cut (no TLS client)" though `notifications.rs`
+  delivers over a verified `rustls` TLS session (and the spec says so) — corrected all three; and the
+  parent `qos_provisioning.rs` module doc's "First slice: POST /qos-assignments + GET /…/{id}" (only
+  2 of 4 ops) was corrected to the full surface (stale-slice-doc class). Added two pinning tests —
+  `vendored_examples_match_the_handler` (two 201 + the retrieve 200 as exact objects minus the
+  illustrative `assignmentId`/`startedAt`, each asserted UUID-shaped/UTC and ≠ the frozen literal;
+  round-trip + not-found cases use test-unique tails …517/…619 so the process-global store can't
+  cross-contaminate) and `vendored_error_example_messages_match_the_handler` (exact
+  `status`/`code`/`message` bytes of all nine router-reachable inline error families across both
+  operations; prior error tests guarded only `status`/`code`). `cargo test` green: 3123 passed, 0
+  failed (+2). `cargo build --release` green; binary = 5,463,192 bytes (+4,096 vs sms's 5,459,096 —
+  the embedded-spec YAML grew from the longer example descriptions/messages; no code-path change, no
+  new dependency). Spec + doc + `#[cfg(test)]` change only — no behaviour/response change (the
+  handlers were already correct; the drift was message text, example placeholders, and stale docs).
+  Next in phase order: in-home-device-management v1 (the last Phase 5 stable API).
+  Branch `agent/qos-provisioning/audit-v0_3`.
 - 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — sms v0alpha1 (sixteenth
   Phase 5 stable API, the next **stateless** one, taken ahead of the two remaining stateful
   stable APIs per phase order), drift found & fixed. Audited the one operation (`send-sms`,

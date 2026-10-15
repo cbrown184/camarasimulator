@@ -14,7 +14,10 @@
 //! - [`v0_3`] — mounted at `/qos-provisioning/v0.3` (CAMARA qos-provisioning
 //!   0.3.0, release r3.2 — the latest published version, mounted at its real
 //!   sub-1.0 base path like KYC Match v0.3 / Location Retrieval v0.4, DESIGN §9).
-//!   First slice: `POST /qos-assignments` + `GET /qos-assignments/{id}`.
+//!   All four operations ship: `POST /qos-assignments` (create),
+//!   `GET /qos-assignments/{id}` (read by id), `DELETE /qos-assignments/{id}`
+//!   (revoke), and `POST /retrieve-qos-assignment` (retrieve by device), plus
+//!   `status-changed` CloudEvents to a recorded `sink`.
 
 pub mod notifications;
 pub mod store;
