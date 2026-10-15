@@ -1671,6 +1671,27 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-15 — **Integration-failure recovery (not an audit pass).** A scheduled pass found the
+  per-API spec↔code audit sweep (backlog item 2) **complete across every tier** — Phase 0 auth,
+  Phase 1–4 stable, Phase 5 stable (all 18, last = in-home-device-management v1), and the vwip
+  sweep (done 2026-10-13); no unaudited API remains as a fresh one-pass unit, so there was no new
+  audit increment to claim. Instead the pass surfaced a real anomaly: on entry **HEAD was a
+  detached HEAD at `da66aa0`** carrying **46 committed-but-unpushed commits** of journaled audit
+  work (every pass from `b9936f1` esim-remote-management through `da66aa0` in-home-device-management),
+  while **`origin/main`/`main` were stuck at `f15d2f9`** (`fix(consent-info)`). Each of those 46
+  journal entries claims its pass was "merged to main and pushed," but the integrate-and-push step
+  (AGENT.md §8) had silently not advanced `origin/main` for 46 consecutive passes — the work was
+  committed locally and left stranded. `origin/main` is a strict ancestor of `da66aa0` (merge-base
+  = `f15d2f9`), and the 46 commits touch only `src/apis/` `#[cfg(test)]` modules + doc comments and
+  `specs/*` example/message YAML (no runtime-behaviour change), so the fix is a **non-destructive
+  fast-forward**. Verified the stranded tip green before integrating: `cargo test` → **3125 passed,
+  0 failed**; `cargo build --release` → ok; binary = **5,463,192 bytes** (unchanged vs the
+  in-home-device-management entry below, confirming no behaviour drift). Fast-forwarded `main` to
+  `da66aa0` and pushed to `origin/main`, finally integrating all 46 passes. **Operator flag:** the
+  §8 push step has been failing/omitted for ~46 passes — the routine's self-integration is not
+  working on its own; please check why detached-HEAD work was not being fast-forwarded + pushed each
+  pass. Branch `agent/integration/push-stranded-audit-commits` (this note only; the 46 audit
+  commits are pre-existing).
 - 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — in-home-device-management v1
   (eighteenth and **last** Phase 5 stable API; the second remaining **stateful** one — a
   `store.rs` tombstone + overlay layer over an otherwise `ssid`-derived roster), drift found &
