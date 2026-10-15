@@ -101,7 +101,12 @@ Verified sub-items:
 - ✅ device-swap v1 — spec↔code audited 2026-10-14 (Phase 5 stable tier): fixed the
   truncated 422 `missingIdentifier` example in both operations (`check`,
   `retrieve-date`); handler already emitted the full message, added a pinning test.
-- ✅ kyc-fill-in v0.3
+- ✅ kyc-fill-in v0.3 — spec↔code audited 2026-10-15 (Phase 5 stable tier): fixed the
+  truncated 422 `missingIdentifier` example (`The phone number cannot be identified.` →
+  the handler's full "…: supply `phoneNumber` or use a token that identifies a line.");
+  the two 200 persona-0 examples (`setAll`/`narrowScopes`) and the other inline
+  error messages already byte-matched; added a test pinning all five router-reachable
+  inline error families through the router.
 - ✅ home-devices-qod v0.4
 - ✅ qos-profiles v1
 - ✅ kyc-tenure v0.2
@@ -1355,6 +1360,43 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — kyc-fill-in v0.3
+  (fifth Phase 5 stable API), drift found & fixed. Audited the one operation
+  (`KYC_Fill-in`, `POST /kyc-fill-in/v0.3/fill-in`) against
+  `specs/kyc-fill-in/v0.3/openapi.yaml`: the endpoint-authorisation gate (any
+  `kyc-fill-in:*` scope, else 403 `PERMISSION_DENIED`), the reserved-error-suffix
+  plane on the resolved identifier, the persona plane (trailing three digits →
+  `PERSONAS[digits % 3]`, so `…000`→Alice/FEMALE, `…001`→Bob/MALE, `…002`→Kenji/OTHER,
+  `…003`/`…006` collide with `…000`), the granted-scope response-shaping plane
+  (`set-all` → all 20 attributes, else only the per-attribute `kyc-fill-in:<attr>`
+  scopes granted), the genuinely-enforced E.164 pattern + `deny_unknown_fields`, and
+  the two-legged/three-legged identifier resolution all match the handler. The two
+  200 examples are byte-accurate reproducible persona-0 shapes (`setAll` = the full
+  Alice persona echoing `+123456789000`; `narrowScopes` = only `name`+`email`), the
+  400 `invalidArgument`, 403 `permissionDenied`, 422 `unnecessaryIdentifier`, and 422
+  `serviceNotApplicable` inline examples already byte-match, and every other 4xx/5xx
+  `$ref`s the shared catalog. **Drift found — the truncated-identifier-message class**
+  (device-swap / number-recycling / kyc-age-verification / call-forwarding-signal /
+  subscription-status / media-streaming-rate / consent-info / most-frequent-location
+  precedent): the 422 `missingIdentifier` example showed the short "The phone number
+  cannot be identified." but `resolve_identifier` emits "…: supply `phoneNumber` or
+  use a token that identifies a line." Corrected it and added
+  `vendored_error_example_messages_match_the_handler` pinning the exact
+  `status`/`code`/`message` bytes of all five router-reachable inline error families
+  through the real router — 400 `invalidArgument`, 403 `permissionDenied`, 422
+  `missingIdentifier` (reachable here: a `client_credentials` `sub` is a non-line
+  client id), `unnecessaryIdentifier`, `serviceNotApplicable` — which the existing
+  error tests guarded only by `code`. `cargo test` 3109 green (+1); `cargo build
+  --release` ok, binary 5,455,000 bytes (5.3M, byte-identical to the device-swap pass
+  — the YAML message correction fit within the current allocation page and the new
+  test is `#[cfg(test)]`-only, outside the release path). Spec + `#[cfg(test)]` change
+  only — no behaviour/response change (the handler was already correct; only the one
+  example was truncated), no new dependency. Next in phase order: home-devices-qod
+  v0.4 (next Phase 5 stable; carrier-billing / blockchain-public-address, which carry
+  a `store.rs`, wait for the stateless APIs). Branch `agent/kyc-fill-in/audit-v0_3`.
+  **Integration note:** on entry HEAD was detached at `origin/main` (`8f4738c`,
+  device-swap); local `main` ref was stale (`f15d2f9`) and was fast-forwarded to
+  `origin/main` before branching.
 - 2026-10-14 — Phase 5 stable/numbered-tier audit (backlog item 2) — device-swap v1
   (fourth Phase 5 stable API), drift found & fixed. Audited both operations
   (`checkDeviceSwap`, `POST /device-swap/v1/check`; `retrieveDeviceSwapDate`,

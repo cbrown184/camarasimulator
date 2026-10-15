@@ -682,4 +682,61 @@ mod tests {
             Some("corr-err")
         );
     }
+
+    /// Every router-reachable inline error example in
+    /// `specs/kyc-fill-in/v0.3/openapi.yaml` is driven through the real router and
+    /// its exact `status`/`code`/`message` bytes pinned, so the vendored spec
+    /// cannot silently drift from the handler (the truncated-identifier-message
+    /// class caught on device-swap / number-recycling / call-forwarding-signal /
+    /// most-frequent-location). The existing error tests assert only
+    /// `status`/`code`; this guards the `message` strings too.
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // The full `missingIdentifier` message the vendored example must carry —
+        // the short "The phone number cannot be identified." was the drift fixed
+        // in this pass.
+        let missing_identifier =
+            "The phone number cannot be identified: supply `phoneNumber` or use a token that identifies a line.";
+        let invalid_argument = "`phoneNumber` must be in E.164 format (e.g. +123456789).";
+        let unnecessary_identifier = "The phone number is already identified by the access token.";
+        let permission_denied = "Access token does not carry any 'kyc-fill-in:*' scope.";
+        let service_not_applicable = "The service is not available for the provided identifier.";
+
+        // Assert a response's exact status/code/message bytes.
+        let pin = |status: StatusCode,
+                   body: &Value,
+                   want_status: u16,
+                   want_code: &str,
+                   want_msg: &str| {
+            assert_eq!(status.as_u16(), want_status, "{want_code}: status");
+            assert_eq!(body["status"], want_status, "{want_code}: body.status");
+            assert_eq!(body["code"], want_code, "{want_code}: code");
+            assert_eq!(body["message"], want_msg, "{want_code}: message");
+        };
+
+        // 400 invalidArgument — a malformed `phoneNumber` (set-all, non-line subject).
+        let (s, _, b) = fill_in_ok(r#"{"phoneNumber":"0123"}"#).await;
+        pin(s, &b, 400, "INVALID_ARGUMENT", invalid_argument);
+
+        // 403 permissionDenied — a token carrying no `kyc-fill-in:*` scope.
+        let no_scope = mint_token("some:other-scope").await;
+        let (s, _, b) =
+            post_fill_in(Some(&no_scope), r#"{"phoneNumber":"+123456789000"}"#, None).await;
+        pin(s, &b, 403, "PERMISSION_DENIED", permission_denied);
+
+        // 422 missingIdentifier — a non-line (`client_credentials`) subject and no
+        // `phoneNumber` (reachable here: the `kfi-client` subject is not a line).
+        let (s, _, b) = fill_in_ok(r#"{}"#).await;
+        pin(s, &b, 422, "MISSING_IDENTIFIER", missing_identifier);
+
+        // 422 unnecessaryIdentifier — a `phoneNumber` resubmitted on a line token.
+        let line_token = mint_token_with_client(SET_ALL_SCOPE, "+123456789002").await;
+        let (s, _, b) =
+            post_fill_in(Some(&line_token), r#"{"phoneNumber":"+123456789002"}"#, None).await;
+        pin(s, &b, 422, "UNNECESSARY_IDENTIFIER", unnecessary_identifier);
+
+        // 422 serviceNotApplicable — the reserved `…422` suffix.
+        let (s, _, b) = fill_in_ok(r#"{"phoneNumber":"+123456789422"}"#).await;
+        pin(s, &b, 422, "SERVICE_NOT_APPLICABLE", service_not_applicable);
+    }
 }
