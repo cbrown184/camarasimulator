@@ -94,7 +94,35 @@ Verified sub-items:
 - ✅ geofencing-subscriptions v0.4
 
 ### Phase 5 — Remaining APIs (stable/numbered)
-- ✅ carrier-billing v0.5
+- ✅ carrier-billing v0.5 — spec↔code audited 2026-10-15 (Phase 5 stable tier, tenth; the
+  second **stateful** one — a `store.rs`-backed payment lifecycle with a `notifications.rs`
+  CloudEvent sink): all seven operations (`createPayment` `POST /payments`, `retrievePayments`
+  `GET /payments`, `retrievePayment` `GET /payments/{id}`, and the complete two-step flow —
+  `preparePayment` `POST /payments/prepare`, `validatePayment` `POST …/{id}/validate`,
+  `confirmPayment` `POST …/{id}/confirm`, `cancelPayment` `POST …/{id}/cancel`) reviewed end to
+  end against `specs/carrier-billing/v0.5/openapi.yaml`. The two control planes (identifier
+  reserved-error suffix + the `…888` validation-required tail; the `amount` < 0.001 →
+  INVALID_ARGUMENT / > 1000 → UNAUTHORIZED_AMOUNT plane), the OTP budget (3) → VALIDATION_FAILED
+  path, and the confirm/cancel store state machine all match the handler. The minted `paymentId`
+  (counter+clock `mint_uuid`) and wall-clock `paymentCreationDate`/`paymentDate` are legitimately
+  illustrative (the application-profiles/session-insights posture), so the 200/201 examples are
+  not pinned. **Drift found & fixed — the truncated-identifier-message class** (device-swap /
+  kyc-fill-in / kyc-tenure / consent-info precedent): both the `createPayment` and `preparePayment`
+  422 `missingIdentifier` examples carried the short "The phone number cannot be identified." but
+  `resolve_phone_number` emits the full "…: supply `phoneNumber` or use a token that identifies a
+  phone number." Corrected both. **Stale parent module doc fixed** (`src/apis/carrier_billing.rs`):
+  it listed `confirmPayment`/`cancelPayment` as "later slices" though both ship and are routed —
+  the same stale-slice-doc trap caught on device-data-volume / qos-booking / application-profiles /
+  session-insights / sponsored-data; corrected to list all seven as implemented. Added
+  `vendored_error_example_messages_match_the_handler` pinning the exact status/code/message bytes
+  of all fourteen router-reachable inline error families whose message is the API's own
+  (createPayment/preparePayment 422 UNAUTHORIZED_AMOUNT + MISSING_IDENTIFIER; validatePayment 400
+  INVALID_AUTHORIZATION_ID/INVALID_CODE/VALIDATION_FAILED + 409 ALREADY_EXISTS; confirmPayment &
+  cancelPayment 409 PAYMENT_CONFIRMED/PAYMENT_CANCELLED/CONFLICT) — existing tests guarded only
+  `code`. The two createPayment/preparePayment 400 `INVALID_ARGUMENT` examples show the shared
+  catalog's canonical generic message, which the handler never emits (specific per-cause messages),
+  so they are intentionally left unpinned; every other 4xx/5xx `$ref`s the shared catalog. Spec +
+  doc + `#[cfg(test)]` change only, binary unchanged.
 - ✅ call-forwarding-signal v0.4
 - ✅ number-recycling v0.2
 - ✅ kyc-age-verification v0.1
@@ -1412,6 +1440,59 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — carrier-billing v0.5
+  (tenth Phase 5 stable API, the **second stateful** one), drift found & fixed. Audited all seven
+  operations against `specs/carrier-billing/v0.5/openapi.yaml`: the one-step `createPayment`
+  (`POST /payments`), the read-back `retrievePayment` (`GET /payments/{id}`) and list
+  `retrievePayments` (`GET /payments`, paginated/ordered over the in-memory `store.rs`), and the
+  complete two-step reserve → validate → confirm/cancel flow (`preparePayment`
+  `POST /payments/prepare`, `validatePayment` `POST …/{id}/validate`, `confirmPayment`
+  `POST …/{id}/confirm`, `cancelPayment` `POST …/{id}/cancel`). The handler is faithful: the two
+  shared control planes (the identifier reserved-error-suffix plane + the `…888`
+  validation-required tail that lands a reservation in `pending_validation`; the `amount` plane —
+  `< 0.001` → 400 `INVALID_ARGUMENT`, `> 1000` → 422 `CARRIER_BILLING.UNAUTHORIZED_AMOUNT`, with
+  the identifier plane checked first), the deterministic OTP `code` (last six digits) and 3-attempt
+  budget → `CARRIER_BILLING.VALIDATION_FAILED` (reservation → `denied`), and the confirm/cancel
+  store state machine (`reserved` → `succeeded`/`cancelled`; re-confirm → `PAYMENT_CONFIRMED`,
+  re-cancel → `PAYMENT_CANCELLED`, a `pending_validation`/`denied` payment → `CONFLICT`) all match.
+  The `phoneNumber` E.164 pattern, `deny_unknown_fields`, the three scopes
+  (`:create`/`:read`/`:write`) and `x-correlator` echo are genuinely enforced; the optional
+  confirm/cancel `phoneNumber` body field is a documented cut (the reservation is addressed by its
+  opaque `paymentId`). The minted `paymentId` (counter+clock `mint_uuid`, not request-derived) and
+  the wall-clock `paymentCreationDate`/`paymentDate` are legitimately illustrative (the
+  application-profiles / session-insights posture), so the 200/201 success examples are not pinned.
+  **Drift found — the truncated-identifier-message class** (device-swap / kyc-fill-in / kyc-tenure /
+  consent-info / subscription-status / media-streaming-rate precedent): both the `createPayment`
+  and `preparePayment` 422 `missingIdentifier` examples carried the short "The phone number cannot
+  be identified." but `resolve_phone_number` emits the full "…: supply `phoneNumber` or use a token
+  that identifies a phone number." (note: carrier-billing's wording ends "a phone number", not the
+  "a line" of the line-keyed APIs). Corrected both. **Stale parent module doc fixed**
+  (`src/apis/carrier_billing.rs`): the submodule listing said `confirmPayment`/`cancelPayment` were
+  "later slices" though both ship and are routed — the same stale-"later slice/deferred" doc trap
+  caught on device-data-volume / qos-booking / application-profiles / session-insights /
+  sponsored-data; corrected to list all seven operations as implemented (the `v0_5.rs` submodule
+  header already said "the two-step flow is now complete", so only the parent was stale). **Tested
+  increment:** added `vendored_error_example_messages_match_the_handler` driving each documented
+  request through the real router and pinning the exact `status`/`code`/`message` bytes of all
+  fourteen router-reachable inline error families whose message is the API's own —
+  createPayment/preparePayment 422 `UNAUTHORIZED_AMOUNT`/`MISSING_IDENTIFIER`; validatePayment 400
+  `INVALID_AUTHORIZATION_ID`/`INVALID_CODE`/`VALIDATION_FAILED` + 409 `ALREADY_EXISTS`;
+  confirmPayment & cancelPayment 409 `PAYMENT_CONFIRMED`/`PAYMENT_CANCELLED`/`CONFLICT` — which the
+  existing error tests guarded only by `code`. The two createPayment/preparePayment 400
+  `INVALID_ARGUMENT` examples carry the shared catalog's canonical generic message, which the
+  handler never emits (every `INVALID_ARGUMENT` path returns a specific per-cause message such as
+  "`amount` must be at least 0.001."), so — like other shared-message examples — they are
+  intentionally left unpinned; every other 4xx/5xx `$ref`s the shared catalog. `cargo test` 3114
+  green (+1); `cargo build --release` ok, binary 5,455,000 bytes (5.3M, byte-identical to the
+  blockchain-public-address pass — the YAML message correction and the module-doc fix are outside
+  the release path and the new test is `#[cfg(test)]`-only). Spec + doc + `#[cfg(test)]` change
+  only — no behaviour/response change (the handler was already correct; the two examples were
+  truncated and the parent doc was stale), no new dependency. Next in phase order: the remaining
+  Phase 5 stable APIs (simple-edge-discovery v2, customer-insights v0.2, connected-network-type
+  v0.2, connectivity-insights v0.6, region-device-count v0.2, qos-provisioning v0.3, sms v0alpha1,
+  in-home-device-management v1). Branch `agent/carrier-billing/audit-v0_5`. **Integration note:**
+  on entry HEAD was detached at `origin/main` (`5c933d2`, blockchain-public-address); local `main`
+  ref was stale (`f15d2f9`) and was reset to `origin/main` before branching.
 - 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — blockchain-public-address
   v0.3 (ninth Phase 5 stable API, the **first stateful** one in the tier), drift found & fixed.
   Audited all three operations against `specs/blockchain-public-address/v0.3/openapi.yaml`:

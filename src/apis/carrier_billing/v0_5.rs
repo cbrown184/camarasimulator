@@ -3405,4 +3405,105 @@ mod tests {
             "no notify target for a sink-less reservation"
         );
     }
+
+    /// Pin the exact `status`/`code`/`message` bytes of every router-reachable
+    /// inline error example in `specs/carrier-billing/v0.5/openapi.yaml` whose
+    /// message is the API's own (not a shared-catalog `$ref`). The error tests
+    /// above guard only `code`, leaving the `message` strings unpinned; this
+    /// drives each documented case through the real router and pins the message
+    /// too, so the vendored examples cannot silently drift from the handler (the
+    /// media-streaming-rate / subscription-status / kyc-tenure precedent). The two
+    /// `createPayment`/`preparePayment` 400 `INVALID_ARGUMENT` examples carry the
+    /// shared catalog's canonical generic message, which the handler never emits
+    /// (every `INVALID_ARGUMENT` path returns a specific per-cause message), so —
+    /// like other shared-message examples — they are intentionally not pinned here.
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        fn pin(status: StatusCode, body: &Value, want_status: u16, want_code: &str, want_msg: &str) {
+            assert_eq!(status, StatusCode::from_u16(want_status).unwrap());
+            assert_eq!(body["status"].as_u64(), Some(u64::from(want_status)));
+            assert_eq!(body["code"], want_code);
+            assert_eq!(body["message"], want_msg);
+        }
+
+        const MISSING_ID_MSG: &str =
+            "The phone number cannot be identified: supply `phoneNumber` or use a token that identifies a phone number.";
+        // A body with no `phoneNumber`; the default token subject `cb-client` is
+        // not E.164, so the account cannot be identified → 422 MISSING_IDENTIFIER.
+        const NO_PHONE_BODY: &str = r#"{"amountTransaction":{"paymentAmount":{"chargingInformation":{"amount":2.5,"currency":"EUR","description":"x"}},"referenceCode":"ref-sub"}}"#;
+
+        let create = mint_token(CREATE_SCOPE).await;
+        let write = mint_token(WRITE_SCOPE).await;
+
+        // --- createPayment 422s (inline `CarrierBillingError` examples) ---
+        let (status, _, body) =
+            post_payment(Some(&create), &payment_body("+123456789012", 5000.0), None).await;
+        pin(status, &body, 422, "CARRIER_BILLING.UNAUTHORIZED_AMOUNT", "Unauthorized amount requested.");
+        let (status, _, body) = post_payment(Some(&create), NO_PHONE_BODY, None).await;
+        pin(status, &body, 422, "MISSING_IDENTIFIER", MISSING_ID_MSG);
+
+        // --- preparePayment 422s (same inline example pair) ---
+        let (status, _, body) =
+            post_prepare(Some(&create), &payment_body("+123456789012", 5000.0), None).await;
+        pin(status, &body, 422, "CARRIER_BILLING.UNAUTHORIZED_AMOUNT", "Unauthorized amount requested.");
+        let (status, _, body) = post_prepare(Some(&create), NO_PHONE_BODY, None).await;
+        pin(status, &body, 422, "MISSING_IDENTIFIER", MISSING_ID_MSG);
+
+        // --- validatePayment 400s / 409 (inline examples) ---
+        // Wrong authorizationId.
+        let (id, _auth) = prepare_pending("+123456789888").await;
+        let (status, _, body) =
+            post_validate(Some(&write), &id, &validate_body("not-the-id", "789888"), None).await;
+        pin(status, &body, 400, "CARRIER_BILLING.INVALID_AUTHORIZATION_ID", "Invalid authorizationId.");
+        // Correct authorizationId, wrong code (budget not yet spent).
+        let (id, auth) = prepare_pending("+123456789888").await;
+        let (status, _, body) =
+            post_validate(Some(&write), &id, &validate_body(&auth, "000000"), None).await;
+        pin(status, &body, 400, "CARRIER_BILLING.INVALID_CODE", "Invalid code.");
+        // Spend the whole attempt budget → VALIDATION_FAILED on the last try.
+        let (id, auth) = prepare_pending("+123456789888").await;
+        for _ in 0..VALIDATION_ATTEMPTS - 1 {
+            let _ = post_validate(Some(&write), &id, &validate_body(&auth, "000000"), None).await;
+        }
+        let (status, _, body) =
+            post_validate(Some(&write), &id, &validate_body(&auth, "000000"), None).await;
+        pin(status, &body, 400, "CARRIER_BILLING.VALIDATION_FAILED", "The maximum number of validation attempts has been consumed.");
+        // A plain (`reserved`, not pending) payment is not awaiting validation.
+        let id = prepare_reserved("+123456789012").await;
+        let (status, _, body) =
+            post_validate(Some(&write), &id, &validate_body("anything", "789012"), None).await;
+        pin(status, &body, 409, "ALREADY_EXISTS", "The payment is not awaiting validation.");
+
+        // --- confirmPayment 409s (inline examples) ---
+        // Already confirmed: a one-step `createPayment` is already `succeeded`.
+        let (_, _, created) = post_payment(Some(&create), &payment_body("+123456789012", 9.99), None).await;
+        let id = created["paymentId"].as_str().unwrap().to_string();
+        let (status, _, body) = post_confirm(Some(&write), &id, "", None).await;
+        pin(status, &body, 409, "CARRIER_BILLING.PAYMENT_CONFIRMED", "Payment has been confirmed.");
+        // Already cancelled: reserve, cancel, then confirm.
+        let id = prepare_reserved("+123456789012").await;
+        let _ = post_cancel(Some(&write), &id, "", None).await;
+        let (status, _, body) = post_confirm(Some(&write), &id, "", None).await;
+        pin(status, &body, 409, "CARRIER_BILLING.PAYMENT_CANCELLED", "Payment has been cancelled.");
+        // Not in a confirmable state: a `pending_validation` reservation.
+        let (id, _auth) = prepare_pending("+123456789888").await;
+        let (status, _, body) = post_confirm(Some(&write), &id, "", None).await;
+        pin(status, &body, 409, "CONFLICT", "The payment cannot be confirmed in its current state.");
+
+        // --- cancelPayment 409s (inline examples) ---
+        // Already cancelled: reserve, cancel, then cancel again.
+        let id = prepare_reserved("+123456789012").await;
+        let _ = post_cancel(Some(&write), &id, "", None).await;
+        let (status, _, body) = post_cancel(Some(&write), &id, "", None).await;
+        pin(status, &body, 409, "CARRIER_BILLING.PAYMENT_CANCELLED", "Payment has been cancelled.");
+        // Already confirmed (charged): reserve, confirm, then cancel.
+        let id = prepare_reserved("+123456789012").await;
+        let _ = post_confirm(Some(&write), &id, "", None).await;
+        let (status, _, body) = post_cancel(Some(&write), &id, "", None).await;
+        pin(status, &body, 409, "CARRIER_BILLING.PAYMENT_CONFIRMED", "Payment has been confirmed.");
+        // Not in a cancellable state: a `pending_validation` reservation.
+        let (id, _auth) = prepare_pending("+123456789888").await;
+        let (status, _, body) = post_cancel(Some(&write), &id, "", None).await;
+        pin(status, &body, 409, "CONFLICT", "The payment cannot be cancelled in its current state.");
+    }
 }

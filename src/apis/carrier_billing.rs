@@ -13,13 +13,15 @@
 //! three-legged access token authenticated (in which case `phoneNumber` is
 //! omitted).
 //!
-//! One submodule per major version (docs/DESIGN.md §5, §9). So far:
-//! - [`v0_5`] — mounted at `/carrier-billing/v0.5`. `POST /payments`
-//!   (`createPayment`, the one-step charge), `GET /payments/{paymentId}`
-//!   (`retrievePayment`, read-back), `GET /payments` (`retrievePayments`, list),
-//!   `POST /payments/prepare` (`preparePayment`, reserve), and
-//!   `POST /payments/{paymentId}/validate` (`validatePayment`, OTP validation)
-//!   so far; the two-step confirm / cancel operations are later slices.
+//! One submodule per major version (docs/DESIGN.md §5, §9):
+//! - [`v0_5`] — mounted at `/carrier-billing/v0.5`. All seven operations ship:
+//!   `POST /payments` (`createPayment`, the one-step charge),
+//!   `GET /payments/{paymentId}` (`retrievePayment`, read-back),
+//!   `GET /payments` (`retrievePayments`, list), and the complete two-step flow —
+//!   `POST /payments/prepare` (`preparePayment`, reserve),
+//!   `POST /payments/{paymentId}/validate` (`validatePayment`, OTP validation),
+//!   `POST /payments/{paymentId}/confirm` (`confirmPayment`, charge a reservation),
+//!   and `POST /payments/{paymentId}/cancel` (`cancelPayment`, release one).
 //!
 //! Reading a payment back makes Carrier Billing **stateful**, so a shared
 //! in-memory [`store`] holds created payments keyed by `paymentId`.
