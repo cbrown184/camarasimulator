@@ -107,7 +107,16 @@ Verified sub-items:
   the two 200 persona-0 examples (`setAll`/`narrowScopes`) and the other inline
   error messages already byte-matched; added a test pinning all five router-reachable
   inline error families through the router.
-- ✅ home-devices-qod v0.4
+- ✅ home-devices-qod v0.4 — spec↔code audited 2026-10-15 (Phase 5 stable tier, sixth):
+  the one operation (`setQos`, `PUT /home-devices-qod/v0.4/qos`) — a stateless,
+  phone-number-free API keyed on the device LAN `ipAddress` last octet — reviewed end
+  to end; the happy-path/reserved-octet control plane (incl. `serviceClass=standard` as
+  the second plane for the `…247` already-default case), the generic-code messages
+  (matching `CamaraError::for_status`), and all seven inline error examples
+  (400/404/409×3/503/504) already byte-matched the handler. **No drift found.** Added
+  `vendored_error_example_messages_match_the_handler` pinning the exact
+  `status`/`code`/`message` bytes of all seven through the router (existing error tests
+  guarded only `status`/`code`); `#[cfg(test)]`-only, binary unchanged.
 - ✅ qos-profiles v1
 - ✅ kyc-tenure v0.2
 - ✅ blockchain-public-address v0.3
@@ -1360,6 +1369,40 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — home-devices-qod
+  v0.4 (sixth Phase 5 stable API), no drift; message-byte pins added. Audited the one
+  operation (`setQos`, `PUT /home-devices-qod/v0.4/qos`) against
+  `specs/home-devices-qod/v0.4/openapi.yaml`. This API is unusual for the tier: it is
+  stateless and has **no phone number / identifier-resolution plane** — the device is
+  the subscriber's home LAN device, identified by its internal `ipAddress`, whose
+  **last octet** is the control plane (`…240` → 404 `DEVICE_NOT_FOUND`; `…241`–`…247` →
+  the `HOME_DEVICES_QOD.*` 409 conflict codes, with `…247`
+  `QOS_ALREADY_SET_TO_DEFAULT` gated on `serviceClass=standard` so `serviceClass` is a
+  genuine second control plane; `…248` → 503 `ROUTER_OFFLINE`, `…249` → 504 `TIMEOUT`,
+  `…250` → 500 `INTERNAL`, `…251`/`…252`/`…253` → the generic `CONFLICT`/`NOT_FOUND`/
+  `UNAVAILABLE`; anything else → 204). All planes match the handler; the `serviceClass`
+  enum and `ipAddress` IPv4 format are genuinely enforced (→ 400 `INVALID_ARGUMENT`),
+  and the `x-correlator` echo and `home-devices-qod:qos:write` scope gate are correct.
+  **No spec↔code drift found** — unlike every other Phase 5 stable API audited so far,
+  there is no identifier message to truncate (no `resolve_identifier` here): all seven
+  inline error examples (400 `invalidArgument`, 404 `deviceNotFound`, 409
+  `tooManyDevices`/`qosTooHigh`/`alreadyDefault`, 503 `routerOffline`, 504 `timeout`)
+  already byte-match the handler, the generic-code messages (`…250`/`…252`/`…253`)
+  equal `CamaraError::for_status`, every status the handler can emit is declared, and
+  the module docs describe the single stateless endpoint accurately (no stale-slice-doc
+  trap). **Small tested increment:** the existing error tests asserted only
+  `status`/`code`, leaving the seven documented `message` strings unguarded; added
+  `vendored_error_example_messages_match_the_handler` driving each documented request
+  through the real router and pinning the exact `status`/`code`/`message` bytes so they
+  can't silently drift. `cargo test` 3110 green (+1); `cargo build --release` ok, binary
+  5,455,000 bytes (5.3M, byte-identical to the kyc-fill-in pass — the new test is
+  `#[cfg(test)]`-only, outside the release path). `#[cfg(test)]`-only change — no
+  spec/behaviour change (the spec was already correct), no new dependency. Next in phase
+  order: qos-profiles v1 (next Phase 5 stable; the stateful carrier-billing v0.5 /
+  blockchain-public-address v0.3, which carry a `store.rs`, follow the stateless ones).
+  Branch `agent/home-devices-qod/audit-v0_4`. **Integration note:** on entry HEAD was
+  detached at `origin/main` (`00e5021`, kyc-fill-in); local `main` ref was stale
+  (`f15d2f9`) and was fast-forwarded to `origin/main` before branching.
 - 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — kyc-fill-in v0.3
   (fifth Phase 5 stable API), drift found & fixed. Audited the one operation
   (`KYC_Fill-in`, `POST /kyc-fill-in/v0.3/fill-in`) against

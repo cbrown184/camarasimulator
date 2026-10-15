@@ -478,6 +478,69 @@ mod tests {
         assert_eq!(body["code"], "INVALID_ARGUMENT");
     }
 
+    /// Pin the exact `status`/`code`/`message` bytes of every router-reachable
+    /// inline error example in `specs/home-devices-qod/v0.4/openapi.yaml`, so the
+    /// documented `message` strings can't silently drift from the handler. The
+    /// other error tests above guard only `status`/`code`, leaving the seven
+    /// vendored example messages unchecked.
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // (request body, status, code, message) — one per documented inline
+        // example: 400 invalidArgument, 404 deviceNotFound, 409
+        // tooManyDevices/qosTooHigh/alreadyDefault, 503 routerOffline, 504 timeout.
+        let cases: [(&str, u16, &str, &str); 7] = [
+            (
+                r#"{"serviceClass":"standard","ipAddress":"192.168.1.999"}"#,
+                400,
+                "INVALID_ARGUMENT",
+                "`ipAddress` must be a valid IPv4 address.",
+            ),
+            (
+                r#"{"serviceClass":"standard","ipAddress":"192.168.1.240"}"#,
+                404,
+                "DEVICE_NOT_FOUND",
+                "No device with the given ipAddress was found on the home network.",
+            ),
+            (
+                r#"{"serviceClass":"low_latency_data","ipAddress":"192.168.1.241"}"#,
+                409,
+                "HOME_DEVICES_QOD.TOO_MANY_DEVICES",
+                "Too many devices already have a QoS treatment set on the home network.",
+            ),
+            (
+                r#"{"serviceClass":"high_throughput_data","ipAddress":"192.168.1.243"}"#,
+                409,
+                "HOME_DEVICES_QOD.QOS_TOO_HIGH",
+                "The requested service class exceeds what the home network can provide.",
+            ),
+            (
+                r#"{"serviceClass":"standard","ipAddress":"192.168.1.247"}"#,
+                409,
+                "HOME_DEVICES_QOD.QOS_ALREADY_SET_TO_DEFAULT",
+                "The device is already using the default QoS treatment.",
+            ),
+            (
+                r#"{"serviceClass":"broadcast_video","ipAddress":"192.168.1.248"}"#,
+                503,
+                "HOME_DEVICES_QOD.ROUTER_OFFLINE",
+                "The home router is offline and cannot apply the QoS.",
+            ),
+            (
+                r#"{"serviceClass":"broadcast_video","ipAddress":"192.168.1.249"}"#,
+                504,
+                "TIMEOUT",
+                "The home router did not respond in time.",
+            ),
+        ];
+        for (body, status, code, message) in cases {
+            let (got, _, json) = qos_ok(body).await;
+            assert_eq!(got.as_u16(), status, "HTTP status for {body}");
+            assert_eq!(json["status"], status, "body.status for {body}");
+            assert_eq!(json["code"], code, "code for {body}");
+            assert_eq!(json["message"], message, "message for {body}");
+        }
+    }
+
     // --- Auth --------------------------------------------------------------
 
     #[tokio::test]
