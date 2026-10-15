@@ -2327,4 +2327,114 @@ mod tests {
             Some("corr-patch")
         );
     }
+
+    // --- Spec-example pinning ----------------------------------------------
+
+    #[tokio::test]
+    async fn vendored_success_examples_are_illustrative_shapes_matching_the_handler() {
+        // The vendored 200/201 success examples carry opaque, derived identifiers
+        // (`deviceId`/`macAddress`/`actionId`), hash-derived health figures and
+        // wall-clock timestamps (`measuredAt`/`appliedAt`) that the spec marks
+        // illustrative: the reproducible contract is the shape + the scalar fields,
+        // not those bytes. Drive the real router and assert the reproducible scalars
+        // hold while the illustrative fields are genuinely derived/fresh — never the
+        // frozen example literal.
+
+        // listDevices: a no-digit ssid → the gateway alone (the `gatewayOnly` shape).
+        let (status, _, body) = list_ok("ssid=QuietHouse").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["total"], 1);
+        let gw = body["devices"][0].clone();
+        assert_eq!(gw["ssid"], "QuietHouse");
+        assert_eq!(gw["deviceName"], "Home Gateway");
+        assert_eq!(gw["deviceType"], "other");
+        assert_eq!(gw["ipAddress"], "192.168.1.1");
+        assert_eq!(gw["connectionStatus"], "connected");
+        assert_eq!(gw["blocked"], false);
+        assert_eq!(gw["paused"], false);
+        assert_eq!(gw["infraDevice"], "modem");
+        assert_eq!(gw["interfaceType"], "ethernet");
+        // Illustrative derived identifiers: right shape, not the frozen spec bytes.
+        let dev_id = gw["deviceId"].as_str().unwrap().to_string();
+        assert!(dev_id.starts_with("dev-"));
+        assert_ne!(dev_id, "dev-a1b2c3d4e5f60718");
+        assert_ne!(dev_id, "dev-1122334455667788");
+        let mac = gw["macAddress"].as_str().unwrap();
+        assert!(mac.starts_with("02:"));
+        assert_ne!(mac, "02:99:88:77:66:55");
+
+        // getDevice returns the identical object for the same id.
+        let (status, _, one) = get_one_ok(&dev_id, "ssid=QuietHouse").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(one, gw);
+
+        // getDeviceNetworkHealth: the wired gateway — ethernet, no radio metrics.
+        let (status, _, health) = get_health_ok(&dev_id, "ssid=QuietHouse").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(health["ssid"], "QuietHouse");
+        assert_eq!(health["interfaceType"], "ethernet");
+        assert_eq!(health["infraDevice"], "modem");
+        assert_eq!(health["maxPhyRateMbps"], 1000.0);
+        assert!(health.get("radioFrequency").is_none());
+        assert!(["green", "red"].contains(&health["networkCongestion"].as_str().unwrap()));
+        let measured = health["measuredAt"].as_str().unwrap();
+        assert!(measured.ends_with('Z'));
+        assert_ne!(measured, "2024-01-01T14:27:08Z");
+
+        // performDeviceAction: the connected gateway → applied, with a fresh appliedAt.
+        let (status, _, act) =
+            perform_ok(&dev_id, "schedule-access", r#"{"ssid":"QuietHouse"}"#).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(act["deviceId"], json!(dev_id));
+        assert_eq!(act["actionType"], "schedule-access");
+        assert_eq!(act["status"], "applied");
+        let action_id = act["actionId"].as_str().unwrap();
+        assert!(action_id.starts_with("act-"));
+        assert_ne!(action_id, "act-3f9a1c0b2d4e5f60");
+        let applied = act["appliedAt"].as_str().unwrap();
+        assert!(applied.ends_with('Z'));
+        assert_ne!(applied, "2026-06-13T22:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn vendored_invalid_argument_examples_match_the_handler() {
+        // Every operation's inline 400 example is the same missing-`ssid` body; pin
+        // the exact status/code/message bytes through the router (the per-operation
+        // 400 tests above guard only `code`).
+        let expect = json!({
+            "status": 400,
+            "code": "INVALID_ARGUMENT",
+            "message": "`ssid` is required and must be a non-empty string.",
+        });
+
+        // listDevices — missing ssid in the query.
+        let (s, _, b) = list_ok("connectionStatus=connected").await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(b, expect);
+
+        // The per-device legs reject a missing ssid before the id is looked up, so
+        // any id value reaches the identical error.
+        let id = "dev-illustrative";
+
+        let (s, _, b) = get_one_ok(id, "").await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(b, expect);
+
+        let (s, _, b) = get_health_ok(id, "").await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(b, expect);
+
+        let (s, _, b) = delete_ok(id, "").await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(b, expect);
+
+        let (s, _, b) = patch_ok(id, "", r#"{"paused":true}"#).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(b, expect);
+
+        // performDeviceAction — missing ssid in the body.
+        let (s, _, b) = perform_ok(id, "schedule-access", r#"{}"#).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(b, expect);
+    }
 }

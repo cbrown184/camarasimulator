@@ -397,7 +397,39 @@ Verified sub-items:
   already correct; one example placeholder + one illustrative timestamp), no new dependency.
   Binary 5,459,096 bytes. Next in phase order: the two remaining stateful Phase 5 stable APIs —
   qos-provisioning v0.3, then in-home-device-management v1.
-- ✅ in-home-device-management v1
+- ✅ in-home-device-management v1 — spec↔code audited 2026-10-15 (Phase 5 stable tier, **eighteenth
+  and last**; the second of the two remaining **stateful** ones — a `store.rs`-backed
+  tombstone + overlay layer over an otherwise `ssid`-derived roster): all six operations
+  (`listDevices` `GET /devices`, `getDevice` `GET /devices/{id}`, `getDeviceNetworkHealth`
+  `GET …/network-health`, `performDeviceAction` `POST …/actions/{actionId}`, `deleteDevice`
+  `DELETE /devices/{id}`, `updateDevice` `PATCH /devices/{id}`) reviewed end to end against
+  `specs/in-home-device-management/v1/openapi.yaml`; handler/store faithful (the `ssid`
+  reserved-suffix error plane; the `d % 6` roster-shape plane + `connectionStatus` filter; the
+  delete tombstone single-use gate; the update overlay with blocked>paused folded into
+  `connectionStatus`; the connected→applied/offline→accepted action plane; read/write scope
+  gates + `x-correlator` echo). **Stale-slice-doc drift found & fixed** (the device-swap /
+  carrier-billing / qos-provisioning precedent): both the parent module doc
+  (`src/apis/in_home_device_management.rs`) and the vendored spec header still called
+  `updateDevice` "a later slice" though PATCH is fully routed, documented in the spec's own
+  `patch:` block, and has ~16 tests — corrected both to describe it as the implemented second
+  mutation (overlay). **Illustrative-value class** (device-identifier / sms / carrier-billing
+  precedent): the 200/201 success examples presented opaque FNV-1a–derived `deviceId`/`macAddress`/
+  `actionId`, hash-derived health figures (`radioFrequency`/`rssiDbm`/`wifiCompatibility`/
+  `lastNetworkSpeedMbps`/`networkCongestion`) and frozen wall-clock `measuredAt`/`appliedAt` as if
+  literal — none reproduce the hand-written bytes/instant — so marked them illustrative with a
+  derivation note on each operation's 200/201 response `description`, keeping the reproducible
+  scalars (`total`, `deviceName`/`deviceType`/`connectionStatus`/`blocked`/`paused`/`ipAddress`/
+  `infraDevice`/`interfaceType`, `status`/`actionType`, the `maxPhyRateMbps` 1000 wired constant)
+  as the contract. All inline 400 `INVALID_ARGUMENT` examples already byte-matched the handler;
+  every 401/403/404/409/422/429/500/503 `$ref`s the shared catalog. Added two `#[cfg(test)]` pins:
+  `vendored_success_examples_are_illustrative_shapes_matching_the_handler` (drives listDevices/
+  getDevice/getDeviceNetworkHealth/performDeviceAction through the router, pins the reproducible
+  scalars and asserts the illustrative `deviceId`/`macAddress`/`actionId`/`measuredAt`/`appliedAt`
+  are derived/fresh and ≠ the frozen spec literals) and
+  `vendored_invalid_argument_examples_match_the_handler` (pins the exact status/code/message bytes
+  of all five operations' 400 example; prior 400 tests guarded only `code`). Spec + doc +
+  `#[cfg(test)]` change only — no behaviour/response change (handlers already correct). **This
+  completes the Phase 5 stable/numbered tier (all 18 audited).**
 
 ### Phase 5 — Remaining APIs (CAMARA `vwip` — deepen scenarios/errors/contracts)
 - 🔧 device-data-volume — verified 2026-10-12: both operations
@@ -1639,6 +1671,33 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — in-home-device-management v1
+  (eighteenth and **last** Phase 5 stable API; the second remaining **stateful** one — a
+  `store.rs` tombstone + overlay layer over an otherwise `ssid`-derived roster), drift found &
+  fixed. Audited all six operations (`listDevices`, `getDevice`, `getDeviceNetworkHealth`,
+  `performDeviceAction`, `deleteDevice`, `updateDevice`) against
+  `specs/in-home-device-management/v1/openapi.yaml`; handler/store faithful (ssid reserved-suffix
+  error plane; `d % 6` roster-shape plane + `connectionStatus` filter; delete tombstone single-use
+  gate; update overlay with blocked>paused folded into `connectionStatus` and admin-state clearing
+  → connected; connected→applied / offline→accepted action plane; read/write scope gates +
+  `x-correlator`). **Stale-slice-doc drift** (device-swap / carrier-billing / qos-provisioning
+  precedent): the parent module doc (`src/apis/in_home_device_management.rs`) and the spec header
+  both still called `updateDevice` "a later slice" though PATCH is fully routed, documented in the
+  spec's own `patch:` block and has ~16 tests — corrected both to the implemented second mutation.
+  **Illustrative-value class** (device-identifier / sms / carrier-billing precedent): the 200/201
+  success examples presented opaque FNV-1a `deviceId`/`macAddress`/`actionId`, hash-derived health
+  figures and frozen wall-clock `measuredAt`/`appliedAt` as if literal (none reproduce) — marked
+  them illustrative with a derivation note on each operation's 200/201 response `description`,
+  keeping the reproducible scalars as the contract. Inline 400 examples already byte-matched;
+  every other 4xx/5xx `$ref`s the shared catalog. Added two pinning tests
+  (`vendored_success_examples_are_illustrative_shapes_matching_the_handler`,
+  `vendored_invalid_argument_examples_match_the_handler`). `cargo test` green: 3125 passed, 0
+  failed (+2). `cargo build --release` green; binary = 5,463,192 bytes (unchanged vs
+  qos-provisioning — the embedded-spec text additions did not move the measured size; tests are
+  `#[cfg(test)]`, no code-path change, no new dependency). Spec + doc + `#[cfg(test)]` change only.
+  **This completes the Phase 5 stable/numbered tier (all 18 audited); the only remaining
+  per-API spec↔code audit tier is the vwip APIs, whose sweep completed 2026-10-13.** Branch
+  `agent/in-home-device-management/audit-v1`.
 - 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — qos-provisioning v0.3
   (seventeenth Phase 5 stable API; the first of the two remaining **stateful** ones — the QoD
   sibling, `store.rs` provisioning lifecycle + `notifications.rs` CloudEvent sink), drift found &

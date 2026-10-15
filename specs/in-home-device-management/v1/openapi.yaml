@@ -14,10 +14,12 @@
 # deterministically from it, also stateless), the action leg
 # `POST /devices/{deviceId}/actions/{actionId}` (performDeviceAction — a stateless
 # synchronous acknowledgement of a `schedule-access` action; nothing persisted),
-# and the delete leg `DELETE /devices/{deviceId}` (deleteDevice — the API's first
-# mutation: it tombstones the device in an in-memory store and the read legs honour
-# the tombstone, so a deleted device stops appearing; a repeat delete → 404). The
-# remaining mutation leg (updateDevice) is a later slice.
+# and both mutation legs: `DELETE /devices/{deviceId}` (deleteDevice — the API's
+# first mutation: it tombstones the device in an in-memory store and the read legs
+# honour the tombstone, so a deleted device stops appearing; a repeat delete → 404)
+# and `PATCH /devices/{deviceId}` (updateDevice — the second mutation: it records an
+# overlay of the mutable fields `deviceName`/`blocked`/`paused` in the same store,
+# which the read legs apply on top of the regenerated device).
 openapi: 3.0.3
 info:
   title: In-Home Device Management
@@ -112,7 +114,16 @@ paths:
             $ref: "#/components/schemas/ConnectionStatus"
       responses:
         "200":
-          description: The household's attached devices (optionally filtered).
+          description: |
+            The household's attached devices (optionally filtered). In the
+            examples the opaque `deviceId`/`macAddress` values are **illustrative**:
+            CamaraSim derives them by FNV-1a from the `ssid` + the device's
+            household index (deterministic, but not the hand-written example bytes),
+            and the example `devices` array is truncated to a couple of entries.
+            The reproducible contract is the shape and the scalar fields —
+            `total` (always the length of the returned `devices`) and each device's
+            `deviceName`/`deviceType`/`connectionStatus`/`blocked`/`paused`/
+            `ipAddress`/`infraDevice`/`interfaceType`.
           headers:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
@@ -256,7 +267,13 @@ paths:
           example: Home-005
       responses:
         "200":
-          description: The requested device.
+          description: |
+            The requested device. The example's `deviceId`/`macAddress` are
+            **illustrative** opaque identifiers (FNV-1a of the `ssid` + the device's
+            household index, so deterministic but not the hand-written example
+            bytes); the reproducible contract is the shape and the scalar fields
+            (`deviceName`/`deviceType`/`connectionStatus`/`blocked`/`paused`/
+            `ipAddress`/`interfaceType`).
           headers:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
@@ -374,7 +391,11 @@ paths:
           example: Home-005
       responses:
         "200":
-          description: The device record was deleted.
+          description: |
+            The device record was deleted. The example's `deviceId` is
+            **illustrative** (it echoes the opaque path `deviceId`); the
+            reproducible contract is `status: deleted` and that the echoed
+            `deviceId` equals the one deleted.
           headers:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
@@ -506,7 +527,13 @@ paths:
                   blocked: true
       responses:
         "200":
-          description: The updated device.
+          description: |
+            The updated device. The example's `deviceId`/`macAddress` are
+            **illustrative** opaque identifiers (FNV-1a of the `ssid` + the device's
+            household index); the reproducible contract is the shape and the scalar
+            fields — the overlaid `deviceName`/`blocked`/`paused` and the derived
+            `connectionStatus` (blocking wins over pausing; clearing an admin state
+            returns the device to `connected`).
           headers:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
@@ -633,7 +660,17 @@ paths:
           example: Home-005
       responses:
         "200":
-          description: The device's network-health telemetry.
+          description: |
+            The device's network-health telemetry. In the examples the opaque
+            `deviceId`, the hash-derived radio/throughput figures
+            (`radioFrequency`/`rssiDbm`/`wifiCompatibility`/`lastNetworkSpeedMbps`,
+            and the `networkCongestion` verdict) and the wall-clock `measuredAt` are
+            **illustrative**: CamaraSim derives the figures from a hash of the
+            device and stamps `measuredAt` with the current instant, so the frozen
+            example value can never reproduce. The reproducible contract is the
+            shape, the `interfaceType` (wired → no radio metrics; a wired link's
+            `maxPhyRateMbps` is a steady 1000), the echoed `infraDevice`, and that
+            `networkCongestion` is one of `green`/`red`.
           headers:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
@@ -788,7 +825,15 @@ paths:
                   ssid: Home-005
       responses:
         "201":
-          description: The action was accepted (queued) or applied.
+          description: |
+            The action was accepted (queued) or applied. In the examples the opaque
+            `actionId` (FNV-1a of the `deviceId` + action), the echoed opaque
+            `deviceId`, and the wall-clock `appliedAt` are **illustrative**:
+            `appliedAt` is stamped with the current instant, so the frozen example
+            value can never reproduce. The reproducible contract is `actionType`,
+            the `status` (`applied` for a `connected` device, with an `appliedAt`;
+            `accepted` otherwise, with no `appliedAt`), and that the echoed
+            `deviceId` equals the path `deviceId`.
           headers:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"

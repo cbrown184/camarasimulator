@@ -13,10 +13,11 @@
 //! no real home network to query, so the roster is derived deterministically from
 //! the `ssid` (docs/DESIGN.md §7) — the input is the control plane.
 //!
-//! `DELETE /devices/{deviceId}` (`deleteDevice`) is the API's first **mutation**:
-//! it tombstones a device in the in-memory [`store`], and the read legs honour
-//! those tombstones, so a deleted device stops appearing. The remaining mutation
-//! leg (`updateDevice`) is a later slice.
+//! The two **mutation** legs are also implemented against the in-memory [`store`]:
+//! `DELETE /devices/{deviceId}` (`deleteDevice`) tombstones a device, and
+//! `PATCH /devices/{deviceId}` (`updateDevice`) records an overlay of the mutable
+//! fields (`deviceName`/`blocked`/`paused`). The read legs honour both, so a
+//! deleted device stops appearing and an updated one shows its new settings.
 //!
 //! One submodule per major version (docs/DESIGN.md §5, §9). So far:
 //! - [`v1`] — mounted at `/in-home-device-management/v1` (CAMARA
