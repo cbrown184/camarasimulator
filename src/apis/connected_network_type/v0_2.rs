@@ -699,4 +699,93 @@ mod tests {
             Some("corr-err")
         );
     }
+
+    // --- Spec examples pinned to the handler ------------------------------
+
+    /// The vendored `specs/connected-network-type/v0.2/openapi.yaml` examples must
+    /// match what the real router returns, byte-for-byte, so the two cannot drift.
+    /// The 200 examples are driven through the router and pinned as **exact
+    /// objects** — minus the `lastStatusTime`, which is the wall-clock current
+    /// instant and so illustrative (asserted present + UTC `Z`, or `null` for
+    /// UNKNOWN). The three router-reachable inline 422 families are pinned by their
+    /// exact `status`/`code`/`message` bytes (the other error responses `$ref` the
+    /// shared catalog, which its own contract tests cover).
+    #[tokio::test]
+    async fn vendored_examples_match_the_handler() {
+        // 200 — phoneKeyed5G: +…000 → index 0 → 5G, phone-keyed → device echoed.
+        let (status, _, body) = call_ok(r#"{"device":{"phoneNumber":"+123456789000"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let last = body["lastStatusTime"].as_str().expect("fresh status time");
+        assert!(last.ends_with('Z'), "lastStatusTime should be UTC: {last}");
+        let mut pinned = body.clone();
+        pinned.as_object_mut().unwrap().remove("lastStatusTime");
+        assert_eq!(
+            pinned,
+            json!({
+                "connectedNetworkType": "5G",
+                "device": { "phoneNumber": "+123456789000" },
+            })
+        );
+
+        // 200 — ipKeyed3G: ipv4 …002 → index 2 → 3G, IP-keyed → no device echo.
+        let (status, _, body) =
+            call_ok(r#"{"device":{"ipv4Address":{"publicAddress":"203.0.113.002"}}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let last = body["lastStatusTime"].as_str().expect("fresh status time");
+        assert!(last.ends_with('Z'), "lastStatusTime should be UTC: {last}");
+        let mut pinned = body.clone();
+        pinned.as_object_mut().unwrap().remove("lastStatusTime");
+        assert_eq!(pinned, json!({ "connectedNetworkType": "3G" }));
+
+        // 200 — unknown: +…004 → index 4 → UNKNOWN, null status time; whole body
+        // reproduces exactly (null is not wall-clock dependent).
+        let (status, _, body) = call_ok(r#"{"device":{"phoneNumber":"+123456789004"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({
+                "connectedNetworkType": "UNKNOWN",
+                "lastStatusTime": null,
+                "device": { "phoneNumber": "+123456789004" },
+            })
+        );
+
+        // 422 — missingIdentifier (two-legged, no device, non-line subject).
+        let (status, _, body) = call_ok("{}").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({
+                "status": 422,
+                "code": "MISSING_IDENTIFIER",
+                "message": "The device cannot be identified: supply a `device` or use a token that identifies a device.",
+            })
+        );
+
+        // 422 — unnecessaryIdentifier (device submitted on a three-legged line token).
+        let token = mint_token_with_client(RETRIEVE_SCOPE, "+123456789012").await;
+        let (status, _, body) =
+            post_retrieve(Some(&token), r#"{"device":{"phoneNumber":"+123456789012"}}"#, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({
+                "status": 422,
+                "code": "UNNECESSARY_IDENTIFIER",
+                "message": "The device is already identified by the access token.",
+            })
+        );
+
+        // 422 — serviceNotApplicable (reserved `…422` suffix → shared catalog message).
+        let (status, _, body) = call_ok(r#"{"device":{"phoneNumber":"+123456789422"}}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({
+                "status": 422,
+                "code": "SERVICE_NOT_APPLICABLE",
+                "message": "The service is not available for the provided identifier.",
+            })
+        );
+    }
 }

@@ -236,7 +236,34 @@ Verified sub-items:
   `status`/`code`/`message` bytes of all five router-reachable inline error families (prior tests
   guarded only `code` / the 200 fields individually). Spec + `#[cfg(test)]` change only, binary
   unchanged (5,455,000 bytes), no new dependency.
-- ✅ connected-network-type v0.2
+- ✅ connected-network-type v0.2 — spec↔code audited 2026-10-15 (Phase 5 stable tier, thirteenth):
+  the one operation (`getConnectedNetworkType`, `POST /connected-network-type/v0.2/retrieve`)
+  reviewed end to end against `specs/connected-network-type/v0.2/openapi.yaml`. Both control planes
+  match the handler (the identifier reserved-error-suffix plane; the trailing-three-digits radio
+  plane — `digits % 5` over the newest-first `NETWORK_TYPES` table `[5G,4G,3G,2G,UNKNOWN]`, `…000`/no
+  digits → index 0 `5G`, so the reported technology is a genuine second control plane), the
+  two-legged/three-legged identifier resolution (device precedence phoneNumber → NAI → IPv4
+  `publicAddress` → ipv6; a `device` resubmitted on a line-subject three-legged token → `422
+  UNNECESSARY_IDENTIFIER`; no device + non-line subject → `422 MISSING_IDENTIFIER`; empty `device`
+  object → `400 INVALID_ARGUMENT`) is faithful, the `DeviceResponse` is echoed only for a phone-keyed
+  request, `lastStatusTime` is the current instant (`null` for `UNKNOWN`), and the E.164 pattern,
+  `deny_unknown_fields`, the `connected-network-type:read` scope and the `x-correlator` echo are
+  genuinely enforced. **Drift found & fixed — the truncated-identifier-message class**
+  (simple-edge-discovery / carrier-billing / customer-insights precedent): the 422 `missingIdentifier`
+  example carried the short "The device cannot be identified." but the handler emits the full "…:
+  supply a `device` or use a token that identifies a device." Corrected it. **Also the
+  illustrative-timestamp class** (sim-swap `latestSimChange` / device-identifier `lastChecked` /
+  quality-on-demand precedent): the `phoneKeyed5G` and `ipKeyed3G` 200 examples presented
+  `lastStatusTime` as a frozen literal (`2024-01-01T14:27:08Z`) though the handler stamps the current
+  instant (wall-clock dependent, can never reproduce); marked both illustrative with a derivation note
+  and bound each 200 example to the concrete reproducing request (`+…000`→5G, ipv4 `…002`→3G, `+…004`→
+  UNKNOWN null). The `unnecessaryIdentifier` and `serviceNotApplicable` (= `for_status(422)`) examples
+  already byte-matched; the 400/401/403/404/409/429/500/503 responses all `$ref` the shared catalog.
+  Added `vendored_examples_match_the_handler` pinning all three 200 bodies as exact objects (minus the
+  illustrative `lastStatusTime`, asserted present/UTC or `null`) plus the exact `status`/`code`/
+  `message` bytes of the three router-reachable inline 422 families (prior tests guarded only `code`).
+  Spec + `#[cfg(test)]` change only — no behaviour/response change (the handler was already correct;
+  one message truncated, two timestamps illustrative), no new dependency.
 - ✅ connectivity-insights v0.6
 - ✅ region-device-count v0.2
 - ✅ qos-provisioning v0.3
@@ -1483,6 +1510,49 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — connected-network-type v0.2
+  (thirteenth Phase 5 stable API), drift found & fixed. Audited the one operation
+  (`getConnectedNetworkType`, `POST /connected-network-type/v0.2/retrieve`) against
+  `specs/connected-network-type/v0.2/openapi.yaml`. The handler is faithful: the two control planes
+  (the identifier reserved-error-suffix plane; the trailing-three-digits radio plane — `digits % 5`
+  over the fixed newest-first `NETWORK_TYPES` table `[5G,4G,3G,2G,UNKNOWN]`, `…000`/no digits → index
+  0 `5G`, so the reported technology is a genuine second control plane) match, the
+  two-legged/three-legged identifier resolution is correct (device precedence phoneNumber → NAI →
+  IPv4 `publicAddress` → ipv6; a `device` resubmitted on a line-subject three-legged token → `422
+  UNNECESSARY_IDENTIFIER`; no device + non-line subject → `422 MISSING_IDENTIFIER`; an empty `device`
+  object → `400 INVALID_ARGUMENT`), the `DeviceResponse` is echoed only for a phone-keyed request,
+  `lastStatusTime` is the current instant for a known attachment and `null` for `UNKNOWN`, and the
+  E.164 pattern, `deny_unknown_fields`, the `connected-network-type:read` scope and the `x-correlator`
+  echo are genuinely enforced. **Drift found — the truncated-identifier-message class**
+  (simple-edge-discovery / carrier-billing / customer-insights precedent): the 422 `missingIdentifier`
+  example carried the short "The device cannot be identified." but the handler emits the full "The
+  device cannot be identified: supply a `device` or use a token that identifies a device." Corrected
+  it. **Also the illustrative-timestamp class** (sim-swap `latestSimChange` / device-identifier
+  `lastChecked` / quality-on-demand precedent): the `phoneKeyed5G` and `ipKeyed3G` 200 examples
+  presented `lastStatusTime` as a frozen literal (`2024-01-01T14:27:08Z`) though `retrieve` stamps the
+  current instant (wall-clock dependent — the literal can never reproduce); marked both **illustrative**
+  with a derivation note, and bound all three 200 examples to the concrete reproducing request
+  (`phoneNumber +123456789000` → idx 0 `5G` device-echoed; `ipv4 publicAddress 203.0.113.002` → idx 2
+  `3G` no-echo; `phoneNumber +123456789004` → idx 4 `UNKNOWN` null — the UNKNOWN body reproduces
+  exactly, including the device echo). The `unnecessaryIdentifier` ("The device is already identified
+  by the access token.") and `serviceNotApplicable` (= `CamaraError::for_status(422)`, "The service is
+  not available for the provided identifier.") 422 examples already byte-matched; the
+  400/401/403/404/409/429/500/503 responses all `$ref` the shared catalog (no other inline error
+  examples to drift). The parent module doc (`src/apis/connected_network_type.rs`) was already accurate
+  (one operation, event-subscription surface correctly out of scope) — no stale-slice-doc drift.
+  **Tested increment:** added `vendored_examples_match_the_handler` driving all three documented 200
+  requests through the real router and pinning each body as an **exact object** (minus the illustrative
+  `lastStatusTime`, asserted present/UTC `Z` or `null`), plus the exact `status`/`code`/`message` bytes
+  of the three router-reachable inline 422 families (`MISSING_IDENTIFIER`/`UNNECESSARY_IDENTIFIER`/
+  `SERVICE_NOT_APPLICABLE`) — the existing error tests guarded only `code` and the 200 fields
+  individually. `cargo test` 3117 green (+1); `cargo build --release` ok, binary 5,459,096 bytes.
+  Note: specs are embedded in the binary via `include_str!` (`src/registry.rs`), so the vendored-YAML
+  edits (the illustrative-example descriptions + the lengthened `missingIdentifier` message) are the
+  +~4 KB vs the last recorded size; no code-path change, no new dependency. Spec + `#[cfg(test)]`
+  change only — no behaviour/response change (the handler was already correct; one message was
+  truncated, two timestamps illustrative). Next in phase order: the remaining Phase 5 stable APIs
+  (connectivity-insights v0.6, region-device-count v0.2, qos-provisioning v0.3, sms v0alpha1,
+  in-home-device-management v1). Branch `agent/connected-network-type/audit-v0_2`.
 - 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — customer-insights v0.2
   (twelfth Phase 5 stable API), drift found & fixed. Audited the one operation (`retrieveScoring`,
   `POST /customer-insights/v0.2/scoring/retrieve`) against

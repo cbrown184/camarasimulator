@@ -117,6 +117,13 @@ paths:
               examples:
                 phoneKeyed5G:
                   summary: Phone-number-keyed request on 5G (device echoed)
+                  description: >-
+                    Bound to `phoneNumber "+123456789000"` (tail `000` → index 0 →
+                    `5G`), so the phone-keyed request echoes the `device` back.
+                    `lastStatusTime` is **illustrative** — the handler returns the
+                    current instant, so the frozen value shown is wall-clock
+                    dependent and will not reproduce; only its presence (and UTC
+                    `Z` shape) is part of the contract.
                   value:
                     connectedNetworkType: 5G
                     lastStatusTime: "2024-01-01T14:27:08Z"
@@ -124,14 +131,28 @@ paths:
                       phoneNumber: "+123456789000"
                 ipKeyed3G:
                   summary: IP-keyed request on 3G (no device echo)
+                  description: >-
+                    Bound to `ipv4Address.publicAddress "203.0.113.002"` (tail
+                    `002` → `2 % 5 == 2` → `3G`); an IP-keyed request omits the
+                    `device` echo (the `DeviceResponse` carries only
+                    `phoneNumber`). `lastStatusTime` is **illustrative** — the
+                    handler returns the current instant, so the frozen value shown
+                    is wall-clock dependent and will not reproduce; only its
+                    presence (and UTC `Z` shape) is part of the contract.
                   value:
                     connectedNetworkType: 3G
                     lastStatusTime: "2024-01-01T14:27:08Z"
                 unknown:
                   summary: Unknown attachment (null status time)
+                  description: >-
+                    Bound to `phoneNumber "+123456789004"` (tail `004` → index 4 →
+                    `UNKNOWN`); an `UNKNOWN` attachment has no known status time, so
+                    `lastStatusTime` is `null` (this whole body reproduces exactly).
                   value:
                     connectedNetworkType: UNKNOWN
                     lastStatusTime: null
+                    device:
+                      phoneNumber: "+123456789004"
         "400":
           $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
         "401":
@@ -162,7 +183,7 @@ paths:
                   value:
                     status: 422
                     code: MISSING_IDENTIFIER
-                    message: The device cannot be identified.
+                    message: "The device cannot be identified: supply a `device` or use a token that identifies a device."
                 unnecessaryIdentifier:
                   summary: The device is already identified by the token
                   value:
