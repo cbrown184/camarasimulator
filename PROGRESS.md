@@ -191,7 +191,32 @@ Verified sub-items:
   through the router and pinning each body exactly (the bind id also against `binding_id`). The
   error responses all `$ref` the shared catalog (no inline error examples to drift). Spec + doc +
   `#[cfg(test)]` change only, binary unchanged.
-- ✅ simple-edge-discovery v2
+- ✅ simple-edge-discovery v2 — spec↔code audited 2026-10-15 (Phase 5 stable tier, eleventh):
+  the one operation (`readClosestEdgeCloudZone`,
+  `POST /simple-edge-discovery/v2/retrieve-closest-edge-cloud-zone`) reviewed end to end. Both
+  control planes match the handler (the identifier reserved-error-suffix plane; the
+  trailing-three-digits `EDGE_ZONES[digits % 6]` closest-zone plane, `…000`/no digits → index 0),
+  the two-legged/three-legged identifier resolution (incl. `422 UNNECESSARY_IDENTIFIER` on a
+  resubmitted device over a line token, `422 MISSING_IDENTIFIER`, `400 INVALID_ARGUMENT` on an
+  empty `device`) is faithful, and the E.164 pattern + `deny_unknown_fields` are genuinely
+  enforced. **Drift found & fixed — the deterministic-value / placeholder class**
+  (blockchain-public-address / verified-caller / device-identifier / optimal-edge-discovery
+  precedent): both 200 examples (`phoneKeyed`, `ipKeyed`) and the `EdgeCloudZone` schema-level
+  example carried hand-picked placeholder `edgeCloudZoneId`s (`b1e5f0a2-…`, `c2f6018b-…`) though
+  `zone_id` derives the id as SHA-256(`sed-zone:<zoneName>`) rendered UUID-shaped — eu-west-1 (idx
+  0) = `ddf71ac2-cdd5-9f27-40b6-e042dcf7b697`, ap-northeast-1 (idx 5) =
+  `95b0c904-3bf3-d083-d64e-e0f15fce3a62`. Corrected all three to the real derived values and bound
+  each 200 example's summary to the concrete request that reproduces it. The three inline 422
+  example messages (`unnecessaryIdentifier` = inline; `serviceNotApplicable` = `for_status(422)`)
+  already byte-matched, except **the truncated-identifier-message class** — the `missingIdentifier`
+  example carried the short "The device cannot be identified." but the handler emits the full
+  "…: supply a `device` or use a token that identifies a device." (device-swap / media-streaming-rate
+  / optimal-edge-discovery precedent); corrected it. Added `vendored_examples_match_the_handler`
+  driving both documented 200 requests through the real router and pinning each body as an exact
+  object (the `edgeCloudZoneId` also against `zone_id`), plus the exact `status`/`code`/`message`
+  bytes of all three router-reachable inline 422 families (prior error tests guarded only `code`).
+  The 400/401/403/404/409/429/500/503 responses all `$ref` the shared catalog. Spec + `#[cfg(test)]`
+  change only, binary unchanged, no new dependency.
 - ✅ customer-insights v0.2
 - ✅ connected-network-type v0.2
 - ✅ connectivity-insights v0.6
@@ -1440,6 +1465,47 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — simple-edge-discovery v2
+  (eleventh Phase 5 stable API), drift found & fixed. Audited the one operation
+  (`readClosestEdgeCloudZone`, `POST /simple-edge-discovery/v2/retrieve-closest-edge-cloud-zone`)
+  against `specs/simple-edge-discovery/v2/openapi.yaml`. The handler is faithful: the two control
+  planes (the identifier reserved-error-suffix plane; the trailing-three-digits
+  `EDGE_ZONES[digits % 6]` closest-zone plane over the fixed 6-entry table, `…000`/no digits →
+  index 0, so the zone is a genuine second control plane) match, the two-legged/three-legged
+  identifier resolution is correct (`device` precedence phoneNumber → NAI → IPv4 `publicAddress` →
+  ipv6; a `device` resubmitted on a line-subject three-legged token → `422 UNNECESSARY_IDENTIFIER`;
+  no device + non-line subject → `422 MISSING_IDENTIFIER`; an empty `device` object → `400
+  INVALID_ARGUMENT`), the `DeviceResponse` is echoed only for a phone-keyed request, and the E.164
+  pattern, `deny_unknown_fields`, the `simple-edge-discovery:read` scope and the `x-correlator` echo
+  are genuinely enforced. **Drift found — the deterministic-value / placeholder class**
+  (blockchain-public-address / verified-caller / device-identifier / optimal-edge-discovery
+  precedent): the two 200 examples (`phoneKeyed`, `ipKeyed`) and the `EdgeCloudZone` schema-level
+  example all carried hand-picked placeholder `edgeCloudZoneId`s (`b1e5f0a2-…` / `c2f6018b-…`)
+  though `zone_id` derives the id deterministically as SHA-256(`sed-zone:<zoneName>`) rendered
+  UUID-shaped — eu-west-1 (index 0) = `ddf71ac2-cdd5-9f27-40b6-e042dcf7b697`, ap-northeast-1
+  (index 5, the `203.0.113.005` → `…005` → `5 % 6` IP example) =
+  `95b0c904-3bf3-d083-d64e-e0f15fce3a62`. Corrected all three to the real derived values and bound
+  each 200 example's summary to the concrete request that reproduces it. **Also the
+  truncated-identifier-message class** (device-swap / kyc-tenure / media-streaming-rate /
+  optimal-edge-discovery precedent): the 422 `missingIdentifier` example carried the short "The
+  device cannot be identified." but the handler emits the full "…: supply a `device` or use a token
+  that identifies a device." — corrected. The `unnecessaryIdentifier` ("The device is already
+  identified by the access token.") and `serviceNotApplicable` (= `CamaraError::for_status(422)`,
+  "The service is not available for the provided identifier.") 422 examples already byte-matched; the
+  400/401/403/404/409/429/500/503 responses all `$ref` the shared catalog (no other inline error
+  examples to drift). **Tested increment:** added `vendored_examples_match_the_handler` driving both
+  documented 200 requests (`+123456789012` → idx 0 device-echoed; `publicAddress 203.0.113.005` →
+  idx 5 no-echo) through the real router and pinning each body as an **exact object** (the
+  `edgeCloudZoneId` also asserted against `zone_id`), plus the exact `status`/`code`/`message` bytes
+  of all three router-reachable inline 422 families (the existing error tests guarded only `code`).
+  `cargo test` 3115 green (+1); `cargo build --release` ok, binary 5,455,000 bytes (5.3M,
+  byte-identical to the carrier-billing / blockchain-public-address passes — the YAML example
+  corrections are outside the release path and the new test is `#[cfg(test)]`-only). Spec +
+  `#[cfg(test)]` change only — no behaviour/response change (the handler was already correct; the
+  examples were placeholders / one truncated message), no new dependency. Next in phase order: the
+  remaining Phase 5 stable APIs (customer-insights v0.2, connected-network-type v0.2,
+  connectivity-insights v0.6, region-device-count v0.2, qos-provisioning v0.3, sms v0alpha1,
+  in-home-device-management v1). Branch `agent/simple-edge-discovery/audit-v2`.
 - 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — carrier-billing v0.5
   (tenth Phase 5 stable API, the **second stateful** one), drift found & fixed. Audited all seven
   operations against `specs/carrier-billing/v0.5/openapi.yaml`: the one-step `createPayment`

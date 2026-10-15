@@ -655,4 +655,72 @@ mod tests {
             Some("corr-err")
         );
     }
+
+    // --- Vendored-example fidelity ----------------------------------------
+
+    /// Pin every vendored example whose value is the handler's own against the
+    /// real router, so the spec can't drift from the code again. The two 200
+    /// examples are driven as whole objects (the `edgeCloudZoneId` is the
+    /// SHA-256-derived value, not a placeholder — the deterministic-value class);
+    /// the three inline 422 examples are pinned by exact `status`/`code`/`message`
+    /// bytes (prior error tests guarded only `code`).
+    #[tokio::test]
+    async fn vendored_examples_match_the_handler() {
+        // 200 `phoneKeyed`: `+123456789012` → zone index 0 (eu-west-1), device echoed.
+        let (status, _, body) = call_ok(r#"{"device":{"phoneNumber":"+123456789012"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({
+                "edgeCloudZoneId": "ddf71ac2-cdd5-9f27-40b6-e042dcf7b697",
+                "edgeCloudZoneName": "camarasim-edge-eu-west-1",
+                "edgeCloudProvider": "CamaraSim Edge",
+                "device": { "phoneNumber": "+123456789012" },
+            }),
+            "phoneKeyed 200 example must match the handler byte-for-byte"
+        );
+        // The documented id is exactly the handler's derivation for that zone.
+        assert_eq!(body["edgeCloudZoneId"], zone_id(EDGE_ZONES[0].0));
+
+        // 200 `ipKeyed`: `publicAddress` …005 → zone index 5 (ap-northeast-1), no echo.
+        let (status, _, body) =
+            call_ok(r#"{"device":{"ipv4Address":{"publicAddress":"203.0.113.005"}}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({
+                "edgeCloudZoneId": "95b0c904-3bf3-d083-d64e-e0f15fce3a62",
+                "edgeCloudZoneName": "camarasim-edge-ap-northeast-1",
+                "edgeCloudProvider": "CamaraSim Edge",
+            }),
+            "ipKeyed 200 example must match the handler byte-for-byte"
+        );
+        assert_eq!(body["edgeCloudZoneId"], zone_id(EDGE_ZONES[5].0));
+
+        // 422 `missingIdentifier`: no device, non-line subject.
+        let (status, _, body) = call_ok("{}").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "MISSING_IDENTIFIER");
+        assert_eq!(
+            body["message"],
+            "The device cannot be identified: supply a `device` or use a token that identifies a device."
+        );
+
+        // 422 `unnecessaryIdentifier`: a device submitted on a three-legged line token.
+        let token = mint_token_with_client(READ_SCOPE, "+123456789012").await;
+        let (status, _, body) =
+            post_retrieve(Some(&token), r#"{"device":{"phoneNumber":"+123456789012"}}"#, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
+        assert_eq!(body["message"], "The device is already identified by the access token.");
+
+        // 422 `serviceNotApplicable`: the reserved `…422` suffix (shared catalog).
+        let (status, _, body) = call_ok(r#"{"device":{"phoneNumber":"+123456789422"}}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "SERVICE_NOT_APPLICABLE");
+        assert_eq!(body["message"], "The service is not available for the provided identifier.");
+    }
 }

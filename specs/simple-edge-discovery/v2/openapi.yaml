@@ -110,17 +110,17 @@ paths:
                 $ref: "#/components/schemas/EdgeCloudZone"
               examples:
                 phoneKeyed:
-                  summary: Phone-number-keyed request (device echoed)
+                  summary: Phone-number-keyed request `+123456789012` (device echoed)
                   value:
-                    edgeCloudZoneId: "b1e5f0a2-3c4d-5e6f-7081-92a3b4c5d6e7"
+                    edgeCloudZoneId: "ddf71ac2-cdd5-9f27-40b6-e042dcf7b697"
                     edgeCloudZoneName: camarasim-edge-eu-west-1
                     edgeCloudProvider: CamaraSim Edge
                     device:
                       phoneNumber: "+123456789012"
                 ipKeyed:
-                  summary: IP-keyed request (no device echo)
+                  summary: IP-keyed request (`publicAddress` `203.0.113.005`, no device echo)
                   value:
-                    edgeCloudZoneId: "c2f6018b-4d5e-6f70-8192-a3b4c5d6e7f8"
+                    edgeCloudZoneId: "95b0c904-3bf3-d083-d64e-e0f15fce3a62"
                     edgeCloudZoneName: camarasim-edge-ap-northeast-1
                     edgeCloudProvider: CamaraSim Edge
         "400":
@@ -153,7 +153,7 @@ paths:
                   value:
                     status: 422
                     code: MISSING_IDENTIFIER
-                    message: The device cannot be identified.
+                    message: "The device cannot be identified: supply a `device` or use a token that identifies a device."
                 unnecessaryIdentifier:
                   summary: The device is already identified by the token
                   value:
@@ -301,8 +301,9 @@ components:
           maxLength: 128
           description: >-
             A stable identifier for the zone. CamaraSim derives a UUID-shaped id
-            deterministically from the zone (stable per zone).
-          example: "b1e5f0a2-3c4d-5e6f-7081-92a3b4c5d6e7"
+            deterministically from the zone (SHA-256 over the zone name, stable
+            per zone).
+          example: "ddf71ac2-cdd5-9f27-40b6-e042dcf7b697"
         edgeCloudZoneName:
           type: string
           maxLength: 64
