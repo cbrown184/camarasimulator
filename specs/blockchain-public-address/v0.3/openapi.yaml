@@ -54,8 +54,10 @@ info:
     no stored state. Addresses are rendered lowercase (not EIP-55 checksummed) —
     a documented simplification.
 
-    Example: `+123456789001` → one Ethereum-mainnet address; `+123456789002` →
-    two addresses; `+123456789000` → `[]`; `+123456789404` → `404 NOT_FOUND`.
+    Example: `+123456789001` → one Polygon (`eip155:137`) address; `+123456789002`
+    → two addresses; `+123456789000` → `[]`; `+123456789404` → `404 NOT_FOUND`.
+    (A single-address case is never on `eip155:1` — `NETWORKS[0]` requires `d % 6
+    == 0`, which always yields three addresses.)
 
     CamaraSim exposes the full shared reserved-error set here so every reserved
     suffix is reachable; canonical Blockchain Public Address 0.3.0 declares a
@@ -111,13 +113,20 @@ paths:
                   $ref: "#/components/schemas/BlockchainPublicAddressResponse"
               examples:
                 bound:
-                  summary: One bound address (happy path)
+                  summary: One bound address for `+123456789001` (happy path)
+                  description: >-
+                    The exact body returned for `{"phoneNumber":"+123456789001"}`
+                    (trailing digits `d = 1` → `count = 1` address on
+                    `NETWORKS[1] = eip155:137`). The `id` and
+                    `blockchainPublicAddress` are deterministic SHA-256 derivations
+                    of the number and the network, so this body reproduces exactly
+                    (pinned by `vendored_examples_match_the_handler`).
                   value:
-                    - id: "3f2a9c1b-7d4e-4a11-9c02-8e6f5a1b2c3d"
-                      blockchainPublicAddress: "0x9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f00"
-                      blockchainNetworkId: "eip155:1"
+                    - id: "ee31cfad-8398-4cc5-cbdc-40e1dc66d217"
+                      blockchainPublicAddress: "0x92fb45f4c4de34b08f158a53ce65d318f8451344"
+                      blockchainNetworkId: "eip155:137"
                       currency:
-                        - ETH
+                        - POL
                 none:
                   summary: No blockchain address bound to the line
                   value: []
@@ -206,9 +215,17 @@ paths:
                 $ref: "#/components/schemas/BindBlockchainPublicAddressResponse"
               examples:
                 bound:
-                  summary: A newly minted binding
+                  summary: The binding minted for the request example
+                  description: >-
+                    The exact body returned when the `BindBlockchainPublicAddressRequest`
+                    example (`+123456789012` / `evm:1` /
+                    `0x9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f00`) is bound. The `id`
+                    is `binding_id` = a deterministic SHA-256 derivation of the
+                    `(phoneNumber, blockchainNetworkId, blockchainPublicAddress)`
+                    triple, so POSTing the request example yields this id exactly
+                    (pinned by `vendored_examples_match_the_handler`).
                   value:
-                    id: "3f2a9c1b-7d4e-4a11-9c02-8e6f5a1b2c3d"
+                    id: "62a4c79b-fd1d-0a55-5737-424dc3563306"
         "400":
           $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
         "401":

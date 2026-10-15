@@ -146,7 +146,23 @@ Verified sub-items:
   `vendored_error_example_messages_match_the_handler` pinning the exact `status`/`code`/`message`
   bytes of all five router-reachable inline error families (existing error tests guarded only
   `status`/`code`). Spec + `#[cfg(test)]` change only, no behaviour change, no new dependency.
-- ✅ blockchain-public-address v0.3
+- ✅ blockchain-public-address v0.3 — spec↔code audited 2026-10-15 (Phase 5 stable tier,
+  ninth; the first **stateful** one in the tier — a `store.rs`-backed bind/unbind): all three
+  operations (`retrieveBlockchainPublicAddress` `POST …/retrieve-blockchains`,
+  `bindBlockchainPublicAddress` `POST …/blockchain-public-addresses`,
+  `deleteBlockchainPublicAddress` `DELETE …/{id}`) reviewed end to end. **Drift found & fixed —
+  the deterministic-value / placeholder class** (verified-caller / device-identifier /
+  optimal-edge-discovery precedent): both response-level 200/201 `bound` examples carried Swagger
+  placeholders, and the retrieve one claimed a single address on `eip155:1` — impossible under the
+  `NETWORKS[(d+i)%6]` mapping (a single-address case needs `d ≡ 1 mod 3`, but `eip155:1` =
+  `NETWORKS[0]` needs `d % 6 == 0`, which always yields three). Bound the retrieve example to
+  `+123456789001` (→ one Polygon `eip155:137`/`[POL]` address) and the bind example to the
+  request-schema triple (`+123456789012`/`evm:1`/`0x9f8a…` → `binding_id` `62a4c79b-…`), both with
+  the real SHA-256-derived values, and corrected the "Ethereum-mainnet" claim in the spec
+  description + module doc to Polygon. Added `vendored_examples_match_the_handler` driving both
+  through the router and pinning each body exactly (the bind id also against `binding_id`). The
+  error responses all `$ref` the shared catalog (no inline error examples to drift). Spec + doc +
+  `#[cfg(test)]` change only, binary unchanged.
 - ✅ simple-edge-discovery v2
 - ✅ customer-insights v0.2
 - ✅ connected-network-type v0.2
@@ -1396,6 +1412,55 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — blockchain-public-address
+  v0.3 (ninth Phase 5 stable API, the **first stateful** one in the tier), drift found & fixed.
+  Audited all three operations against `specs/blockchain-public-address/v0.3/openapi.yaml`:
+  `retrieveBlockchainPublicAddress` (`POST …/retrieve-blockchains`, stateless,
+  deterministic-synthetic), `bindBlockchainPublicAddress` (`POST …/blockchain-public-addresses`,
+  persists a binding in the in-memory `store.rs`, mints an `id`), and
+  `deleteBlockchainPublicAddress` (`DELETE …/{id}`, evicts from the store). All control planes
+  match the handler — the `phoneNumber` reserved-error-suffix plane; the trailing-three-digits
+  address-set plane on retrieve (`d == 0` → `[]`, else `((d-1)%3)+1` records, the `i`-th on
+  `NETWORKS[(d+i)%6]` so the chain is a genuine second control plane); bind's request-validation
+  plane (`blockchainNetworkId` `<eco>:<sub>` → `INVALID_BLOCKCHAIN_NETWORK_IDENTIFIER`, EVM
+  `0x`+40-hex address, lone `nonce`/`signature` → `BOTH_NONCE_SIGNATURE_REQUIRED`, both →
+  422 `UNSUPPORTED_ENHANCED_VALIDATION`) and store plane (duplicate triple → 409 `ALREADY_EXISTS`,
+  the id being derived from the triple); and delete's store-only plane (present → 204, absent →
+  404, single-use). The E.164 pattern, the network-id and EVM-address validators, and
+  `deny_unknown_fields` are all genuinely enforced; the three scopes
+  (`:read`/`:create`/`:delete`) gate correctly and `x-correlator` is echoed on success and error.
+  **Drift found — the deterministic-value / placeholder class** (verified-caller /
+  device-identifier / optimal-edge-discovery precedent, new to this Phase 5 tier — the tier's
+  other drift so far was the truncated-identifier-message / incomplete-example classes): the two
+  response-level `bound` examples both carried Swagger placeholder values, not reproducible
+  handler output. Worse, the retrieve 200 `bound` example claimed a **single** address on
+  `eip155:1` with `currency: [ETH]` — unreachable under the mapping: `count == 1` needs
+  `d ≡ 1 (mod 3)`, but the single address lands on `NETWORKS[d % 6]`, and `eip155:1` =
+  `NETWORKS[0]` needs `d % 6 == 0` (⇒ `d ≡ 0 mod 3`, which always gives `count == 3`), so no
+  single-address response is ever on Ethereum Mainnet. Bound the retrieve example to
+  `{"phoneNumber":"+123456789001"}` (`d = 1` → one address on `NETWORKS[1] = eip155:137`, Polygon)
+  with the real SHA-256-derived `id` (`ee31cfad-…`) / `blockchainPublicAddress`
+  (`0x92fb45f4…`) / `currency: [POL]`, and bound the bind 201 `bound` example to the
+  `BindBlockchainPublicAddressRequest` example triple (`+123456789012` / `evm:1` /
+  `0x9f8a7b6c…`) whose `binding_id` is `62a4c79b-fd1d-0a55-5737-424dc3563306`, so a reader can
+  POST the request example and get the response example's id. Also corrected the
+  "`+123456789001` → one Ethereum-mainnet address" claim in both the spec API description and the
+  module doc to "one Polygon (`eip155:137`) address" (with a note that a single-address case is
+  never on `eip155:1`). The error responses all `$ref` the shared catalog — no inline error
+  examples to drift. **Tested increment:** added `vendored_examples_match_the_handler` driving
+  `+123456789001` (retrieve) and the request-example triple (bind) through the real router and
+  pinning each body as an exact object, the bind id also asserted equal to `binding_id` over the
+  triple. `cargo test` 3113 green (+1); `cargo build --release` ok, binary 5,455,000 bytes (5.3M,
+  byte-identical to the kyc-tenure pass — the YAML example correction and the module-doc fix are
+  outside the release path and the new test is `#[cfg(test)]`-only). Spec + doc + `#[cfg(test)]`
+  change only — no behaviour/response change (the handler was already correct; the examples were
+  placeholders), no new dependency. Next in phase order: carrier-billing v0.5 (the next Phase 5
+  stable; also stateful), then the remaining Phase 5 stable APIs (simple-edge-discovery v2,
+  customer-insights v0.2, connected-network-type v0.2, connectivity-insights v0.6,
+  region-device-count v0.2, qos-provisioning v0.3, sms v0alpha1, in-home-device-management v1).
+  Branch `agent/blockchain-public-address/audit-v0_3`. **Integration note:** on entry HEAD was
+  detached at `origin/main` (`725aba2`, kyc-tenure); local `main` ref was stale (`f15d2f9`) and
+  was reset to `origin/main` before branching.
 - 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — kyc-tenure v0.2
   (eighth Phase 5 stable API), drift found & fixed. Audited the one operation (`checkTenure`,
   `POST /kyc-tenure/v0.2/check-tenure`) against `specs/kyc-tenure/v0.2/openapi.yaml`. KYC Tenure

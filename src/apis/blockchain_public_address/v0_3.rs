@@ -55,8 +55,10 @@
 //!     the number and the network so the same input always yields the same
 //!     records without any stored state.
 //!
-//! Example: `+123456789001` → one Ethereum-mainnet address; `+123456789002` →
-//! two addresses; `+123456789000` → `[]`; `+123456789404` → `404 NOT_FOUND`.
+//! Example: `+123456789001` → one Polygon (`eip155:137`) address;
+//! `+123456789002` → two addresses; `+123456789000` → `[]`; `+123456789404` →
+//! `404 NOT_FOUND`. (A single-address case is never on `eip155:1`: `NETWORKS[0]`
+//! needs `d % 6 == 0`, which always yields three addresses.)
 //!
 //! [CAIP-2]: https://chainagnostic.org/CAIPs/caip-2
 
@@ -1103,6 +1105,56 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-del2")
+        );
+    }
+
+    // --- Vendored-example pins ---------------------------------------------
+
+    /// Pins the two vendored response `examples` in
+    /// `specs/blockchain-public-address/v0.3/openapi.yaml` byte-for-byte against
+    /// the handler, so neither can silently drift. Both are deterministic
+    /// SHA-256 derivations (no clock/counter/wall-clock), so the documented
+    /// example MUST reproduce exactly — unlike the placeholders they replaced
+    /// (the retrieve `bound` example claimed a single address on `eip155:1`,
+    /// impossible under `NETWORKS[(d+i)%6]`; the bind `bound` example carried a
+    /// Swagger placeholder UUID unrelated to any request).
+    #[tokio::test]
+    async fn vendored_examples_match_the_handler() {
+        // retrieve 200 `bound`: {"phoneNumber":"+123456789001"} → exactly the
+        // one documented record (d = 1 → one address on NETWORKS[1] = eip155:137).
+        let (status, _, out) = retrieve_ok(r#"{"phoneNumber":"+123456789001"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            out,
+            json!([
+                {
+                    "id": "ee31cfad-8398-4cc5-cbdc-40e1dc66d217",
+                    "blockchainPublicAddress": "0x92fb45f4c4de34b08f158a53ce65d318f8451344",
+                    "blockchainNetworkId": "eip155:137",
+                    "currency": ["POL"],
+                }
+            ]),
+            "retrieve `bound` example must reproduce exactly through the router"
+        );
+
+        // bind 201 `bound`: POSTing the request-schema example triple mints the
+        // documented id (= binding_id over the triple).
+        let body = r#"{"phoneNumber":"+123456789012","blockchainPublicAddress":"0x9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f00","blockchainNetworkId":"evm:1","currency":["ETH"]}"#;
+        let (status, _, out) = bind_ok(body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            out,
+            json!({ "id": "62a4c79b-fd1d-0a55-5737-424dc3563306" }),
+            "bind `bound` example must be the id minted for the request example"
+        );
+        // And that id is exactly binding_id over the triple (the documented derivation).
+        assert_eq!(
+            out["id"].as_str().unwrap(),
+            binding_id(
+                "+123456789012",
+                "evm:1",
+                "0x9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f00"
+            )
         );
     }
 }
