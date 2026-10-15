@@ -264,7 +264,35 @@ Verified sub-items:
   `message` bytes of the three router-reachable inline 422 families (prior tests guarded only `code`).
   Spec + `#[cfg(test)]` change only — no behaviour/response change (the handler was already correct;
   one message truncated, two timestamps illustrative), no new dependency.
-- ✅ connectivity-insights v0.6
+- ✅ connectivity-insights v0.6 — spec↔code audited 2026-10-15 (Phase 5 stable tier, fourteenth):
+  the one operation (`checkNetworkQuality`, `POST /connectivity-insights/v0.6/check-network-quality`)
+  reviewed end to end against `specs/connectivity-insights/v0.6/openapi.yaml`. Both control planes match
+  the handler (the identifier reserved-error-suffix plane; the trailing-three-digits plane where the low
+  five bits `d & 0x1F` form an *unmet mask*, one bit per KPI in the order `packetDelayBudget`,
+  `targetMinDownstreamRate`, `targetMinUpstreamRate`, `packetlossErrorRate`, `jitter`, and `additionalKPIs`
+  `signalStrength`/`connectivityType` degrade coherently with `met = 5 − popcount`, so `…000`/no digits →
+  all met / excellent / 5G-SA), the two-legged/three-legged identifier resolution is faithful (device
+  precedence phoneNumber → NAI → IPv4 `publicAddress` → ipv6; **no** `UNNECESSARY_IDENTIFIER` — a `device`
+  on a line token is simply used; no device + non-line subject → `422 MISSING_IDENTIFIER`; empty `device`
+  → `400 INVALID_ARGUMENT`), and the required `applicationProfileId` UUID / required `applicationServer`
+  `minProperties:1` / optional `applicationServerPorts` `0..=65535` / `monitoringTimeStamp` RFC-3339 shape,
+  the `phoneNumber` E.164 pattern, `deny_unknown_fields`, the `connectivity-insights:check` scope and the
+  `x-correlator` echo are genuinely enforced. The response carries **no wall-clock field** (no
+  `lastStatusTime`), so the 200 examples are fully reproducible — the device is echoed only for a
+  phone-keyed request. **Drift found & fixed — the truncated-identifier-message class**
+  (connected-network-type / simple-edge-discovery / carrier-billing / customer-insights precedent): the 422
+  `missingIdentifier` example carried the short "The device cannot be identified." but the handler emits the
+  full "The device cannot be identified: supply a `device` or use a token that identifies a device."
+  Corrected it. The two 200 examples (`healthy` `…000`, `degraded` `…001`), the 400 `invalidArgument`
+  (`applicationProfileId` must be a UUID) / `outOfRange` (port) and the 422 `serviceNotApplicable`
+  (= `for_status(422)`) examples already byte-matched; the 401/403/404/409/429/500/503 responses all `$ref`
+  the shared catalog. The parent module doc was already accurate (one operation; the stateful companions
+  correctly out of scope) — no stale-slice-doc drift. Added `vendored_examples_match_the_handler` driving
+  both documented 200 requests through the real router and pinning each body as an **exact object** (prior
+  tests asserted the KPI fields individually), plus the exact `status`/`code`/`message` bytes of all four
+  router-reachable inline error families (prior error tests guarded only `code`). Spec + `#[cfg(test)]`
+  change only — no behaviour/response change (the handler was already correct; one message was truncated),
+  no new dependency.
 - ✅ region-device-count v0.2
 - ✅ qos-provisioning v0.3
 - ✅ sms v0alpha1
@@ -1510,6 +1538,47 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — connectivity-insights v0.6
+  (fourteenth Phase 5 stable API), drift found & fixed. Audited the one operation (`checkNetworkQuality`,
+  `POST /connectivity-insights/v0.6/check-network-quality`) against
+  `specs/connectivity-insights/v0.6/openapi.yaml`. The handler is faithful: the two control planes (the
+  identifier reserved-error-suffix plane; the trailing-three-digits plane where the low five bits
+  `d & 0x1F` form an *unmet mask*, one bit per KPI in the fixed order `packetDelayBudget`,
+  `targetMinDownstreamRate`, `targetMinUpstreamRate`, `packetlossErrorRate`, `jitter` — set → `unable to
+  meet…`, clear → `meets…` — and `additionalKPIs` `signalStrength`/`connectivityType` degrade coherently
+  with `met = 5 − popcount`, so `…000`/no digits → all five met / excellent / 5G-SA, `…031` → all unmet /
+  no signal / 3G) match, the two-legged/three-legged identifier resolution is correct (device precedence
+  phoneNumber → NAI → IPv4 `publicAddress` → ipv6; Connectivity Insights 0.6.0 defines **no**
+  `UNNECESSARY_IDENTIFIER`, so a `device` on a line token is simply used — the submitted device wins over
+  the subject; no `device` + non-line subject → `422 MISSING_IDENTIFIER`; a `device` with no identifier →
+  `400 INVALID_ARGUMENT`), and the required `applicationProfileId` UUID + required `applicationServer`
+  (`minProperties:1`) + optional `applicationServerPorts` (`0..=65535`, `from<=to`) + `monitoringTimeStamp`
+  RFC-3339 shape, the `phoneNumber` E.164 pattern, `deny_unknown_fields`, the `connectivity-insights:check`
+  scope and the `x-correlator` echo are genuinely enforced. The response echoes the device only for a
+  phone-keyed request and carries no wall-clock field, so both 200 examples reproduce exactly. **Drift
+  found — the truncated-identifier-message class** (connected-network-type / simple-edge-discovery /
+  carrier-billing / customer-insights precedent): the 422 `missingIdentifier` example carried the short
+  "The device cannot be identified." but `resolve_identifier` emits the full "The device cannot be
+  identified: supply a `device` or use a token that identifies a device." Corrected it. The two 200
+  examples (`healthy` `…000` → all met / excellent / 5G-SA / device echoed; `degraded` `…001` →
+  packetDelayBudget unmet, four met, good / 5G-NSA), the 400 `invalidArgument` ("`applicationProfileId`
+  must be a UUID.") / `outOfRange` ("A port must be within 0..=65535.") and the 422 `serviceNotApplicable`
+  (= `CamaraError::for_status(422)`, "The service is not available for the provided identifier.") examples
+  already byte-matched; the 401/403/404/409/429/500/503 responses all `$ref` the shared catalog (no other
+  inline error examples to drift). The parent module doc (`src/apis/connectivity_insights.rs`) was already
+  accurate (one modelled operation; the Application Profiles CRUD + subscriptions companions correctly out
+  of scope) — no stale-slice-doc drift. **Tested increment:** added `vendored_examples_match_the_handler`
+  driving both documented 200 requests through the real router and pinning each body as an **exact object**
+  (the existing router tests asserted the KPI/`additionalKPIs`/`device` fields individually, so a
+  stray/renamed field could slip past), plus the exact `status`/`code`/`message` bytes of all four
+  router-reachable inline error families (`INVALID_ARGUMENT`/`OUT_OF_RANGE`/`MISSING_IDENTIFIER`/
+  `SERVICE_NOT_APPLICABLE`) — the existing error tests guarded only `code`. `cargo test` 3118 green (+1);
+  `cargo build --release` ok, binary 5,459,096 bytes (unchanged — the +~60-byte lengthened
+  `missingIdentifier` message is embedded via `include_str!` but below section-padding granularity; no
+  code-path change, no new dependency). Spec + `#[cfg(test)]` change only — no behaviour/response change
+  (the handler was already correct; one message was truncated). Next in phase order: the remaining Phase 5
+  stable APIs (region-device-count v0.2, qos-provisioning v0.3, sms v0alpha1, in-home-device-management
+  v1). Branch `agent/connectivity-insights/audit-v0_6`.
 - 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — connected-network-type v0.2
   (thirteenth Phase 5 stable API), drift found & fixed. Audited the one operation
   (`getConnectedNetworkType`, `POST /connected-network-type/v0.2/retrieve`) against

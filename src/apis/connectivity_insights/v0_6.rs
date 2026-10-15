@@ -944,4 +944,107 @@ mod tests {
             Some("corr-err")
         );
     }
+
+    // --- Vendored-example fidelity ----------------------------------------
+
+    /// The two documented 200 examples (`healthy` `…000`, `degraded` `…001`) and
+    /// every router-reachable inline error example in the vendored spec must match
+    /// the handler **byte for byte**. Prior router tests asserted the 200 fields
+    /// individually (so a stray/renamed field could slip past) and guarded the
+    /// error families by `code` only (so a truncated/edited example `message`
+    /// could drift unnoticed — exactly the `missingIdentifier` truncation this
+    /// audit fixed). Pin the whole 200 bodies as exact objects and the exact
+    /// `status`/`code`/`message` bytes of all four inline error families.
+    #[tokio::test]
+    async fn vendored_examples_match_the_handler() {
+        // 200 `healthy` (…000) — all five KPIs meet, excellent / 5G-SA, device echoed.
+        let (status, _, body) = call_ok(&body_for("+123456789000")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({
+                "packetDelayBudget": MEETS,
+                "targetMinDownstreamRate": MEETS,
+                "targetMinUpstreamRate": MEETS,
+                "packetlossErrorRate": MEETS,
+                "jitter": MEETS,
+                "additionalKPIs": { "signalStrength": "excellent", "connectivityType": "5G-SA" },
+                "device": { "phoneNumber": "+123456789000" },
+            })
+        );
+
+        // 200 `degraded` (…001) — packetDelayBudget unmet (four met), good / 5G-NSA.
+        let (status, _, body) = call_ok(&body_for("+123456789001")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({
+                "packetDelayBudget": UNABLE,
+                "targetMinDownstreamRate": MEETS,
+                "targetMinUpstreamRate": MEETS,
+                "packetlossErrorRate": MEETS,
+                "jitter": MEETS,
+                "additionalKPIs": { "signalStrength": "good", "connectivityType": "5G-NSA" },
+                "device": { "phoneNumber": "+123456789001" },
+            })
+        );
+
+        // 400 `invalidArgument` — a malformed (non-UUID) applicationProfileId.
+        let (status, _, body) = call_ok(&format!(
+            r#"{{"applicationProfileId":"nope",{SERVER},"device":{{"phoneNumber":"+123456789000"}}}}"#
+        ))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            json!({
+                "status": 400,
+                "code": "INVALID_ARGUMENT",
+                "message": "`applicationProfileId` must be a UUID.",
+            })
+        );
+
+        // 400 `outOfRange` — a port outside 0..=65535.
+        let (status, _, body) = call_ok(&format!(
+            r#"{{"applicationProfileId":"{PROFILE}",{SERVER},"device":{{"phoneNumber":"+123456789000"}},"applicationServerPorts":{{"ports":[70000]}}}}"#
+        ))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            json!({
+                "status": 400,
+                "code": "OUT_OF_RANGE",
+                "message": "A port must be within 0..=65535.",
+            })
+        );
+
+        // 422 `missingIdentifier` — no device, non-line (client_credentials) subject.
+        // The example this pins was truncated ("The device cannot be identified.")
+        // before this audit; the handler emits the full guidance form.
+        let token = mint_token(CHECK_SCOPE).await;
+        let miss = format!(r#"{{"applicationProfileId":"{PROFILE}",{SERVER}}}"#);
+        let (status, _, body) = post_check(Some(&token), &miss, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({
+                "status": 422,
+                "code": "MISSING_IDENTIFIER",
+                "message": "The device cannot be identified: supply a `device` or use a token that identifies a device.",
+            })
+        );
+
+        // 422 `serviceNotApplicable` — the reserved `…422` suffix (shared catalog).
+        let (status, _, body) = call_ok(&body_for("+123456789422")).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({
+                "status": 422,
+                "code": "SERVICE_NOT_APPLICABLE",
+                "message": "The service is not available for the provided identifier.",
+            })
+        );
+    }
 }
