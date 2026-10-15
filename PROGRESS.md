@@ -130,7 +130,22 @@ Verified sub-items:
   inline examples (`serviceNotApplicable` = `for_status(422)`, `unnecessaryIdentifier` =
   the handler's inline message) already byte-matched; all other 4xx/5xx `$ref` the shared
   catalog.
-- ✅ kyc-tenure v0.2
+- ✅ kyc-tenure v0.2 — spec↔code audited 2026-10-15 (Phase 5 stable tier, eighth): the one
+  operation (`checkTenure`, `POST /kyc-tenure/v0.2/check-tenure`) reviewed end to end. Both
+  control planes (identifier reserved-error-suffix; the trailing-three-digits held-days verdict
+  compared against `tenureDate`, with `tenureDate` a genuine second control plane and
+  `contractType = [PAYG,PAYM,Business][digits % 3]`) match the handler, the E.164 pattern and the
+  strict `YYYY-MM-DD` date (malformed→400 `INVALID_ARGUMENT`, future→400 `OUT_OF_RANGE`) are
+  genuinely enforced, and the two-legged/three-legged identifier resolution is correct. **Drift
+  found & fixed — the truncated-identifier-message class** (device-swap / kyc-fill-in /
+  kyc-age-verification / number-recycling / call-forwarding-signal precedent): the 422
+  `missingIdentifier` example showed the short "The phone number cannot be identified." but
+  `resolve_identifier` emits the full "…: supply `phoneNumber` or use a token that identifies a
+  line." Corrected it; the 400 `invalidArgument`/`outOfRange`, 422
+  `unnecessaryIdentifier`/`serviceNotApplicable` inline examples already byte-matched. Added
+  `vendored_error_example_messages_match_the_handler` pinning the exact `status`/`code`/`message`
+  bytes of all five router-reachable inline error families (existing error tests guarded only
+  `status`/`code`). Spec + `#[cfg(test)]` change only, no behaviour change, no new dependency.
 - ✅ blockchain-public-address v0.3
 - ✅ simple-edge-discovery v2
 - ✅ customer-insights v0.2
@@ -1381,6 +1396,40 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — kyc-tenure v0.2
+  (eighth Phase 5 stable API), drift found & fixed. Audited the one operation (`checkTenure`,
+  `POST /kyc-tenure/v0.2/check-tenure`) against `specs/kyc-tenure/v0.2/openapi.yaml`. KYC Tenure
+  is a stateless, privacy-preserving trust signal: it answers only yes/no about whether the
+  subscriber has held the line since at least a caller-supplied `tenureDate`. Both control planes
+  match the handler — the identifier reserved-error-suffix plane, and the trailing-three-digits
+  held-days verdict compared against `tenureDate` (`tenureDateCheck` iff `(today − tenureDate) <=
+  held_days`), which makes `tenureDate` a genuine second control plane (the same number flips
+  true→false against an older reference date); `contractType = [PAYG,PAYM,Business][digits % 3]`
+  is reproducible from the identifier alone. The `phoneNumber` E.164 pattern and the strict
+  self-contained `YYYY-MM-DD` date parse (impossible dates like `2026-02-30` → 400
+  `INVALID_ARGUMENT` via a civil round-trip; a future date → 400 `OUT_OF_RANGE`) are genuinely
+  enforced, and the two-legged/three-legged identifier resolution (number-recycling posture) is
+  correct. **Drift found — the truncated-identifier-message class** (device-swap / kyc-fill-in /
+  kyc-age-verification / number-recycling / call-forwarding-signal / consent-info precedent): the
+  422 `missingIdentifier` example carried the short `message: "The phone number cannot be
+  identified."`, but `resolve_identifier` emits the full "…: supply `phoneNumber` or use a token
+  that identifies a line." Corrected the example. The 400 `invalidArgument` (`tenureDate` parse
+  message) / `outOfRange`, 422 `unnecessaryIdentifier`, and the shared `serviceNotApplicable`
+  (= `CamaraError::for_status(422)`) inline examples already byte-matched the handler, and every
+  401/403/404/409/429/500/503 response `$ref`s the shared catalog. **Small tested increment:** the
+  existing error tests guarded only `status`/`code`, leaving the five documented `message` strings
+  unpinned; added `vendored_error_example_messages_match_the_handler` driving each documented
+  request through the real router and pinning the exact `status`/`code`/`message` bytes — 400
+  `invalidArgument`/`outOfRange`, 422 `missingIdentifier` (reachable here: a `client_credentials`
+  token's `sub` is a non-line client id), `unnecessaryIdentifier`, `serviceNotApplicable`. `cargo
+  test` 3112 green (+1); `cargo build --release` ok, binary 5,455,000 bytes (5.3M, byte-identical
+  to the qos-profiles pass — the YAML message correction is outside the release path and the new
+  test is `#[cfg(test)]`-only). Spec + `#[cfg(test)]` change only — no behaviour/response change
+  (the handler was already correct; only the one example was truncated), no new dependency. Next
+  in phase order: blockchain-public-address v0.3 (the next Phase 5 stable; it carries a `store.rs`
+  — the first stateful one in the tier). Branch `agent/kyc-tenure/audit-v0_2`. **Integration
+  note:** on entry HEAD was detached at `origin/main` (`9b2bfad`, qos-profiles); local `main` ref
+  was stale (`f15d2f9`) and was fast-forwarded to `origin/main` before branching.
 - 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — qos-profiles v1
   (seventh Phase 5 stable API), drift found & fixed. Audited both operations
   (`retrieveQoSProfiles`, `POST /qos-profiles/v1/retrieve-qos-profiles`; `getQosProfile`,

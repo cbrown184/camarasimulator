@@ -705,4 +705,65 @@ mod tests {
             Some("corr-err")
         );
     }
+
+    // --- Vendored inline error examples pinned to the handler --------------
+
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // The full `missingIdentifier` message the vendored example must carry —
+        // the short "The phone number cannot be identified." was the drift fixed
+        // in this pass. The other four already byte-matched the handler; prior
+        // error tests guarded only `status`/`code`, not `message`.
+        let invalid_argument = "`tenureDate` must be a valid RFC 3339 full-date (YYYY-MM-DD).";
+        let out_of_range = "`tenureDate` must not be in the future.";
+        let missing_identifier =
+            "The phone number cannot be identified: supply `phoneNumber` or use a token that identifies a line.";
+        let unnecessary_identifier = "The phone number is already identified by the access token.";
+        let service_not_applicable = "The service is not available for the provided identifier.";
+
+        // Assert a response's exact status/code/message bytes.
+        let pin = |status: StatusCode,
+                   body: &Value,
+                   want_status: u16,
+                   want_code: &str,
+                   want_msg: &str| {
+            assert_eq!(status.as_u16(), want_status, "{want_code}: status");
+            assert_eq!(body["status"], want_status, "{want_code}: body.status");
+            assert_eq!(body["code"], want_code, "{want_code}: code");
+            assert_eq!(body["message"], want_msg, "{want_code}: message");
+        };
+
+        // 400 invalidArgument — an impossible `tenureDate` (fails date parsing).
+        let (s, _, b) =
+            check_ok(r#"{"phoneNumber":"+123456789050","tenureDate":"2026-02-30"}"#).await;
+        pin(s, &b, 400, "INVALID_ARGUMENT", invalid_argument);
+
+        // 400 outOfRange — a `tenureDate` in the future.
+        let future = format!(
+            r#"{{"phoneNumber":"+123456789050","tenureDate":"{}"}}"#,
+            ymd_days_ago(-3)
+        );
+        let (s, _, b) = check_ok(&future).await;
+        pin(s, &b, 400, "OUT_OF_RANGE", out_of_range);
+
+        // 422 missingIdentifier — a non-line (`client_credentials`) subject and no
+        // `phoneNumber` (reachable here: the `kt-client` subject is not a line).
+        let (s, _, b) = check_ok(r#"{"tenureDate":"2000-01-01"}"#).await;
+        pin(s, &b, 422, "MISSING_IDENTIFIER", missing_identifier);
+
+        // 422 unnecessaryIdentifier — a `phoneNumber` resubmitted on a line token.
+        let line_token = mint_token_with_client(CHECK_TENURE_SCOPE, "+123456789200").await;
+        let (s, _, b) = post_check(
+            Some(&line_token),
+            r#"{"phoneNumber":"+123456789200","tenureDate":"2000-01-01"}"#,
+            None,
+        )
+        .await;
+        pin(s, &b, 422, "UNNECESSARY_IDENTIFIER", unnecessary_identifier);
+
+        // 422 serviceNotApplicable — the reserved `…422` suffix.
+        let (s, _, b) =
+            check_ok(r#"{"phoneNumber":"+123456789422","tenureDate":"2000-01-01"}"#).await;
+        pin(s, &b, 422, "SERVICE_NOT_APPLICABLE", service_not_applicable);
+    }
 }
