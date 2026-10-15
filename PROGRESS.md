@@ -217,7 +217,25 @@ Verified sub-items:
   bytes of all three router-reachable inline 422 families (prior error tests guarded only `code`).
   The 400/401/403/404/409/429/500/503 responses all `$ref` the shared catalog. Spec + `#[cfg(test)]`
   change only, binary unchanged, no new dependency.
-- ✅ customer-insights v0.2
+- ✅ customer-insights v0.2 — spec↔code audited 2026-10-15 (Phase 5 stable tier, twelfth): the one
+  operation (`retrieveScoring`, `POST /customer-insights/v0.2/scoring/retrieve`) reviewed end to
+  end. Both control planes match the handler (the identifier reserved-error-suffix plane; the
+  trailing-three-digits score plane, `gaugeMetric → 300 + d%551`, `veritasIndex → d%20`, so
+  `scoringType` is a genuine second control plane), the two-legged/three-legged identifier
+  resolution (incl. `422 UNNECESSARY_IDENTIFIER`, `422 CUSTOMER_INSIGHTS.ID_DOCUMENT_NOT_SUPPORTED`,
+  `422 MISSING_IDENTIFIER`) is faithful, and the E.164 pattern, `deny_unknown_fields`, the
+  `idDocument` length bound and the scope are genuinely enforced. **Drift found & fixed — the
+  truncated-identifier-message class** (simple-edge-discovery / carrier-billing / kyc-tenure
+  precedent): the 422 `missingIdentifier` AND `idDocumentNotSupported` examples carried truncated
+  messages ("The phone number cannot be identified." / "Scoring by `idDocument` alone is not
+  supported.") but the handler emits the full "…: supply `phoneNumber`/a `phoneNumber` or use a
+  token that identifies a line." Corrected both; the `unnecessaryIdentifier` / `serviceNotApplicable`
+  (= `for_status(422)`) / 400 `invalidArgument` examples already byte-matched. Bound the two 200
+  example summaries to the reproducing line `+123456789740` (gauge 489, veritas 0). Added
+  `vendored_examples_match_the_handler` pinning both 200 bodies as exact objects and the exact
+  `status`/`code`/`message` bytes of all five router-reachable inline error families (prior tests
+  guarded only `code` / the 200 fields individually). Spec + `#[cfg(test)]` change only, binary
+  unchanged (5,455,000 bytes), no new dependency.
 - ✅ connected-network-type v0.2
 - ✅ connectivity-insights v0.6
 - ✅ region-device-count v0.2
@@ -1465,6 +1483,43 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — customer-insights v0.2
+  (twelfth Phase 5 stable API), drift found & fixed. Audited the one operation (`retrieveScoring`,
+  `POST /customer-insights/v0.2/scoring/retrieve`) against
+  `specs/customer-insights/v0.2/openapi.yaml`. The handler is faithful: the two control planes (the
+  identifier reserved-error-suffix plane; the trailing-three-digits score plane — `gaugeMetric →
+  300 + d%551` [300–850], `veritasIndex → d%20` [0–19], so the same number reads a different value
+  on each scale and `scoringType` is a genuine second control plane, `…000`/no digits → the scale
+  floor) match, the two-legged/three-legged identifier resolution is correct (`phoneNumber` on a
+  line-subject three-legged token → `422 UNNECESSARY_IDENTIFIER`; no `phoneNumber` + non-line
+  subject + `idDocument` → `422 CUSTOMER_INSIGHTS.ID_DOCUMENT_NOT_SUPPORTED`; neither → `422
+  MISSING_IDENTIFIER`), and the E.164 pattern, `deny_unknown_fields`, the 1–30 char `idDocument`
+  bound, the `customer-insights:scoring:read` scope and the `x-correlator` echo are genuinely
+  enforced. **Drift found — the truncated-identifier-message class** (simple-edge-discovery /
+  carrier-billing / kyc-tenure / consent-info precedent): both the 422 `missingIdentifier` and the
+  422 `idDocumentNotSupported` examples carried truncated messages ("The phone number cannot be
+  identified." and "Scoring by `idDocument` alone is not supported.") but the handler emits the full
+  forms ("…: supply `phoneNumber` or use a token that identifies a line." and "…; supply a
+  `phoneNumber` or use a token that identifies a line."). Corrected both. The `unnecessaryIdentifier`
+  ("The phone number is already identified by the access token."), `serviceNotApplicable` (=
+  `CamaraError::for_status(422)`, "The service is not available for the provided identifier.") and
+  400 `invalidArgument` (the body-parse message) examples already byte-matched; every
+  401/403/404/409/429/500/503 response `$ref`s the shared catalog. The two 200 examples (gauge 489,
+  veritas 0) are reproducible deterministic scalars, so their summaries were bound to the concrete
+  reproducing line `+123456789740` (gauge: 300 + 740%551 = 489; veritas: 740%20 = 0). **Tested
+  increment:** added `vendored_examples_match_the_handler` driving both documented 200 requests
+  through the real router and pinning each body as an **exact object**, plus the exact
+  `status`/`code`/`message` bytes of all five router-reachable inline error families (400
+  `INVALID_ARGUMENT`; 422 `MISSING_IDENTIFIER`/`UNNECESSARY_IDENTIFIER`/`ID_DOCUMENT_NOT_SUPPORTED`/
+  `SERVICE_NOT_APPLICABLE`) — the existing tests guarded only `code` and the 200 fields
+  individually. `cargo test` 3116 green (+1); `cargo build --release` ok, binary 5,455,000 bytes
+  (5.3M, byte-identical to the simple-edge-discovery / carrier-billing passes — the YAML example
+  corrections are outside the release path and the new test is `#[cfg(test)]`-only). Spec +
+  `#[cfg(test)]` change only — no behaviour/response change (the handler was already correct; two
+  examples were truncated), no new dependency. Next in phase order: the remaining Phase 5 stable
+  APIs (connected-network-type v0.2, connectivity-insights v0.6, region-device-count v0.2,
+  qos-provisioning v0.3, sms v0alpha1, in-home-device-management v1). Branch
+  `agent/customer-insights/audit-v0_2`.
 - 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — simple-edge-discovery v2
   (eleventh Phase 5 stable API), drift found & fixed. Audited the one operation
   (`readClosestEdgeCloudZone`, `POST /simple-edge-discovery/v2/retrieve-closest-edge-cloud-zone`)

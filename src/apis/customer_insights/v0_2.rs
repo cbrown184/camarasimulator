@@ -607,6 +607,95 @@ mod tests {
         assert_eq!(body["code"], "UNAUTHENTICATED");
     }
 
+    /// The vendored spec's examples must not drift from the handler. Drive each
+    /// documented request through the real router and pin the 200 example bodies
+    /// as **exact objects** and the inline error families' exact
+    /// `status`/`code`/`message` bytes (the other tests guard `code` and the 200
+    /// fields individually, so a changed message or a stray field could slip
+    /// past). Mirrors the whole-object / message-byte pin added across the Phase 5
+    /// audit (simple-edge-discovery / carrier-billing / kyc-tenure).
+    #[tokio::test]
+    async fn vendored_examples_match_the_handler() {
+        // --- 200 examples: both scales for the documented +123456789740 line ---
+        let (status, _, out) =
+            scoring_ok(r#"{"phoneNumber":"+123456789740","scoringType":"gaugeMetric"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(out, json!({"scoringType": "gaugeMetric", "scoringValue": 489}));
+
+        let (status, _, out) =
+            scoring_ok(r#"{"phoneNumber":"+123456789740","scoringType":"veritasIndex"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(out, json!({"scoringType": "veritasIndex", "scoringValue": 0}));
+
+        // --- 400 INVALID_ARGUMENT (malformed body) ---
+        let (status, _, body) = scoring_ok("not json").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            json!({
+                "status": 400,
+                "code": "INVALID_ARGUMENT",
+                "message": "Request body is not a valid ScoringRequest (a known `scoringType` is required)."
+            })
+        );
+
+        // --- 422 MISSING_IDENTIFIER (no phoneNumber, non-line subject) ---
+        let (status, _, body) = scoring_ok(r#"{"scoringType":"gaugeMetric"}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({
+                "status": 422,
+                "code": "MISSING_IDENTIFIER",
+                "message": "The phone number cannot be identified: supply `phoneNumber` or use a token that identifies a line."
+            })
+        );
+
+        // --- 422 UNNECESSARY_IDENTIFIER (phoneNumber on a three-legged line token) ---
+        let token = mint_token_with_client(SCORING_SCOPE, "+123456789123").await;
+        let (status, _, body) = post_scoring(
+            Some(&token),
+            r#"{"phoneNumber":"+123456789123","scoringType":"gaugeMetric"}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({
+                "status": 422,
+                "code": "UNNECESSARY_IDENTIFIER",
+                "message": "The phone number is already identified by the access token."
+            })
+        );
+
+        // --- 422 CUSTOMER_INSIGHTS.ID_DOCUMENT_NOT_SUPPORTED (idDocument only) ---
+        let (status, _, body) =
+            scoring_ok(r#"{"idDocument":"AB1234567","scoringType":"gaugeMetric"}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({
+                "status": 422,
+                "code": "CUSTOMER_INSIGHTS.ID_DOCUMENT_NOT_SUPPORTED",
+                "message": "Scoring by `idDocument` alone is not supported; supply a `phoneNumber` or use a token that identifies a line."
+            })
+        );
+
+        // --- 422 SERVICE_NOT_APPLICABLE (reserved …422 suffix, shared catalog) ---
+        let (status, _, body) =
+            scoring_ok(r#"{"phoneNumber":"+123456789422","scoringType":"gaugeMetric"}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({
+                "status": 422,
+                "code": "SERVICE_NOT_APPLICABLE",
+                "message": "The service is not available for the provided identifier."
+            })
+        );
+    }
+
     #[tokio::test]
     async fn x_correlator_is_echoed_on_success_and_error() {
         let token = mint_token(SCORING_SCOPE).await;
