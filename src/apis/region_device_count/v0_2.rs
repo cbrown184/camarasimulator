@@ -974,4 +974,78 @@ mod tests {
             Some("corr-err")
         );
     }
+
+    // --- Vendored-example pinning -----------------------------------------
+    //
+    // Drive the three documented `POST /count` 200 examples and the three
+    // inline 400 error examples (`specs/region-device-count/v0.2/openapi.yaml`)
+    // through the real router and pin each body *exactly* — as a whole object
+    // for the 200s (so a stray/renamed field or a drifted `count` can't slip
+    // past the per-field assertions above) and byte-for-byte on the inline
+    // 400 `status`/`code`/`message` (the per-case tests above guard only the
+    // `code`). This is the self-validating guard that closed the drift in the
+    // `partial` 200 example (vendored `count: 3142`, handler emits 3144).
+
+    #[tokio::test]
+    async fn vendored_examples_match_the_handler() {
+        let token = mint_token(COUNT_SCOPE).await;
+
+        // 200 `supported` — radius 2000 (…000 → SUPPORTED_AREA): π·2000²≈12.566
+        // km² × 500 = 6283.
+        let (status, _, body) = post_count(Some(&token), &circle("2000"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "count": 6283, "status": "SUPPORTED_AREA" }));
+
+        // 200 `partial` — radius 2001 (…001 → PART_OF_AREA_NOT_SUPPORTED):
+        // full count 6289, halved (i64) = 3144. (Was mis-documented as 3142.)
+        let (status, _, body) = post_count(Some(&token), &circle("2001"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({ "count": 3144, "status": "PART_OF_AREA_NOT_SUPPORTED" })
+        );
+
+        // 200 `belowThreshold` — radius 2003 (…003): status only, no `count`.
+        let (status, _, body) = post_count(Some(&token), &circle("2003"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "status": "DENSITY_BELOW_PRIVACY_THRESHOLD" }));
+
+        // 400 `invalidCircleArea` — CIRCLE missing `radius`.
+        let missing_radius =
+            r#"{"area":{"areaType":"CIRCLE","center":{"latitude":0.0,"longitude":0.0}}}"#;
+        let (status, _, body) = post_count(Some(&token), missing_radius, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            json!({
+                "status": 400,
+                "code": "REGION_DEVICE_COUNT.INVALID_CIRCLE_AREA",
+                "message": "A CIRCLE area requires both `center` and `radius`."
+            })
+        );
+
+        // 400 `unsupportedSync` — 5e5 < radius ≤ 1e6 and no `sink`.
+        let (status, _, body) = post_count(Some(&token), &circle("600000"), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            json!({
+                "status": 400,
+                "code": "REGION_DEVICE_COUNT.UNSUPPORTED_SYNC_RESPONSE",
+                "message": "The requested area/time is too large for a synchronous response; supply a `sink`."
+            })
+        );
+
+        // 400 `unsupportedRequest` — radius > 1e6.
+        let (status, _, body) = post_count(Some(&token), &circle("1000001"), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            json!({
+                "status": 400,
+                "code": "REGION_DEVICE_COUNT.UNSUPPPORTED_REQUEST",
+                "message": "The requested area/time is too large to be processed."
+            })
+        );
+    }
 }

@@ -293,7 +293,37 @@ Verified sub-items:
   router-reachable inline error families (prior error tests guarded only `code`). Spec + `#[cfg(test)]`
   change only — no behaviour/response change (the handler was already correct; one message was truncated),
   no new dependency.
-- ✅ region-device-count v0.2
+- ✅ region-device-count v0.2 — spec↔code audited 2026-10-15 (Phase 5 stable tier,
+  fifteenth; the area-keyed, identifier-free aggregate-count API — no phone/device
+  id, the control planes key off the region's characteristic radius + optional
+  `filter`): the one operation (`count`, `POST /region-device-count/v0.2/count`)
+  reviewed end to end against `specs/region-device-count/v0.2/openapi.yaml`. The
+  handler is faithful — the region-size plane (`r > 1e6` → `UNSUPPPORTED_REQUEST`
+  (triple-P verbatim); `5e5 < r ≤ 1e6` without `sink` → `UNSUPPORTED_SYNC_RESPONSE`,
+  with a `sink` answered synchronously), the trailing-three-digits coverage plane
+  (`…429`→429, `…001`→PART, `…002`→AREA_NOT_SUPPORTED, `…003`→DENSITY_BELOW_PRIVACY_THRESHOLD,
+  `…004`→TIME_INTERVAL_NO_DATA_FOUND, else SUPPORTED_AREA), the fixed-density count
+  (500 dev/km², halved for PART, narrowed by `filter`'s fixed category shares), and
+  the full validation set (CIRCLE/POLYGON area codes, both-or-neither + end≥start
+  time, filter enum, sinkCredential) all match. **Drift found & fixed — the
+  deterministic-value class** (population-density-data / network-traffic-analysis
+  precedent): the vendored 200 `partial` example claimed `count: 3142` (a hand-derived
+  half of the `supported` 6283) but the handler computes the full count for the
+  concrete `…001` radius *first*, then integer-halves — radius 2001 → full 6289,
+  `6289/2 = 3144`. Corrected the example to 3144 and bound all three 200 example
+  summaries to their concrete reproducing radii (2000→6283 SUPPORTED, 2001→3144 PART,
+  2003→DENSITY_BELOW). The three inline 400 error examples (`invalidCircleArea`,
+  `unsupportedSync`, `unsupportedRequest`) already byte-matched the handler; the
+  401/403/429 responses `$ref` the shared catalog. The module docs
+  (`region_device_count.rs` + `v0_2.rs`) and the `x-camarasim-scenarios` block were
+  already accurate (one operation, async sink a documented cut) — no stale-slice
+  drift. Added `vendored_examples_match_the_handler` driving all three documented 200
+  requests through the real router and pinning each body as an **exact object** (prior
+  tests asserted `status`/`count` individually and allowed a stray field), plus the
+  exact `status`/`code`/`message` bytes of all three inline 400 families (prior error
+  tests guarded only `code`). Spec + `#[cfg(test)]` change only — no behaviour/response
+  change (the handler was already correct; one example `count` was hand-derived), no
+  new dependency.
 - ✅ qos-provisioning v0.3
 - ✅ sms v0alpha1
 - ✅ in-home-device-management v1
@@ -1538,6 +1568,49 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — region-device-count v0.2
+  (fifteenth Phase 5 stable API), drift found & fixed. Audited the one operation (`count`,
+  `POST /region-device-count/v0.2/count`) against `specs/region-device-count/v0.2/openapi.yaml`.
+  This API is the tier's odd one out — **area-keyed, not identifier-keyed** (no phone/device id),
+  so no truncated-identifier-message class to check; its control planes key off the region's
+  characteristic radius `r` (a CIRCLE's `radius`; a POLYGON's `sqrt(area/π)`) and the optional
+  `filter`. The handler is faithful: the region-size plane (`r > 1e6` →
+  `REGION_DEVICE_COUNT.UNSUPPPORTED_REQUEST`, triple-P verbatim; `5e5 < r ≤ 1e6` without a `sink`
+  → `UNSUPPORTED_SYNC_RESPONSE`, with a `sink` accepted + answered synchronously — async delivery
+  a documented cut), the trailing-three-digits coverage plane (`round(r)` → `…429`→429
+  TOO_MANY_REQUESTS, `…001`→PART_OF_AREA_NOT_SUPPORTED with a count for the covered ~50%,
+  `…002`→AREA_NOT_SUPPORTED, `…003`→DENSITY_BELOW_PRIVACY_THRESHOLD, `…004`→TIME_INTERVAL_NO_DATA_FOUND,
+  else SUPPORTED_AREA with a count), the fixed-density count (500 dev/km² × area, integer-halved for
+  PART, narrowed by `filter`'s fixed category shares — non-roaming 0.85/roaming 0.15; human 0.70/IoT
+  0.25/other 0.05), and the full validation set (CIRCLE missing center/radius → INVALID_CIRCLE_AREA,
+  radius<1/out-of-range center → INVALID_ARGUMENT; POLYGON 3–15 valid points or zero-area →
+  INVALID_POLYGON_AREA; time both-or-neither → TIME_INVALID_ARGUMENT, end<start → INVALID_END_DATE,
+  malformed → INVALID_ARGUMENT; empty/bad filter → INVALID_ARGUMENT; sinkCredential non-ACCESSTOKEN →
+  INVALID_CREDENTIAL, non-bearer → INVALID_TOKEN) all match, and the `region-device-count:count` scope
+  + `x-correlator` echo are genuinely enforced. **Drift found — the deterministic-value class**
+  (population-density-data / network-traffic-analysis precedent, not the identifier-message class):
+  the vendored 200 `partial` example claimed `count: 3142` — a hand-derived half of the `supported`
+  example's 6283 — but the handler computes the **full** count for the concrete `…001` radius first,
+  then integer-halves: radius 2001 → area π·2001² ≈ 12.579 km² × 500 = round(6289.5)=6289, `6289/2 =
+  3144`. Corrected the example to 3144 and bound all three 200 example summaries to their concrete
+  reproducing radii (2000 → 6283 SUPPORTED_AREA; 2001 → 3144 PART_OF_AREA_NOT_SUPPORTED; 2003 →
+  DENSITY_BELOW_PRIVACY_THRESHOLD, no count). The three inline 400 error examples (`invalidCircleArea`
+  "A CIRCLE area requires both `center` and `radius`.", `unsupportedSync` "…too large for a synchronous
+  response; supply a `sink`.", `unsupportedRequest` "…too large to be processed.") already byte-matched
+  the handler; the 401/403/429 responses all `$ref` the shared catalog (no other inline error examples
+  to drift). The parent + version module docs and the `x-camarasim-scenarios` block were already
+  accurate (one modelled operation, the async sink/CloudEvents surface a documented cut) — no
+  stale-slice-doc drift. **Tested increment:** added `vendored_examples_match_the_handler` driving all
+  three documented 200 requests through the real router and pinning each body as an **exact object**
+  (the existing router tests asserted `status`/`count` individually and would let a stray/renamed field
+  or the drifted 3142 slip past), plus the exact `status`/`code`/`message` bytes of all three inline 400
+  families (the existing error tests guarded only `code`). `cargo test` 3119 green (+1);
+  `cargo build --release` ok, binary 5,459,096 bytes (unchanged — the embedded-YAML edit, one count
+  digit plus lengthened example summaries, is below section-padding granularity; no code-path change,
+  no new dependency). Spec + `#[cfg(test)]` change only — no behaviour/response change (the handler was
+  already correct; one example `count` was hand-derived). Next in phase order: the remaining Phase 5
+  stable APIs (qos-provisioning v0.3, sms v0alpha1, in-home-device-management v1).
+  Branch `agent/region-device-count/audit-v0_2`.
 - 2026-10-15 — Phase 5 stable/numbered-tier audit (backlog item 2) — connectivity-insights v0.6
   (fourteenth Phase 5 stable API), drift found & fixed. Audited the one operation (`checkNetworkQuality`,
   `POST /connectivity-insights/v0.6/check-network-quality`) against

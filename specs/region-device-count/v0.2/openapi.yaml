@@ -120,17 +120,26 @@ paths:
                 $ref: "#/components/schemas/RegionDeviceCountResponse"
               examples:
                 supported:
-                  summary: Fully supported area (count returned)
+                  summary: >-
+                    Fully supported area (count returned). Reproduced by a CIRCLE
+                    `radius: 2000` (…000 → SUPPORTED_AREA): π·2000² ≈ 12.566 km²
+                    × 500 dev/km² = 6283.
                   value:
                     count: 6283
                     status: SUPPORTED_AREA
                 partial:
-                  summary: Partially supported area (count for the covered part)
+                  summary: >-
+                    Partially supported area (count for the covered ~50%).
+                    Reproduced by a CIRCLE `radius: 2001` (…001 →
+                    PART_OF_AREA_NOT_SUPPORTED): full count 6289, halved = 3144.
                   value:
-                    count: 3142
+                    count: 3144
                     status: PART_OF_AREA_NOT_SUPPORTED
                 belowThreshold:
-                  summary: Below the privacy threshold (no count)
+                  summary: >-
+                    Below the privacy threshold (no count). Reproduced by a
+                    CIRCLE `radius: 2003` (…003 →
+                    DENSITY_BELOW_PRIVACY_THRESHOLD).
                   value:
                     status: DENSITY_BELOW_PRIVACY_THRESHOLD
         "400":
