@@ -1698,6 +1698,33 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-18 — **vwip residual-drift re-audit — device-data-volume illustrative-timestamp
+  drift found & fixed (new signature class in the vwip tier).** The 2026-10-18 truncated-message
+  re-audit closed one drift class in the vwip specs but noted the vwip sweep had closed
+  **2026-10-13**, one day before *both* late-identified classes (truncated-identifier-message
+  **and** illustrative-timestamp) were first found in the stable tier on **2026-10-14** — yet only
+  the message class was re-checked. A targeted grep for the frozen reference-epoch literal
+  `2024-01-01T14:27:08Z` across `specs/**` surfaced it in **device-data-volume/vwip** success
+  examples: both operations' 200 bodies (`/retrieve` `lightUsage`/`heavyUsage`; `/check`
+  `exceeds`/`belowThreshold`) carried `lastStatusTime: "2024-01-01T14:27:08Z"` as a plain value
+  with **no illustrative annotation**, but the handler stamps `rfc3339_utc(now_unix_secs())`
+  (`vwip.rs:184`,`:289` — the current wall-clock instant), so that frozen literal can never
+  reproduce (the sim-swap `latestSimChange` / quality-on-demand `startedAt` class). Annotated all
+  four example summaries and both `RetrieveDataVolumeResponse`/`CheckDataVolumeResponse`
+  `lastStatusTime` property descriptions to mark the value illustrative, and added
+  `vendored_success_examples_match_the_handler` driving all four documented example requests
+  through the real router and pinning each body as an **exact object** minus `lastStatusTime`
+  (which is asserted present + UTC but **≠** the frozen literal). The deterministic fields
+  (`dataVolumeCategory`/`thresholdExceeded` + the phone-keyed `device` echo) were already
+  byte-accurate. Green: `cargo test` → **3129 passed, 0 failed** (+1); `cargo build --release` ok;
+  binary = **5,467,288 bytes** (+4,096 vs 5,463,192 = one page of embedded/vendored spec-text
+  growth from the longer summaries/descriptions; the test is `#[cfg(test)]`-only, no code-path
+  change, no new dependency). Spec + `#[cfg(test)]` + this doc change only — no behaviour/response
+  change (the handler was already correct; the examples' timestamps were unannotated frozen
+  literals). **Next pass:** the analogous illustrative-timestamp sweep should confirm the remaining
+  vwip success-example timestamps are annotated (click-to-dial/vwip's `/retrieve` `created` example
+  already carries the annotation; the other vwip timestamp hits are schema-level `example:` fields,
+  not success-body examples). Branch `agent/device-data-volume/audit-vwip-illustrative-timestamp`.
 - 2026-10-18 — **vwip residual-drift re-audit — device-visit-location, drift found & fixed
   (closes the three-spec sweep).** Last of the three vwip specs the 2026-10-18
   device-data-volume pass flagged as carrying the truncated-identifier-message drift (the vwip

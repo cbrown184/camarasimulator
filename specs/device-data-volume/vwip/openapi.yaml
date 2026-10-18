@@ -117,14 +117,22 @@ paths:
                 $ref: "#/components/schemas/RetrieveDataVolumeResponse"
               examples:
                 lightUsage:
-                  summary: A lightly-used device (…000)
+                  summary: >-
+                    A lightly-used device (…000). `dataVolumeCategory` and the
+                    `device` echo are deterministic; `lastStatusTime` is
+                    illustrative — CamaraSim stamps the current wall-clock
+                    instant, so it never reproduces this frozen value.
                   value:
                     dataVolumeCategory: "<200MiB"
                     lastStatusTime: "2024-01-01T14:27:08Z"
                     device:
                       phoneNumber: "+123456789000"
                 heavyUsage:
-                  summary: A heavily-used device (…003)
+                  summary: >-
+                    A heavily-used device (…003). `dataVolumeCategory` and the
+                    `device` echo are deterministic; `lastStatusTime` is
+                    illustrative — CamaraSim stamps the current wall-clock
+                    instant, so it never reproduces this frozen value.
                   value:
                     dataVolumeCategory: ">=5GiB"
                     lastStatusTime: "2024-01-01T14:27:08Z"
@@ -277,14 +285,24 @@ paths:
                 $ref: "#/components/schemas/CheckDataVolumeResponse"
               examples:
                 exceeds:
-                  summary: 2000 MiB remaining exceeds a 1 GiB threshold (…200)
+                  summary: >-
+                    2000 MiB remaining exceeds a 1 GiB threshold (…200).
+                    `thresholdExceeded` and the `device` echo are deterministic;
+                    `lastStatusTime` is illustrative — CamaraSim stamps the
+                    current wall-clock instant, so it never reproduces this
+                    frozen value.
                   value:
                     thresholdExceeded: true
                     lastStatusTime: "2024-01-01T14:27:08Z"
                     device:
                       phoneNumber: "+123456789200"
                 belowThreshold:
-                  summary: 500 MiB remaining does not exceed a 1 GiB threshold (…050)
+                  summary: >-
+                    500 MiB remaining does not exceed a 1 GiB threshold (…050).
+                    `thresholdExceeded` and the `device` echo are deterministic;
+                    `lastStatusTime` is illustrative — CamaraSim stamps the
+                    current wall-clock instant, so it never reproduces this
+                    frozen value.
                   value:
                     thresholdExceeded: false
                     lastStatusTime: "2024-01-01T14:27:08Z"
@@ -490,7 +508,8 @@ components:
           description: >-
             When the reported figure was last measured (RFC 3339, UTC). Nullable
             in CAMARA for "no known measurement"; CamaraSim always reports a fresh
-            time.
+            time (the current wall-clock instant), so the `example` below is
+            illustrative and never reproduces this frozen value.
           example: "2024-01-01T14:27:08Z"
         dataVolumeCategory:
           type: string
@@ -573,7 +592,8 @@ components:
           description: >-
             When the reported figure was last measured (RFC 3339, UTC). Nullable
             in CAMARA for "no known measurement"; CamaraSim always reports a fresh
-            time.
+            time (the current wall-clock instant), so the `example` below is
+            illustrative and never reproduces this frozen value.
           example: "2024-01-01T14:27:08Z"
         thresholdExceeded:
           type: boolean

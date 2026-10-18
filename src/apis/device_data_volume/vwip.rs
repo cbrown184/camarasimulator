@@ -1194,4 +1194,87 @@ mod tests {
         assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
         assert_eq!(body["message"], UNNECESSARY);
     }
+
+    /// The vendored 200 success examples must match the handler's body. The
+    /// deterministic fields (`dataVolumeCategory` / `thresholdExceeded` + the
+    /// `device` echo) are pinned as exact objects through the real router, so a
+    /// stray/renamed field or a wrong category/threshold can't drift from the
+    /// spec. `lastStatusTime` is **illustrative**: the handler stamps the current
+    /// wall-clock instant (`rfc3339_utc(now_unix_secs())`), so the spec's frozen
+    /// `2024-01-01T14:27:08Z` can never reproduce — this catches the
+    /// illustrative-timestamp class (the vwip specs were audited before it was
+    /// identified), asserting the example annotation is honest: `lastStatusTime`
+    /// is present and UTC but is **not** the frozen literal.
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        const FROZEN: &str = "2024-01-01T14:27:08Z";
+
+        /// Pull `lastStatusTime` out of a 200 body, asserting it is a fresh UTC
+        /// instant and not the spec's frozen illustrative literal; return the
+        /// rest of the body for an exact-object comparison.
+        fn split_off_last_status_time(mut body: Value) -> Value {
+            let last = body
+                .as_object_mut()
+                .unwrap()
+                .remove("lastStatusTime")
+                .expect("lastStatusTime present");
+            let last = last.as_str().expect("lastStatusTime is a string");
+            assert!(last.ends_with('Z'), "lastStatusTime is UTC: {last}");
+            assert_ne!(
+                last, FROZEN,
+                "lastStatusTime must be the fresh wall-clock instant, not the frozen example literal"
+            );
+            body
+        }
+
+        // --- /retrieve: `lightUsage` (…000 → <200MiB) ----------------------
+        let (status, _, body) = call_ok(r#"{"device":{"phoneNumber":"+123456789000"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            split_off_last_status_time(body),
+            json!({
+                "dataVolumeCategory": "<200MiB",
+                "device": { "phoneNumber": "+123456789000" }
+            })
+        );
+
+        // --- /retrieve: `heavyUsage` (…003 → >=5GiB) -----------------------
+        let (status, _, body) = call_ok(r#"{"device":{"phoneNumber":"+123456789003"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            split_off_last_status_time(body),
+            json!({
+                "dataVolumeCategory": ">=5GiB",
+                "device": { "phoneNumber": "+123456789003" }
+            })
+        );
+
+        // --- /check: `exceeds` (…200 → 2000 MiB > 1 GiB) -------------------
+        let (status, _, body) = check_ok(
+            r#"{"device":{"phoneNumber":"+123456789200"},"volumeToCheck":{"value":1,"unit":"GiB"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            split_off_last_status_time(body),
+            json!({
+                "thresholdExceeded": true,
+                "device": { "phoneNumber": "+123456789200" }
+            })
+        );
+
+        // --- /check: `belowThreshold` (…050 → 500 MiB < 1 GiB) -------------
+        let (status, _, body) = check_ok(
+            r#"{"device":{"phoneNumber":"+123456789050"},"volumeToCheck":{"value":1,"unit":"GiB"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            split_off_last_status_time(body),
+            json!({
+                "thresholdExceeded": false,
+                "device": { "phoneNumber": "+123456789050" }
+            })
+        );
+    }
 }
