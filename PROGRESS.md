@@ -435,7 +435,20 @@ Verified sub-items:
 - 🔧 device-data-volume — verified 2026-10-12: both operations
   (`retrieveDataVolume`, `checkDataVolume`) implemented, tested, and documented in
   `specs/device-data-volume/vwip/openapi.yaml`; stale "`/check` is a later slice"
-  module doc corrected.
+  module doc corrected. **Re-audited 2026-10-18 for the drift classes discovered
+  *after* the vwip sweep closed (2026-10-13)** — the sweep predated the
+  truncated-identifier-message class first found 2026-10-14. **Drift found & fixed:**
+  the 422 `missingIdentifier` example in **both** operations carried the short
+  "The device cannot be identified." but `resolve_identifier` (`vwip.rs:387`) emits
+  the full "…: supply a `device` or use a token that identifies a device."
+  Corrected both. The other inline messages (`retrieve` 400 INVALID_ARGUMENT /
+  422 UNNECESSARY_IDENTIFIER; `check` 400 OUT_OF_RANGE / 400 INVALID_ARGUMENT /
+  422 UNNECESSARY_IDENTIFIER) already byte-matched; the 404 reserved-suffix / other
+  4xx/5xx examples show the shared catalog's generic message. Added
+  `vendored_error_example_messages_match_the_handler` pinning the exact
+  `status`/`code`/`message` bytes of all seven router-reachable API-own inline error
+  families across both operations (prior error tests guarded only `code`). Spec +
+  `#[cfg(test)]` change only — no behaviour/response change, no new dependency.
 - 🔧 device-visit-location — verified 2026-10-12: the one modelled operation
   (`retrieveDeviceVisitLocation`, `POST /device-visit-location/vwip/retrieve`) is
   implemented, tested (~25 test fns), and documented in
@@ -1671,6 +1684,27 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-18 — **vwip residual-drift re-audit — device-data-volume, drift found & fixed.**
+  The 2026-10-15 idle note concluded the per-API audit sweep was complete across every tier,
+  but noticed the vwip sweep closed **2026-10-13**, one day *before* the systematic drift
+  classes (truncated-identifier-message, Swagger-placeholder examples, illustrative timestamps)
+  were first identified in the stable-tier audit on **2026-10-14** — so vwip specs were never
+  checked for them. A targeted grep across `specs/**` for the truncated
+  "…cannot be identified." signature surfaced it in three vwip specs (`device-data-volume`,
+  `qos-booking`, `device-visit-location`). Took the first in vwip mount order,
+  **device-data-volume**: both operations' (`/retrieve`, `/check`) 422 `missingIdentifier`
+  examples carried the short message though `resolve_identifier` (`vwip.rs:387`) emits the full
+  "The device cannot be identified: supply a `device` or use a token that identifies a device."
+  (confirmed MISSING_IDENTIFIER is router-reachable here — a two-legged `client_credentials`
+  token's `sub` is a non-line client id). Corrected both examples and added
+  `vendored_error_example_messages_match_the_handler` pinning the exact `status`/`code`/`message`
+  bytes of all seven router-reachable API-own inline error families across both operations. Green:
+  `cargo test` → **3126 passed, 0 failed** (+1); `cargo build --release` ok; binary =
+  **5,463,192 bytes** (unchanged — embedded-spec text edit below section-padding granularity,
+  `#[cfg(test)]`-only Rust, no code-path change, no new dependency). Spec + `#[cfg(test)]` +
+  this doc change only — no behaviour/response change (the handler was already correct).
+  **`qos-booking` and `device-visit-location` carry the same truncated-message drift and remain
+  for the next passes.** Branch `agent/device-data-volume/audit-vwip-missing-identifier`.
 - 2026-10-15 — **Idle pass; stale-local-ref self-correction (no audit increment).** A scheduled
   pass confirmed the per-API spec↔code audit sweep (backlog item 2) is **complete across every
   tier** — Phase 0 auth, Phase 1–4 stable, Phase 5 stable (all 18, last = in-home-device-management

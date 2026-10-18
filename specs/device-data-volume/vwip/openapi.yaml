@@ -192,7 +192,7 @@ paths:
                   value:
                     status: 422
                     code: MISSING_IDENTIFIER
-                    message: The device cannot be identified.
+                    message: "The device cannot be identified: supply a `device` or use a token that identifies a device."
                 unnecessaryIdentifier:
                   summary: The device is already identified by the token
                   value:
@@ -360,7 +360,7 @@ paths:
                   value:
                     status: 422
                     code: MISSING_IDENTIFIER
-                    message: The device cannot be identified.
+                    message: "The device cannot be identified: supply a `device` or use a token that identifies a device."
                 unnecessaryIdentifier:
                   summary: The device is already identified by the token
                   value:

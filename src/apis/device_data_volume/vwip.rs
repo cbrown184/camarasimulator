@@ -1113,4 +1113,85 @@ mod tests {
             Some("corr-chk")
         );
     }
+
+    /// Pins the exact `status`/`code`/`message` bytes of every router-reachable
+    /// inline error example whose message is this API's own, across both
+    /// operations. The other error tests guard only `code`, so a reworded
+    /// `message` could silently drift from the vendored spec — this catches the
+    /// truncated-identifier-message class (the `MISSING_IDENTIFIER` example in
+    /// both `/retrieve` and `/check` carried the short "…identified." but
+    /// `resolve_identifier` emits the full "…: supply a `device` or use a token
+    /// that identifies a device."). The 404 reserved-suffix examples show the
+    /// shared catalog's generic message, not this API's own, so are not pinned.
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        const MISSING: &str =
+            "The device cannot be identified: supply a `device` or use a token that identifies a device.";
+        const UNNECESSARY: &str = "The device is already identified by the access token.";
+
+        // --- /retrieve -----------------------------------------------------
+        // 400 INVALID_ARGUMENT — an empty `device` object has no identifier.
+        let (status, _, body) = call_ok(r#"{"device":{}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["message"], "`device` must contain at least one identifier.");
+
+        // 422 MISSING_IDENTIFIER — two-legged token, no device.
+        let (status, _, body) = call_ok("{}").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "MISSING_IDENTIFIER");
+        assert_eq!(body["message"], MISSING);
+
+        // 422 UNNECESSARY_IDENTIFIER — line-subject token AND a submitted device.
+        let token = mint_token_with_client(RETRIEVE_SCOPE, "+123456789012").await;
+        let (status, _, body) =
+            post_retrieve(Some(&token), r#"{"device":{"phoneNumber":"+123456789012"}}"#, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
+        assert_eq!(body["message"], UNNECESSARY);
+
+        // --- /check --------------------------------------------------------
+        // 400 OUT_OF_RANGE — value outside 0..=1024 (checked before resolution).
+        let (status, _, body) = check_ok(
+            r#"{"device":{"phoneNumber":"+123456789050"},"volumeToCheck":{"value":1025,"unit":"MiB"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "OUT_OF_RANGE");
+        assert_eq!(body["message"], "`volumeToCheck.value` must be in the range 0..=1024.");
+
+        // 400 INVALID_ARGUMENT — `volumeToCheck` is required.
+        let (status, _, body) = check_ok(r#"{"device":{"phoneNumber":"+123456789050"}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            body["message"],
+            "Request body is not a valid CheckDataVolumeRequest (`volumeToCheck` is required)."
+        );
+
+        // 422 MISSING_IDENTIFIER — two-legged token, valid volume, no device.
+        let (status, _, body) = check_ok(r#"{"volumeToCheck":{"value":1,"unit":"MiB"}}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "MISSING_IDENTIFIER");
+        assert_eq!(body["message"], MISSING);
+
+        // 422 UNNECESSARY_IDENTIFIER — line-subject token AND a submitted device.
+        let token = mint_token_with_client(CHECK_SCOPE, "+123456789012").await;
+        let (status, _, body) = post_check(
+            Some(&token),
+            r#"{"device":{"phoneNumber":"+123456789012"},"volumeToCheck":{"value":1,"unit":"MiB"}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
+        assert_eq!(body["message"], UNNECESSARY);
+    }
 }
