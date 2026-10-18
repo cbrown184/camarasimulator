@@ -1684,6 +1684,34 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-18 — **vwip residual-drift re-audit — qos-booking, drift found & fixed.**
+  Second of the three vwip specs the 2026-10-18 device-data-volume pass flagged as carrying the
+  truncated-identifier-message drift (the vwip sweep closed 2026-10-13, one day before that drift
+  class was first identified in the stable tier). Took the next in vwip mount order,
+  **qos-booking**: both operations' (`createBooking` `POST …/device-qos-bookings`,
+  `retrieveBookingByDevice` `POST …/retrieve-device-qos-bookings`) 422 `missingIdentifier`
+  examples carried the short "The device cannot be identified." though `resolve_identifier`
+  (`vwip.rs:863`) emits the full "The device cannot be identified: supply a `device` or use a
+  token that identifies a device." (confirmed MISSING_IDENTIFIER router-reachable in both legs —
+  a two-legged `client_credentials` token's `sub` is a non-line client id; existing
+  `no_device_and_non_line_subject_is_422_missing_identifier` /
+  `retrieve_no_device_and_non_line_subject_is_422_missing_identifier` tests prove the branch).
+  Corrected both examples. Audited every other inline error example against the handler and found
+  **no further drift** — the ten other API-own messages (`createBooking` 400 INVALID_ARGUMENT /
+  OUT_OF_RANGE / QOS_BOOKING.DURATION_OUT_OF_RANGE / INVALID_SINK, 422 UNNECESSARY_IDENTIFIER /
+  QOS_BOOKING.QOS_PROFILE_NOT_APPLICABLE / INVALID_AREA / AREA_NOT_COVERED / NOT_MANAGED_AREA_TYPE;
+  `retrieve` 422 UNNECESSARY_IDENTIFIER) already byte-matched. Added
+  `vendored_error_example_messages_match_the_handler` pinning the exact `status`/`code`/`message`
+  bytes of all twelve router-reachable API-own inline error families across both operations (prior
+  per-case tests guarded only `code`/`status`); the `createBooking` 409 CONFLICT example is
+  deliberately left unpinned — its message is the shared-catalog `for_status(409)` canonical
+  (reserved-suffix path), not an API-own string. Green: `cargo test` → **3127 passed, 0 failed**
+  (+1); `cargo build --release` ok; binary = **5,463,192 bytes** (unchanged — embedded-spec text
+  edit below section-padding granularity, `#[cfg(test)]`-only Rust, no code-path change, no new
+  dependency). Spec + `#[cfg(test)]` + this doc change only — no behaviour/response change (the
+  handler was already correct). **`device-visit-location` carries the same truncated-message drift
+  and remains for the next pass** (last of the three flagged on 2026-10-18).
+  Branch `agent/qos-booking/audit-vwip-missing-identifier`.
 - 2026-10-18 — **vwip residual-drift re-audit — device-data-volume, drift found & fixed.**
   The 2026-10-15 idle note concluded the per-API audit sweep was complete across every tier,
   but noticed the vwip sweep closed **2026-10-13**, one day *before* the systematic drift

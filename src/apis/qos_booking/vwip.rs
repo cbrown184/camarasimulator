@@ -2354,4 +2354,177 @@ mod tests {
             post_retrieve(Some(&read), &retrieve_body("+199988870012"), None).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
+
+    /// Every vendored inline error example whose `message` is the API's own string
+    /// (not a shared-catalog `$ref`/reserved-suffix canonical) must byte-match what
+    /// the handler returns through the real router — not just the `code`, which the
+    /// per-case tests above already guard. This pins the full `status`/`code`/
+    /// `message` triple so a reworded handler string (or a re-truncated example, the
+    /// drift this pass fixed on the two `MISSING_IDENTIFIER` examples) cannot slip
+    /// past. The `createBooking` 409 `CONFLICT` example is deliberately absent: its
+    /// message is the shared-catalog `for_status(409)` canonical (reserved-suffix
+    /// path), not an API-own string.
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        let create = mint_token(CREATE_SCOPE).await; // two-legged (subject not a line)
+
+        // Helper: a well-formed create body with one field overridden/removed.
+        // Each case below sends a body crafted to reach exactly one error branch,
+        // honouring the handler's validation order (qosProfile → startTime →
+        // duration → serviceArea → sink → identifier → reserved → profile).
+
+        // 1. 400 INVALID_ARGUMENT — `qosProfile` omitted.
+        let body = json!({
+            "device": {"phoneNumber": "+123456789012"},
+            "startTime": "2024-06-01T12:00:00Z", "duration": 3600, "serviceArea": valid_area(),
+        })
+        .to_string();
+        let (status, _, b) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(b["status"], 400);
+        assert_eq!(b["code"], "INVALID_ARGUMENT");
+        assert_eq!(b["message"], "`qosProfile` is required.");
+
+        // 2. 400 OUT_OF_RANGE — duration below the 1-second floor.
+        let body = json!({
+            "device": {"phoneNumber": "+123456789012"}, "qosProfile": "QOS_E",
+            "startTime": "2024-06-01T12:00:00Z", "duration": 0, "serviceArea": valid_area(),
+        })
+        .to_string();
+        let (status, _, b) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(b["status"], 400);
+        assert_eq!(b["code"], "OUT_OF_RANGE");
+        assert_eq!(b["message"], "`duration` must be at least 1 second.");
+
+        // 3. 400 QOS_BOOKING.DURATION_OUT_OF_RANGE — duration above the ceiling.
+        let body = json!({
+            "device": {"phoneNumber": "+123456789012"}, "qosProfile": "QOS_E",
+            "startTime": "2024-06-01T12:00:00Z", "duration": MAX_DURATION_SECS + 1,
+            "serviceArea": valid_area(),
+        })
+        .to_string();
+        let (status, _, b) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(b["status"], 400);
+        assert_eq!(b["code"], "QOS_BOOKING.DURATION_OUT_OF_RANGE");
+        assert_eq!(
+            b["message"],
+            "`duration` exceeds the maximum bookable window (31622400 seconds)."
+        );
+
+        // 4. 422 QOS_BOOKING.INVALID_AREA — a CIRCLE with a non-positive radius.
+        let body = json!({
+            "device": {"phoneNumber": "+123456789012"}, "qosProfile": "QOS_E",
+            "startTime": "2024-06-01T12:00:00Z", "duration": 3600,
+            "serviceArea": {"areaType": "CIRCLE", "center": {"latitude": 51.5, "longitude": -0.12}, "radius": 0},
+        })
+        .to_string();
+        let (status, _, b) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(b["status"], 422);
+        assert_eq!(b["code"], "QOS_BOOKING.INVALID_AREA");
+        assert_eq!(b["message"], "The CIRCLE `radius` must be a positive number of metres.");
+
+        // 5. 422 QOS_BOOKING.AREA_NOT_COVERED — an AREANAME marked uncovered.
+        let body = json!({
+            "device": {"phoneNumber": "+123456789012"}, "qosProfile": "QOS_E",
+            "startTime": "2024-06-01T12:00:00Z", "duration": 3600,
+            "serviceArea": {"areaType": "AREANAME", "areaName": "uncovered-valley"},
+        })
+        .to_string();
+        let (status, _, b) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(b["status"], 422);
+        assert_eq!(b["code"], "QOS_BOOKING.AREA_NOT_COVERED");
+        assert_eq!(b["message"], "The requested area is not covered by the network.");
+
+        // 6. 422 QOS_BOOKING.NOT_MANAGED_AREA_TYPE — POLYGON is a documented cut.
+        let body = json!({
+            "device": {"phoneNumber": "+123456789012"}, "qosProfile": "QOS_E",
+            "startTime": "2024-06-01T12:00:00Z", "duration": 3600,
+            "serviceArea": {"areaType": "POLYGON"},
+        })
+        .to_string();
+        let (status, _, b) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(b["status"], 422);
+        assert_eq!(b["code"], "QOS_BOOKING.NOT_MANAGED_AREA_TYPE");
+        assert_eq!(
+            b["message"],
+            "CamaraSim manages CIRCLE and AREANAME service areas; POLYGON is not managed."
+        );
+
+        // 7. 400 INVALID_SINK — a non-http(s) callback URL.
+        let body = json!({
+            "device": {"phoneNumber": "+123456789012"}, "qosProfile": "QOS_E",
+            "startTime": "2024-06-01T12:00:00Z", "duration": 3600, "serviceArea": valid_area(),
+            "sink": "ftp://callbacks.example.com/hook",
+        })
+        .to_string();
+        let (status, _, b) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(b["status"], 400);
+        assert_eq!(b["code"], "INVALID_SINK");
+        assert_eq!(
+            b["message"],
+            "`sink` must be a valid `http://` or `https://` callback URL."
+        );
+
+        // 8. 422 MISSING_IDENTIFIER (createBooking) — no device, non-line subject.
+        //    This is the example this pass de-truncated.
+        let body = json!({
+            "qosProfile": "QOS_E", "startTime": "2024-06-01T12:00:00Z", "duration": 3600,
+            "serviceArea": valid_area(),
+        })
+        .to_string();
+        let (status, _, b) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(b["status"], 422);
+        assert_eq!(b["code"], "MISSING_IDENTIFIER");
+        assert_eq!(
+            b["message"],
+            "The device cannot be identified: supply a `device` or use a token that identifies a device."
+        );
+
+        // 9. 422 UNNECESSARY_IDENTIFIER (createBooking) — a device on a line token.
+        let line = mint_token_with_client(CREATE_SCOPE, "+123456789050").await;
+        let (status, _, b) =
+            post_booking(Some(&line), &create_body("+123456789051", "QOS_E"), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(b["status"], 422);
+        assert_eq!(b["code"], "UNNECESSARY_IDENTIFIER");
+        assert_eq!(b["message"], "The device is already identified by the access token.");
+
+        // 10. 422 QOS_BOOKING.QOS_PROFILE_NOT_APPLICABLE — a profile name marked
+        //     unavailable, reached past identifier resolution (non-reserved tail).
+        let (status, _, b) =
+            post_booking(Some(&create), &create_body("+123456789012", "unavailable"), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(b["status"], 422);
+        assert_eq!(b["code"], "QOS_BOOKING.QOS_PROFILE_NOT_APPLICABLE");
+        assert_eq!(b["message"], "The requested QoS profile is not applicable for this device.");
+
+        // --- retrieveBookingByDevice: the two shared identifier families ---------
+
+        // 11. 422 MISSING_IDENTIFIER (retrieve) — the second de-truncated example.
+        let retrieve = mint_token(RETRIEVE_SCOPE).await; // subject not a line
+        let (status, _, b) = post_retrieve(Some(&retrieve), "{}", None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(b["status"], 422);
+        assert_eq!(b["code"], "MISSING_IDENTIFIER");
+        assert_eq!(
+            b["message"],
+            "The device cannot be identified: supply a `device` or use a token that identifies a device."
+        );
+
+        // 12. 422 UNNECESSARY_IDENTIFIER (retrieve) — a device on a line token.
+        let line = mint_token_with_client(RETRIEVE_SCOPE, "+199900030099").await;
+        let (status, _, b) =
+            post_retrieve(Some(&line), &retrieve_body("+199900030098"), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(b["status"], 422);
+        assert_eq!(b["code"], "UNNECESSARY_IDENTIFIER");
+        assert_eq!(b["message"], "The device is already identified by the access token.");
+    }
 }
