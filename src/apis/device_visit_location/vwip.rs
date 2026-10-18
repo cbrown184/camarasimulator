@@ -669,6 +669,73 @@ mod tests {
         assert_eq!(out["code"], "MISSING_IDENTIFIER");
     }
 
+    /// Every vendored inline error example whose message is this API's own must
+    /// reproduce byte-for-byte through the router — status, code, AND message.
+    /// The per-case tests above guard only `status`/`code`, so a truncated or
+    /// stale example `message` (e.g. the `MISSING_IDENTIFIER` one once read
+    /// "The device cannot be identified." but the handler emits the full
+    /// "…: supply a `device` or use a token that identifies a device.") would
+    /// slip past them; this pins the exact bytes. The reserved-suffix `404
+    /// NOT_FOUND` example is intentionally excluded — its message is the shared
+    /// catalog's `for_status(404)`, not an API-own string.
+    #[tokio::test]
+    async fn vendored_error_example_messages_match_the_handler() {
+        // 400 INVALID_ARGUMENT — the malformed-window message the spec example shows.
+        let (status, _, out) = call_ok(
+            r#"{"device":{"phoneNumber":"+123456789012"},"startTime":"nope","endTime":"2024-01-08T00:00:00Z"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(out["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            out["message"],
+            "`startTime` and `endTime` must be valid RFC 3339 date-times."
+        );
+
+        // 400 DEVICE_VISIT_LOCATION.INVALID_END_DATE — inverted window.
+        let (status, _, out) = call_ok(
+            r#"{"device":{"phoneNumber":"+123456789012"},"startTime":"2024-01-08T00:00:00Z","endTime":"2024-01-01T00:00:00Z"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(out["code"], "DEVICE_VISIT_LOCATION.INVALID_END_DATE");
+        assert_eq!(out["message"], "`endTime` must not be earlier than `startTime`.");
+
+        // 404 DEVICE_VISIT_LOCATION.DATA_NOT_FOUND — the …000 tail.
+        let (status, _, out) =
+            call_ok(&body_with(r#""device":{"phoneNumber":"+123456789000"}"#)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(out["code"], "DEVICE_VISIT_LOCATION.DATA_NOT_FOUND");
+        assert_eq!(
+            out["message"],
+            "No visit location data was found for the device in the requested time window."
+        );
+
+        // 422 MISSING_IDENTIFIER — no device, non-line (two-legged) subject.
+        let (status, _, out) = call_ok(&format!("{{{WINDOW}}}")).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(out["code"], "MISSING_IDENTIFIER");
+        assert_eq!(
+            out["message"],
+            "The device cannot be identified: supply a `device` or use a token that identifies a device."
+        );
+
+        // 422 UNNECESSARY_IDENTIFIER — a device resubmitted on a line token.
+        let line = mint_token_with_client(RETRIEVE_SCOPE, "+123456789012").await;
+        let (status, _, out) = post_retrieve(
+            Some(&line),
+            &body_with(r#""device":{"phoneNumber":"+123456789012"}"#),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(out["code"], "UNNECESSARY_IDENTIFIER");
+        assert_eq!(
+            out["message"],
+            "The device is already identified by the access token."
+        );
+    }
+
     #[tokio::test]
     async fn empty_device_object_is_rejected() {
         let (status, _, out) = call_ok(&body_with(r#""device":{}"#)).await;

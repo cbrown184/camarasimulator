@@ -449,12 +449,26 @@ Verified sub-items:
   `status`/`code`/`message` bytes of all seven router-reachable API-own inline error
   families across both operations (prior error tests guarded only `code`). Spec +
   `#[cfg(test)]` change only — no behaviour/response change, no new dependency.
-- 🔧 device-visit-location — verified 2026-10-12: the one modelled operation
-  (`retrieveDeviceVisitLocation`, `POST /device-visit-location/vwip/retrieve`) is
-  implemented, tested (~25 test fns), and documented in
-  `specs/device-visit-location/vwip/openapi.yaml`; spec ↔ code ↔ module-doc
-  consistent (success example, reserved-suffix mapping, and identifier-resolution
-  422s all match), no drift found, no change needed.
+- 🔧 device-visit-location — verified 2026-10-12; **vwip residual-drift re-audit
+  2026-10-18 (truncated-identifier-message class — last of the three vwip specs
+  flagged on 2026-10-18 by the device-data-volume pass; drift found & fixed)**: the
+  one modelled operation (`retrieveDeviceVisitLocation`,
+  `POST /device-visit-location/vwip/retrieve`) is implemented, tested, and
+  documented in `specs/device-visit-location/vwip/openapi.yaml`. The 422
+  `missingIdentifier` example carried the short "The device cannot be identified."
+  but `resolve_identifier` (`vwip.rs:293`) emits the full "…: supply a `device` or
+  use a token that identifies a device." (router-reachable: a two-legged
+  `client_credentials` token's `sub` is a non-line client id — existing
+  `no_device_and_non_line_subject_is_missing_identifier` proves the branch).
+  Corrected it; the five other API-own inline examples (400 INVALID_ARGUMENT /
+  DEVICE_VISIT_LOCATION.INVALID_END_DATE, 404 DEVICE_VISIT_LOCATION.DATA_NOT_FOUND,
+  422 UNNECESSARY_IDENTIFIER, and the MISSING_IDENTIFIER code/status) already
+  byte-matched. Added `vendored_error_example_messages_match_the_handler` pinning
+  the exact `status`/`code`/`message` bytes of all five router-reachable API-own
+  inline error families (prior per-case tests guarded only `status`/`code`); the
+  reserved-suffix 404 `NOT_FOUND` example is `for_status(404)` (shared catalog), so
+  left unpinned. **This closes the three-spec vwip residual-drift re-audit.** Spec +
+  `#[cfg(test)]` change only, no behaviour change, no new dependency.
 - 🔧 population-density-data — verified 2026-10-12: the one modelled operation
   (`retrievePopulationDensity`, `POST /population-density-data/vwip/retrieve`) is
   implemented and well-tested. **Spec↔code drift found and fixed:** the vendored
@@ -1684,6 +1698,32 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-18 — **vwip residual-drift re-audit — device-visit-location, drift found & fixed
+  (closes the three-spec sweep).** Last of the three vwip specs the 2026-10-18
+  device-data-volume pass flagged as carrying the truncated-identifier-message drift (the vwip
+  sweep closed 2026-10-13, one day before that drift class was first identified in the stable
+  tier on 2026-10-14). Took **device-visit-location** (the one operation,
+  `retrieveDeviceVisitLocation` `POST /device-visit-location/vwip/retrieve`): its 422
+  `missingIdentifier` example carried the short "The device cannot be identified." though
+  `resolve_identifier` (`vwip.rs:293`) emits the full "The device cannot be identified: supply a
+  `device` or use a token that identifies a device." (confirmed MISSING_IDENTIFIER router-reachable —
+  a two-legged `client_credentials` token's `sub` is a non-line client id; existing
+  `no_device_and_non_line_subject_is_missing_identifier` proves the branch). Corrected it. Audited
+  every other inline error example against the handler and found **no further drift** — the five
+  other API-own messages (400 INVALID_ARGUMENT "`startTime` and `endTime` must be valid RFC 3339
+  date-times." / DEVICE_VISIT_LOCATION.INVALID_END_DATE; 404 DEVICE_VISIT_LOCATION.DATA_NOT_FOUND;
+  422 UNNECESSARY_IDENTIFIER) already byte-matched. Added
+  `vendored_error_example_messages_match_the_handler` pinning the exact `status`/`code`/`message`
+  bytes of all five router-reachable API-own inline error families across the operation (prior
+  per-case tests guarded only `code`/`status`); the reserved-suffix 404 `NOT_FOUND` example is
+  deliberately left unpinned — its message is the shared-catalog `for_status(404)` canonical, not an
+  API-own string. Green: `cargo test` → **3128 passed, 0 failed** (+1); `cargo build --release` ok;
+  binary = **5,463,192 bytes** (unchanged — embedded-spec text edit below section-padding
+  granularity, `#[cfg(test)]`-only Rust, no code-path change, no new dependency). Spec +
+  `#[cfg(test)]` + this doc change only — no behaviour/response change (the handler was already
+  correct). **The three vwip specs flagged on 2026-10-18 (device-data-volume, qos-booking,
+  device-visit-location) are now all de-truncated and pinned; the vwip residual-drift re-audit is
+  complete.** Branch `agent/device-visit-location/audit-vwip-missing-identifier`.
 - 2026-10-18 — **vwip residual-drift re-audit — qos-booking, drift found & fixed.**
   Second of the three vwip specs the 2026-10-18 device-data-volume pass flagged as carrying the
   truncated-identifier-message drift (the vwip sweep closed 2026-10-13, one day before that drift
