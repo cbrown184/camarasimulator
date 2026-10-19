@@ -1750,6 +1750,46 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-19 — **minted-id sweep — stable-tier, connectivity-insights v0.6: checked clean — the one
+  `3fa85f64-…` flag is a caller-supplied *request* UUID (not minted, not echoed), fully documented;
+  no drift, no annotation gap, nothing to fix.** Third of the four stable-tier specs the
+  dedicated-network-accesses entry flagged for a targeted minted/deterministic-id check
+  (qos-provisioning v0.3 → geofencing-subscriptions v0.4 → **connectivity-insights v0.6** →
+  carrier-billing v0.5). **Unlike the first two sweep units, the `3fa85f64-…` grep flagged exactly
+  one spot in connectivity-insights/v0.6 — `NetworkQualityInsightRequest.applicationProfileId`
+  (`openapi.yaml:298`), a caller-supplied *request* field, not a server-minted *response* id** (the
+  sibling `monitoringTimeStamp` frozen date-time example at `:311` is likewise caller input). Checked
+  both against the handler (`src/apis/connectivity_insights/v0_6.rs`): `applicationProfileId` is
+  validated as a well-formed UUID (`is_uuid`, `v0_6.rs:218`) but **never resolved against a store**
+  (CamaraSim has no Application Profiles store — a documented cut) and **never echoed into the
+  response**; `monitoringTimeStamp` is lightly RFC-3339-validated (`looks_like_datetime`) and likewise
+  never echoed ("the simulator always treats status as fresh"); `now_unix_secs` is `#[allow(dead_code)]`
+  and off the answer path. **The whole `NetworkQualityInsightResponse` is deterministic** — five
+  per-KPI policy-fulfilment enum verdicts driven by the identifier's trailing-three-digits unmet mask
+  (`d & 0x1F`), coherent `additionalKPIs`, and an echoed `phoneNumber` only — so the response carries
+  **no server-minted id and no wall-clock value at all**. The `3fa85f64-…` placeholder is therefore a
+  **legitimate caller-supplied request example** that needs no illustrative note (the
+  network-access-domains `ServiceId` / dedicated-network-accesses caller-echo precedent — "left
+  as-is"), **not** the unannotated server-minted schema placeholder the qos-provisioning /
+  geofencing-subscriptions passes fixed. **No deterministic/value drift, and nothing to annotate or
+  pin that is not already locked:** the 2026-10-14 Phase-5-prep audit's
+  `vendored_examples_match_the_handler` already pins **both** 200 example bodies (`healthy` …000 /
+  `degraded` …001) as **exact objects** through the real router (an exact-object `assert_eq!` fails if
+  the handler ever echoes `applicationProfileId`/`monitoringTimeStamp`, so non-echo is already
+  guarded) and the exact `status`/`code`/`message` bytes of all four router-reachable inline error
+  families. Adding a spec annotation or another test here would be the marginal contract-test-treadmill
+  edit the decision point warns against, so this pass makes **no spec/code change** — a docs-only
+  journal entry recording the verification, per AGENT.md step 9 / stop-condition 2. Verified green at
+  the current tip (unchanged): `cargo test` → **3139 passed, 0 failed**; `cargo build --release` ok;
+  binary = **5,479,576 bytes** (identical to the prior tip — no code/spec change). No new dependency.
+  **Env note:** HEAD began detached at the real `origin/main` (`191ee1a`) with local `main` stale at
+  an older ancestor (`f15d2f9`) — the recurring shallow-clone graft; fetched (forced-update to
+  `191ee1a`), confirmed HEAD == `origin/main`, repointed local `main` and branched. **Next pass:** the
+  fourth and **final** stable-tier minted-id unit, **carrier-billing v0.5** — verify each flagged id
+  against its handler (reproducible → pin; wall-clock / minted → annotate illustrative + pin ≠
+  literal); its `store.rs`-backed `paymentId` is minted (`mint_uuid`) per the 2026-10-15 Phase-5 audit,
+  so expect the schema-description-annotation shape of the qos-provisioning / geofencing passes rather
+  than this caller-supplied no-op. Branch `agent/connectivity-insights/verify-minted-id-examples`.
 - 2026-10-19 — **minted-id sweep — stable-tier, geofencing-subscriptions v0.4: annotated the three
   minted/wall-clock *schema-component* examples (`SubscriptionInfo.id`, `SubscriptionInfo.startsAt`,
   `CloudEvent.id`) as illustrative server-minted/live-clock placeholders, and pinned that neither
