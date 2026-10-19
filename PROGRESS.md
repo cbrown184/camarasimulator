@@ -551,6 +551,20 @@ Verified sub-items:
   `vendored_examples_match_the_handler` pinning the exact bytes. The success schemas,
   the `getRegions` catalog example, and the 400/`unnecessaryIdentifier` examples
   already matched.
+  - ✅ re-audited 2026-10-19 (illustrative-minted-id sweep): the `3fa85f64-…` grep
+    flag is **not** a minted-id drift here — `applicationProfileId` is a client-supplied
+    request input the handler validates as a UUID and **echoes back** (`vwip.rs:258`;
+    response schema "echoed back"), so the frozen value is a reproducible echo, not a
+    minted literal. **But a real device-echo drift was found & fixed:** the 200 `ranked`
+    example omitted the `device` echo though the handler returns `device.phoneNumber` for
+    **every** phone-keyed request (the `single` example already carried it) — for the
+    documented …013 phone request the handler returns `device: {phoneNumber:
+    "+123456789013"}`. Added it, bound both success-example summaries to their reproducing
+    request (marking `applicationProfileId` the echoed input), and extended
+    `vendored_examples_match_the_handler` to pin the `ranked` response's
+    `applicationProfileId` + `device` echo (it previously asserted only the zones). Spec +
+    `#[cfg(test)]` change only — no behaviour/response change (the handler was already
+    correct; the example was incomplete), no new dependency.
 - 🔧 verified-caller — verified 2026-10-12: the one modelled operation
   (`createPreAnnouncement`, `POST /verified-caller/vwip/pre-announce`) is
   implemented, tested, and documented in `specs/verified-caller/vwip/openapi.yaml`.
@@ -1724,6 +1738,35 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-19 — **vwip illustrative-minted-id sweep — optimal-edge-discovery: flag is an echoed
+  input (not minted), but a real device-echo example drift found & fixed.** Continued the sweep
+  in mount order; next flagged vwip spec was **optimal-edge-discovery/vwip** (the `3fa85f64-…`
+  grep flagged four spots). Checked each against the handler: all four are the
+  **`applicationProfileId`**, a client-supplied request field the handler validates as a UUID and
+  **echoes back** (`vwip.rs:258`; response schema already says "echoed back") — so it is a
+  reproducible echo, **not** a minted literal (unlike qos-booking/application-profiles). The two
+  request/response-schema `example:`s and the two 200-example occurrences are all legitimate as-is.
+  **But the cross-check surfaced a real drift** (the deterministic-value class): the 200 `ranked`
+  success example omitted the `device` echo, though the handler returns `device.phoneNumber` for
+  **every** phone-keyed request — the `single` example carried it but `ranked` (summary "…013", a
+  phone-keyed request) did not; for that request the handler returns `device: {phoneNumber:
+  "+123456789013"}`. Added the missing echo, bound both success-example summaries to their
+  reproducing request (making the frozen `applicationProfileId` read as the echoed input it is), and
+  extended the existing `vendored_examples_match_the_handler` to pin the `ranked` response's
+  `applicationProfileId` + `device` echo — it previously drove the request but asserted only the
+  zones, which is why the omission slipped the 2026-10-12 pass. Green: `cargo test` → **3131 passed,
+  0 failed** (assertions added to an existing test, no net count change); `cargo build --release` ok;
+  binary = **5,471,384 bytes** (unchanged vs the qos-booking commit — two added spec lines + longer
+  summaries are below section-padding granularity, the test is `#[cfg(test)]`-only). Spec +
+  `#[cfg(test)]` + this doc change only — no behaviour/response change (the handler was already
+  correct; the example was incomplete), no new dependency. **Next pass:** continue the sweep across
+  the remaining flagged store-backed vwip specs in mount order — session-insights,
+  network-access-devices, dedicated-network, dedicated-network-accesses, network-access-domains —
+  one API per pass, checking each flagged id against its handler (minted → annotate illustrative;
+  echoed/deterministic → verify reproducible, correct to the derived value). (The `3fa85f64-…` grep
+  also still flags four stable-tier specs — qos-provisioning v0.3, geofencing-subscriptions v0.4,
+  connectivity-insights v0.6, carrier-billing v0.5 — for a later targeted check.) Branch
+  `agent/optimal-edge-discovery/fix-ranked-device-echo`.
 - 2026-10-19 — **vwip illustrative-minted-id sweep — qos-booking, drift found & fixed (incl. a
   real non-reproducible example).** Continued the store-backed-vwip illustrative-minted-id sweep the
   prior application-profiles pass set up; took the next flagged vwip spec **in mount order**,

@@ -1055,6 +1055,12 @@ mod tests {
     /// placeholder (nil-ish) `edgeCloudZoneId`s, the 404 example said "…was not
     /// found." (handler emits "…is not found."), and the 422 `missingIdentifier`
     /// example carried the truncated "The device cannot be identified."
+    ///
+    /// Also guards the device-echo drift a later re-audit corrected: the `ranked`
+    /// 200 example omitted the `device` echo though the handler returns it for every
+    /// phone-keyed request (the `single` example already carried it), and pins that
+    /// the `applicationProfileId` in both examples is the request's value echoed back
+    /// (not a server-minted id).
     #[tokio::test]
     async fn vendored_examples_match_the_handler() {
         // 200 `single` example: …000 phone → one zone at index 0, device echoed.
@@ -1091,6 +1097,11 @@ mod tests {
         assert_eq!(zones[1]["edgeCloudZoneId"], zone_id(EDGE_ZONES[2].0));
         assert_eq!(zones[1]["edgeCloudZoneName"], "camarasim-edge-us-east-1");
         assert_eq!(zones[1]["edgeCloudZoneStatus"], "inactive");
+        // The `applicationProfileId` is the request's value echoed back (not minted),
+        // and the phone-keyed device is echoed too — both the `single` example and the
+        // `ranked` example must carry the device echo for a phone-keyed request.
+        assert_eq!(body["applicationProfileId"], APP_PROFILE);
+        assert_eq!(body["device"]["phoneNumber"], "+123456789013");
 
         // 404 `notFound` example: unknown region → the shared 404 message.
         let body = format!(

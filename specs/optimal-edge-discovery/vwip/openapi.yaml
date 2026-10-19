@@ -128,7 +128,7 @@ paths:
                 $ref: "#/components/schemas/EdgeDiscoveryResponse"
               examples:
                 single:
-                  summary: A single optimal zone (…000)
+                  summary: "A single optimal zone — request phone …000; applicationProfileId is the request's value, echoed back"
                   value:
                     edgeCloudZones:
                       - edgeCloudZoneId: "d0581b5b-fa7d-50f5-bfbe-7f11c70e6e15"
@@ -140,7 +140,7 @@ paths:
                     device:
                       phoneNumber: "+123456789000"
                 ranked:
-                  summary: Two ranked zones (…013)
+                  summary: "Two ranked zones — request phone …013; applicationProfileId is the request's value, echoed back, and the phone-keyed device is echoed too"
                   value:
                     edgeCloudZones:
                       - edgeCloudZoneId: "e3a79eed-dfd9-9955-f1b0-61eb9503e139"
@@ -154,6 +154,8 @@ paths:
                         edgeCloudRegion: us-east-1
                         edgeCloudZoneStatus: inactive
                     applicationProfileId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    device:
+                      phoneNumber: "+123456789013"
         "400":
           description: |
             400 — bad request. CamaraSim returns `INVALID_ARGUMENT` for a malformed
