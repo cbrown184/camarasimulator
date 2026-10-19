@@ -972,8 +972,11 @@ mod tests {
 
         // `created` / `rebootAll` reboot-request examples — a reboot-all over the
         // `+123456789000` subject materialises that subject's one deterministic
-        // device id in `devices` (the minted `id` and timestamps are illustrative,
-        // so they are not pinned).
+        // device id in `devices`. The minted `id` and wall-clock timestamps are
+        // illustrative, so they are not pinned to the frozen spec literals; but
+        // assert their *shape* and that they do **not** equal those frozen values,
+        // so a future edit can't silently re-freeze the minted id/timestamps (the
+        // minted-id-example class swept on session-insights / qos-booking).
         let (status, _, created) = post_reboot_request(Some(&token000), None, None).await;
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(
@@ -981,6 +984,23 @@ mod tests {
             json!(["ad59992d-c305-2bb1-d861-380b14eec986"]),
             "the materialised reboot-all devices drifted from the handler"
         );
+        // Minted `id`: UUID-shaped, present, and ≠ the illustrative spec literal.
+        let minted_id = created["id"].as_str().expect("created id is a string");
+        assert!(is_uuid_shaped(minted_id), "minted reboot-request id is not UUID-shaped");
+        assert_ne!(
+            minted_id, "8f14e45f-ceea-467d-9a3e-2c9f2b0f0a01",
+            "the minted reboot-request id must not equal the illustrative spec example"
+        );
+        // Wall-clock timestamps: present, UTC (`…Z`), and ≠ the illustrative spec
+        // literal `2024-06-01T14:27:08Z`.
+        for field in ["createdAt", "modifiedAt"] {
+            let ts = created[field].as_str().unwrap_or_else(|| panic!("{field} is a string"));
+            assert!(ts.ends_with('Z'), "{field} is not UTC (`…Z`): {ts}");
+            assert_ne!(
+                ts, "2024-06-01T14:27:08Z",
+                "{field} must not equal the illustrative spec example"
+            );
+        }
     }
 
     #[tokio::test]

@@ -1738,6 +1738,45 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-19 — **vwip illustrative-minted-id sweep — network-access-devices: success
+  bodies already clean & pinned; closed the schema-description + test-invariant gap.**
+  Continued the sweep in mount order; next flagged store-backed vwip spec was
+  **network-access-devices/vwip** (the `3fa85f64-…` grep flagged four spots). Checked each
+  against the handler (`src/apis/network_access_devices/{vwip,store}.rs`): device ids are
+  **deterministic** (`uuid_shaped(Sha256("nad-device:{subject}:{index}"))`, `vwip.rs:584`),
+  the reboot-request id is **minted** (`store::new_reboot_request_id`, counter+clock,
+  `store.rs:103`), and `createdAt`/`modifiedAt` are **wall-clock** (`rfc3339_utc(now)`). The
+  four flagged spots split two ways: line 362 (`scheduledTargeted` request body) and line 791
+  (`RebootRequestCreate.devices.items`) are **client-supplied** UUID inputs — legitimate
+  placeholders, left as-is; lines 724 (`NetworkAccessDevice.id`) and 884
+  (`RebootRequest.devices.items`) are response ids. **All success-BODY examples were already
+  annotated & pinned** by the earlier network-access-devices work: the deterministic device
+  examples (`singleConnected`/`twoDevices`/`connectedGateway`) are pinned as exact objects, and
+  the reboot `created`/`rebootAll` examples pin the materialised deterministic `devices` while
+  the summaries already mark `id`/timestamps illustrative. **No deterministic drift found**
+  (unlike qos-booking/optimal-edge-discovery). The residual gap was two-fold and both the
+  session-insights class: (1) the **schema property descriptions** a consumer reads were plain —
+  `NetworkAccessDevice.id`, `RebootRequest.id`, `RebootRequest.devices.items`, and
+  `createdAt`/`modifiedAt` presented their frozen/placeholder `example:` values
+  (`3fa85f64-…`/`8f14e45f-…`/`2024-06-01T14:27:08Z`) with no note they are
+  deterministic-derived / server-minted / wall-clock (the `SessionInfo.id` schema-description
+  gap); annotated all four descriptions. (2) The existing
+  `vendored_success_examples_match_the_handler` **excluded** the minted `id`/timestamps
+  entirely, so nothing stopped a future edit re-freezing them to the spec literals; extended it
+  to assert the `created` minted `id` is UUID-shaped and **≠** `8f14e45f-…` and that
+  `createdAt`/`modifiedAt` are UTC (`…Z`) and **≠** `2024-06-01T14:27:08Z` (the
+  session-insights/qos-booking invariant). Green: `cargo test` → **3132 passed, 0 failed**
+  (assertions added to an existing test, no net count change); `cargo build --release` ok;
+  binary = **5,471,384 bytes** (unchanged — the added folded-scalar descriptions are below
+  section-padding granularity and the test is `#[cfg(test)]`-only). Spec + `#[cfg(test)]` + this
+  doc change only — no behaviour/response change (the handler was already correct), no new
+  dependency. **Next pass:** continue the sweep across the remaining flagged store-backed vwip
+  specs in mount order — dedicated-network, dedicated-network-accesses, network-access-domains —
+  one API per pass, checking each flagged id against its handler (minted → annotate illustrative;
+  deterministic/echoed → verify reproducible). (The `3fa85f64-…` grep also still flags four
+  stable-tier specs — qos-provisioning v0.3, geofencing-subscriptions v0.4, connectivity-insights
+  v0.6, carrier-billing v0.5 — for a later targeted check.) Branch
+  `agent/network-access-devices/annotate-vwip-minted-id-examples`.
 - 2026-10-19 — **vwip illustrative-minted-id sweep — session-insights: annotated the three
   store-backed success examples (minted `id` + wall-clock `startsAt`/`expiresAt`) and pinned
   them.** Continued the sweep in mount order; next flagged store-backed vwip spec was

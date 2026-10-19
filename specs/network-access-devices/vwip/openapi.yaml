@@ -720,7 +720,13 @@ components:
           type: string
           format: uuid
           readOnly: true
-          description: The unique identifier of the device (UUID).
+          description: >-
+            The unique identifier of the device (UUID). CamaraSim derives it
+            deterministically from the token subject and the device index
+            (SHA-256), so the value is fixed per subject (see the operation
+            examples, e.g. `+123456789000` → `ad59992d-…`); this schema
+            `example` is an illustrative placeholder, not a value the server
+            emits.
           example: 3fa85f64-5717-4562-b3fc-2c963f66afa6
         name:
           type: string
@@ -872,12 +878,19 @@ components:
           type: string
           format: uuid
           readOnly: true
-          description: The unique identifier of the reboot request (UUID).
+          description: >-
+            The unique identifier of the reboot request (UUID). Server-minted
+            (counter/clock-derived), so this schema `example` is illustrative
+            and not reproducible.
           example: 8f14e45f-ceea-467d-9a3e-2c9f2b0f0a01
         devices:
           type: array
           maxItems: 100
-          description: The ids of the Network Access Devices this request reboots.
+          description: >-
+            The ids of the Network Access Devices this request reboots —
+            resolved at creation to the subscriber's deterministic device ids
+            (the same SHA-256-derived values the device operations return), so
+            this item `example` is an illustrative placeholder.
           items:
             type: string
             format: uuid
@@ -898,12 +911,16 @@ components:
           format: date-time
           maxLength: 64
           readOnly: true
-          description: Resource creation date/time (RFC 3339, UTC).
+          description: >-
+            Resource creation date/time (RFC 3339, UTC). Wall-clock at
+            creation, so this schema `example` is illustrative.
           example: "2024-06-01T14:27:08Z"
         modifiedAt:
           type: string
           format: date-time
           maxLength: 64
           readOnly: true
-          description: Last update date/time (RFC 3339, UTC).
+          description: >-
+            Last update date/time (RFC 3339, UTC). Wall-clock, so this schema
+            `example` is illustrative.
           example: "2024-06-01T14:27:08Z"
