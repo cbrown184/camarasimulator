@@ -519,6 +519,14 @@ paths:
               examples:
                 one:
                   summary: One created Trust Domain (write-only password omitted)
+                  # Same body as createTrustDomain's `created` example: id =
+                  # trust_domain_id(serviceId, name) (reproducible from the create
+                  # request), serviceId/name/enabled/accessDetails echoed. The audit
+                  # fields are illustrative — createdAt/modifiedAt are wall-clock and
+                  # createdBy/modifiedBy are derived from the token subject, so a live
+                  # response carries the caller's own values, not these literals. The
+                  # list is store-wide and unfiltered, so a live 200 holds *every*
+                  # created Trust Domain, not only this one.
                   value:
                     - id: "950925b2-55e7-5330-8f22-93fef8f82784"
                       serviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
@@ -607,6 +615,10 @@ paths:
               examples:
                 trustDomain:
                   summary: A stored Trust Domain (write-only password omitted)
+                  # The same body createTrustDomain returned: id =
+                  # trust_domain_id(serviceId, name) (reproducible), serviceId/name/
+                  # enabled/accessDetails echoed. createdAt/modifiedAt (wall-clock)
+                  # and createdBy/modifiedBy (token-subject-derived) are illustrative.
                   value:
                     id: "950925b2-55e7-5330-8f22-93fef8f82784"
                     serviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
@@ -727,6 +739,15 @@ paths:
               examples:
                 trustDomain:
                   summary: The updated Trust Domain (write-only password omitted)
+                  # This resource was created as name "Primary WiFi Network" — hence
+                  # id = trust_domain_id(serviceId, "Primary WiFi Network") — and then
+                  # renamed to "Guest WiFi Network". id/serviceId/createdAt/createdBy
+                  # are read-only identity/audit fields, so the id is NOT re-derived
+                  # from the new name and stays the original (it is deliberately *not*
+                  # trust_domain_id(serviceId, "Guest WiFi Network")). modifiedAt
+                  # (wall-clock) is refreshed on every update while createdAt is
+                  # carried from create; createdBy/modifiedBy (token-subject-derived)
+                  # are illustrative.
                   value:
                     id: "950925b2-55e7-5330-8f22-93fef8f82784"
                     serviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"

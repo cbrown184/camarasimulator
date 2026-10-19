@@ -1750,6 +1750,51 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-19 — **vwip illustrative-minted-id sweep — network-access-domains: verified the
+  deterministic Trust Domain ids are reproducible (no drift), annotated the three sibling 200
+  examples' illustrative audit stamps, and router-pinned the updateTrustDomain rename example.**
+  Continued the sweep in mount order; the `3fa85f64-…` grep flagged six spots in
+  **network-access-domains/vwip** — the `serviceId` in the createTrustDomain request + the four
+  TrustDomain response examples (getTrustDomains `one`, getTrustDomain `trustDomain`,
+  updateTrustDomain `trustDomain`, and the already-annotated createTrustDomain `created`), plus the
+  `ServiceId` schema example. **Unlike the dedicated-network(-accesses) passes, nothing here is a
+  minted counter+clock placeholder:** the Trust Domain `id` is **deterministically derived** from
+  `(serviceId, name)` (`trust_domain_id` = v5-shaped `deterministic_uuid_v5("nad-trust-domain", …)`,
+  `vwip.rs:1378`), so it is fully request-reproducible, and `serviceId` is a caller-supplied echo.
+  Verified the frozen `id` literal byte-matches the handler:
+  `trust_domain_id("3fa85f64-…","Primary WiFi Network") == 950925b2-55e7-5330-8f22-93fef8f82784`
+  (pure derivation, already asserted by `vendored_success_examples_match_the_handler`). **No
+  deterministic/value drift found; the `ServiceId` schema example is a legitimate caller-supplied
+  placeholder, left as-is.** The real gap was the **unannotated illustrative audit stamps**: the
+  createTrustDomain `created` example already noted `createdAt`/`modifiedAt` (wall-clock) and
+  `createdBy`/`modifiedBy` (token-subject-derived) as illustrative, but its three siblings — which
+  reuse the same body — carried the frozen `2024-…Z` timestamps and `4a7c9e2d-…` actor with no
+  note, and the updateTrustDomain example's `id` (the *original*-name id, left unchanged by the
+  rename to "Guest WiFi Network" because id/serviceId/createdAt/createdBy are read-only identity
+  fields, `apply_trust_domain_update` `vwip.rs:1294`) read like drift. Fixes, spec + `#[cfg(test)]`
+  only: annotated all three sibling examples (reproducible id/serviceId/name/enabled/accessDetails
+  vs illustrative wall-clock/subject-derived audit stamps; the list example noted as store-wide +
+  unfiltered; the update example noted that the rename does **not** re-derive the id); added
+  `vendored_update_example_matches_the_handler`, which drives an isolated create→rename through the
+  real router and pins that the id survives the rename and is **not** `trust_domain_id(serviceId,
+  "Guest …")`, that `createdAt`/`createdBy` are carried from create while `modifiedAt`/`modifiedBy`
+  are refreshed, and that the example's frozen audit literals (`4a7c9e2d-…`, the two timestamps) are
+  never returned (proving them illustrative). Green: `cargo test` → **3137 passed, 0 failed** (+1 new
+  test); `cargo build --release` ok; binary = **5,475,480 bytes** (unchanged vs the prior tip — spec
+  comments + a `#[cfg(test)]`-only test). No behaviour/response change (the handler was already
+  correct; the examples were under-annotated and the update example router-unpinned), no new
+  dependency. **Env note:** HEAD began detached at the real `origin/main` (`ce5b0d3`) with local
+  `main` stale at an older ancestor (`f15d2f9`) — the shallow-clone graft again; repointed local
+  `main` to `origin/main` and branched. **Next pass:** the store-backed vwip tier is now swept
+  (network-access-devices / dedicated-network / dedicated-network-accesses / session-insights /
+  optimal-edge-discovery / qos-booking / network-access-domains all annotated-and-pinned; the first
+  six intentionally keep the annotated illustrative placeholder, so the `3fa85f64-…` grep still
+  matches them by design). The explicit remaining named work is the **four stable-tier specs** the
+  dedicated-network-accesses entry flagged for a targeted minted/deterministic-id check —
+  qos-provisioning v0.3, geofencing-subscriptions v0.4, connectivity-insights v0.6, carrier-billing
+  v0.5 — one per pass, verifying each flagged id against its handler (reproducible → pin; wall-clock
+  / minted → annotate illustrative). Branch
+  `agent/network-access-domains/annotate-vwip-minted-id-examples`.
 - 2026-10-19 — **vwip illustrative-minted-id sweep — dedicated-network-accesses: annotated the
   three success examples' minted `id` + the schema description, and pinned read/list against the
   real router.** Continued the sweep in mount order (after dedicated-network); next flagged

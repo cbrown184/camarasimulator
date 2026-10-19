@@ -1900,6 +1900,65 @@ mod tests {
         assert_eq!(svc, expected_services[0]);
     }
 
+    /// Pin the `updateTrustDomain` `trustDomain` 200 example against the real
+    /// router. The example's subtle claim is that a rename does **not** re-derive
+    /// the id: a Trust Domain created as "Primary WiFi Network" keeps its original
+    /// id after being renamed to "Guest WiFi Network" (id/serviceId/createdAt/
+    /// createdBy are read-only identity/audit fields; only modifiedAt/modifiedBy are
+    /// refreshed). It also proves the example's frozen audit values
+    /// (createdAt/modifiedAt wall-clock, createdBy/modifiedBy `4a7c9e2d-…`
+    /// subject-derived) are *illustrative* — a live response never returns those
+    /// literals — so the just-added spec annotations can't silently drift.
+    /// Distinct example-ish names keep this isolated from the process-global store
+    /// that `vendored_success_examples_match_the_handler` also writes to.
+    #[tokio::test]
+    async fn vendored_update_example_matches_the_handler() {
+        let service_id = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+        let primary = "Primary WiFi Network (upd-ex)";
+        let guest = "Guest WiFi Network (upd-ex)";
+
+        // Pure derivation: the two names mint two *different* ids, so an id that
+        // survives the rename proves it was not re-derived from the new name.
+        let primary_id = trust_domain_id(service_id, primary);
+        assert_ne!(primary_id, trust_domain_id(service_id, guest));
+
+        let token = mint_token_as("nad-upd-ex", TRUST_DOMAINS_SCOPE).await;
+        let create_body = td_body(service_id, primary);
+        let (created, _, td) = post_trust_domain(Some(&token), Some(&create_body), None).await;
+        assert_eq!(created, StatusCode::CREATED);
+        assert_eq!(td["id"], json!(primary_id));
+        let created_at = td["createdAt"].as_str().unwrap().to_string();
+        let created_by = td["createdBy"].as_str().unwrap().to_string();
+
+        // Rename + disable — the `updateTrustDomain` example's patch.
+        let patch = json!({ "name": guest, "enabled": false });
+        let (status, _, updated) =
+            patch_trust_domain_req(Some(&token), &primary_id, Some(&patch), None).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // The rename does NOT re-mint the id: it stays the original-name id and is
+        // explicitly not the Guest-name id (the example's `id` is the Primary id).
+        assert_eq!(updated["id"], json!(primary_id));
+        assert_ne!(updated["id"], json!(trust_domain_id(service_id, guest)));
+        assert_eq!(updated["serviceId"], json!(service_id));
+        assert_eq!(updated["name"], json!(guest));
+        assert_eq!(updated["enabled"], json!(false));
+
+        // Identity/audit: createdAt + createdBy carried from create; modified*
+        // refreshed to real (wall-clock / subject-derived) values.
+        assert_eq!(updated["createdAt"], json!(created_at));
+        assert_eq!(updated["createdBy"], json!(created_by));
+        assert!(updated["modifiedAt"].is_string());
+        assert!(updated["modifiedBy"].is_string());
+
+        // The example's frozen audit literals are illustrative — never returned.
+        let frozen_actor = json!("4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e");
+        assert_ne!(updated["createdBy"], frozen_actor);
+        assert_ne!(updated["modifiedBy"], frozen_actor);
+        assert_ne!(updated["createdAt"], json!("2024-01-01T09:00:00Z"));
+        assert_ne!(updated["modifiedAt"], json!("2024-06-01T12:00:00Z"));
+    }
+
     /// Mint an access token via `client_credentials` with the given scope.
     async fn mint_token(scope: &str) -> String {
         mint_token_as("nad-client", scope).await
