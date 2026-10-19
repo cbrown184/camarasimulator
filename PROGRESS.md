@@ -1698,6 +1698,27 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-19 — **vwip residual-drift re-audit — iot-sim-fraud-prevention 429 example,
+  drift found & fixed.** Re-checked the fifteenth vwip API (audited 2026-10-13; the
+  `store.rs`-backed bind/query/unbind across the `IMEIBIND`/`AREALIMIT` facets) for the
+  inline-error-message drift class. Its `vendored_examples_match_the_handler` test already
+  pins every API-own 400/422 message, but the shared reserved-suffix 4xx families were
+  left unpinned, and the `Generic429` example still carried `message: "Rejected due to
+  request rate limit overpassed."` though the reserved-error-suffix plane routes `…429`
+  through `scenarios::reserved_error` → `CamaraError::for_status(429)` = `"Rate limit
+  reached."` (`src/errors.rs:124`) — so a consumer reading the spec saw a 429 message the
+  endpoint never returns. Corrected the example to `"Rate limit reached."` and extended
+  `vendored_examples_match_the_handler` to drive the reserved-suffix `…404`/`…429` paths
+  through the real router and pin their exact `status`/`code`/`message` bytes (the
+  `Generic404` example `"The specified resource is not found."` already byte-matched). The
+  401/403 examples intentionally show the shared-catalog canonical (the auth layer emits a
+  scope-specific 403), left unpinned as on consent-info. Spec + `#[cfg(test)]` change only
+  — no behaviour/response change (the handler was already correct; the example message was
+  stale), no new dependency. Green: `cargo test` → **3129 passed, 0 failed** (the one
+  pinning test gained three reserved-suffix assertions, no net test-count change);
+  `cargo build --release` ok; binary = **5,467,288 bytes** (unchanged — the shorter spec
+  string is below section-padding granularity, `#[cfg(test)]`-only Rust). Branch
+  `agent/iot-sim-fraud-prevention/fix-vwip-429`.
 - 2026-10-18 — **vwip residual-drift re-audit — device-data-volume illustrative-timestamp
   drift found & fixed (new signature class in the vwip tier).** The 2026-10-18 truncated-message
   re-audit closed one drift class in the vwip specs but noted the vwip sweep had closed

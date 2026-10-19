@@ -1481,5 +1481,23 @@ mod tests {
             body["message"],
             "No `device` supplied and the access token identifies no device."
         );
+
+        // --- reserved-suffix canonical families (shared catalog) -------------
+        // The Generic404 / Generic429 example bodies: the reserved-error-suffix
+        // plane routes through scenarios::reserved_error -> CamaraError::for_status,
+        // so the `message` bytes are the shared catalog's, not an API-own string.
+        let (status, _, body) =
+            query_ok_token(r#"{"device":{"phoneNumber":"+123456789404"},"queryType":"IMEIBIND"}"#)
+                .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+        assert_eq!(body["message"], "The specified resource is not found.");
+
+        let (status, _, body) =
+            query_ok_token(r#"{"device":{"phoneNumber":"+123456789429"},"queryType":"IMEIBIND"}"#)
+                .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["code"], "TOO_MANY_REQUESTS");
+        assert_eq!(body["message"], "Rate limit reached.");
     }
 }
