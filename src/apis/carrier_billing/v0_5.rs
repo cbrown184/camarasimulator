@@ -1263,6 +1263,23 @@ mod tests {
     }
 
     #[test]
+    fn minted_ids_never_equal_the_vendored_schema_placeholder() {
+        // The vendored spec's minted-id schema examples (`PaymentCreated.paymentId`,
+        // `Payment.paymentId`, `CloudEvent.id`) are illustrative placeholders —
+        // annotated as such because `mint_uuid` draws from a monotonic counter and
+        // the clock, never the request. Guard against a future re-freeze that pastes
+        // either placeholder back as a reproducible value: over many mints, neither
+        // literal is ever produced.
+        const PAYMENT_PLACEHOLDER: &str = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+        const EVENT_PLACEHOLDER: &str = "83a1c8e0-2b6a-4a2e-9c1f-0a1b2c3d4e5f";
+        for _ in 0..16 {
+            let id = mint_uuid();
+            assert_ne!(id, PAYMENT_PLACEHOLDER);
+            assert_ne!(id, EVENT_PLACEHOLDER);
+        }
+    }
+
+    #[test]
     fn rfc3339_utc_formats_a_known_epoch() {
         // 2021-01-01T00:00:00Z = 1_609_459_200.
         assert_eq!(rfc3339_utc(1_609_459_200), "2021-01-01T00:00:00Z");

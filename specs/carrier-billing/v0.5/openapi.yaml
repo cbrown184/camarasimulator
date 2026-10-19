@@ -1438,6 +1438,13 @@ components:
         `EventPaymentCancelled`), and the `payment-denied` type (two-step
         `validatePayment` that exhausts its OTP-attempt budget; `data` is
         `EventPaymentDenied`).
+
+
+        In the composite `example` below, `id` (server-minted), `time` (live
+        clock), and the nested `data.paymentId` (server-minted, the same
+        `mint_uuid` as the payment) / `data.paymentDate` (live clock) are
+        illustrative placeholders that will not reproduce; only their shapes are
+        part of the contract.
       required:
         - id
         - source
@@ -1448,7 +1455,13 @@ components:
       properties:
         id:
           type: string
-          description: Identifier of this event, unique within the source context.
+          description: >-
+            Identifier of this event, unique within the source context.
+            **Server-minted** (the same `mint_uuid` = `SHA-256(counter ‖ now)`
+            mint as `paymentId`, sharing its monotonic counter — not derived
+            from the event), so the `example` below is an illustrative
+            placeholder that will not reproduce; only its shape (a UUID) is part
+            of the contract.
           example: "83a1c8e0-2b6a-4a2e-9c1f-0a1b2c3d4e5f"
         source:
           type: string
@@ -1474,7 +1487,12 @@ components:
         time:
           type: string
           format: date-time
-          description: RFC 3339 timestamp (with time zone) of the occurrence.
+          description: >-
+            RFC 3339 timestamp (with time zone) of the occurrence. Stamped from
+            the live clock (`rfc3339_utc(now)`) at delivery time, so the
+            `example` below is an illustrative placeholder that will not
+            reproduce; only its shape (an RFC-3339 UTC instant) is part of the
+            contract.
           example: "2024-01-01T14:27:08Z"
         data:
           oneOf:
@@ -1650,7 +1668,12 @@ components:
       properties:
         paymentId:
           type: string
-          description: Server-assigned, opaque, UUID-shaped payment id.
+          description: >-
+            Server-assigned, opaque, UUID-shaped payment id. **Server-minted**
+            (`mint_uuid` = `SHA-256(counter ‖ now)` rendered as a v4-shaped UUID,
+            not derived from the request), so the `example` below is an
+            illustrative placeholder that will not reproduce; only its shape (a
+            UUID) is part of the contract.
           example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
         amountTransaction:
           $ref: "#/components/schemas/AmountTransaction"
@@ -1690,7 +1713,12 @@ components:
       properties:
         paymentId:
           type: string
-          description: Server-assigned, opaque, UUID-shaped payment id.
+          description: >-
+            Server-assigned, opaque, UUID-shaped payment id. **Server-minted**
+            (`mint_uuid` = `SHA-256(counter ‖ now)` rendered as a v4-shaped UUID,
+            not derived from the request), so the `example` below is an
+            illustrative placeholder that will not reproduce; only its shape (a
+            UUID) is part of the contract.
           example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
         amountTransaction:
           $ref: "#/components/schemas/AmountTransaction"

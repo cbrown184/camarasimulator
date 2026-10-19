@@ -1750,6 +1750,43 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-19 — **minted-id sweep — stable-tier, carrier-billing v0.5 (fourth and FINAL unit):
+  annotated the four minted/wall-clock *schema-component* examples (`PaymentCreated.paymentId`,
+  `Payment.paymentId`, `CloudEvent.id`, `CloudEvent.time`) plus the `CloudEvent` composite-example
+  note (`data.paymentId`/`data.paymentDate`) as illustrative placeholders, and pinned that the mint
+  never equals either frozen literal. Stable-tier minted-id sweep now COMPLETE.** Last of the four
+  stable-tier specs the dedicated-network-accesses entry flagged (qos-provisioning v0.3 →
+  geofencing-subscriptions v0.4 → connectivity-insights v0.6 → **carrier-billing v0.5**). The
+  `3fa85f64-…` grep flagged the two minted `paymentId` schema examples (`PaymentCreated`/`Payment`),
+  the operation-level 200/201 examples (already classified illustrative by the 2026-10-15 Phase-5
+  audit — "the 200/201 examples are not pinned"), and the `paymentId` path parameter (a
+  caller-supplied *request* example — the connectivity-insights caller-echo precedent, left as-is);
+  the `83a1c8e0-…` grep flagged the minted `CloudEvent.id`. Checked each against the handler:
+  `paymentId` is `mint_uuid()` = `SHA-256(counter ‖ now)` v4-shaped (`v0_5.rs:1212`, not
+  request-derived); the `CloudEvent.id` is a second `mint_uuid()` sharing the same monotonic counter
+  (`v0_5.rs:374…`), and `CloudEvent.time` / `data.paymentDate` / `paymentCreationDate` are
+  `rfc3339_utc(now_unix_secs())` wall-clock (`v0_5.rs:349…`). **No deterministic/value drift found**
+  (the handlers are correct) — the gap was purely the **four schema descriptions** a consumer reads,
+  which carried the bare canonical placeholders for these server-minted / live-clock values with no
+  note (the qos-provisioning / geofencing schema-description gap). Fixes, spec + `#[cfg(test)]` only:
+  annotated `PaymentCreated.paymentId`, `Payment.paymentId`, `CloudEvent.id`, and `CloudEvent.time`
+  to mark the value server-minted / live-clock and the example an illustrative placeholder that will
+  not reproduce (only its shape is contract), and added a sentence to the `CloudEvent` schema
+  description covering the composite example's minted/wall-clock `id`/`time`/`data.paymentId`/
+  `data.paymentDate`; added `minted_ids_never_equal_the_vendored_schema_placeholder` (`v0_5.rs`)
+  asserting over 16 iterations that `mint_uuid()` never equals `3fa85f64-5717-4562-b3fc-2c963f66afa6`
+  nor `83a1c8e0-2b6a-4a2e-9c1f-0a1b2c3d4e5f` (the qos-provisioning / geofencing precedent). Green:
+  `cargo test` → **3140 passed, 0 failed** (+1 new test); `cargo build --release` ok; binary =
+  **5,479,576 bytes** (identical to the prior tip — the folded-scalar schema annotations are below
+  section-padding granularity and the test is `#[cfg(test)]`-only). No behaviour/response change (the
+  handlers were already correct; the schema examples were unannotated minted/wall-clock placeholders),
+  no new dependency. **Env note:** HEAD began detached at the real `origin/main` (`0a91520`) with local
+  `main` stale at an older ancestor (`f15d2f9`) — the recurring shallow-clone graft; fetched
+  (forced-update to `0a91520`), repointed local `main` to `origin/main` and branched. **Next pass:**
+  the four-unit stable-tier minted-id sweep (qos-provisioning / geofencing-subscriptions /
+  connectivity-insights / carrier-billing) is now complete; no further minted-id units are flagged.
+  Per the 2026-09-27 decision point (still standing), an idle pass that finds no drift should confirm
+  nothing changed and stop without committing. Branch `agent/carrier-billing/annotate-minted-id-examples`.
 - 2026-10-19 — **minted-id sweep — stable-tier, connectivity-insights v0.6: checked clean — the one
   `3fa85f64-…` flag is a caller-supplied *request* UUID (not minted, not echoed), fully documented;
   no drift, no annotation gap, nothing to fix.** Third of the four stable-tier specs the
