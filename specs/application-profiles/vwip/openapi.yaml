@@ -109,7 +109,15 @@ paths:
                 $ref: "#/components/schemas/ApplicationProfile"
               examples:
                 created:
-                  summary: A network-quality profile
+                  summary: >-
+                    A network-quality profile, created from the request body
+                    `{networkQualityThresholds: {packetDelayBudget: {value: 10,
+                    unit: Milliseconds}, packetLossErrorRate: 3}}` — the
+                    thresholds are echoed back verbatim. `applicationProfileId`
+                    is illustrative: the server mints it from an internal
+                    counter + clock (not from the request), so it is opaque and
+                    this exact value does not reproduce — its presence and
+                    UUID shape are the contract, not the literal bytes.
                   value:
                     applicationProfileId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
                     networkQualityThresholds:

@@ -1103,4 +1103,57 @@ mod tests {
             "`targetMinUpstreamRate.value` must be in 0..=1024."
         );
     }
+
+    /// Drives the vendored 201 `created` example's request through the real
+    /// router and pins the response. The reproducible part — the echoed
+    /// `networkQualityThresholds` — must match the example body byte-for-byte
+    /// (the request is echoed verbatim), and there must be no stray field
+    /// beyond those thresholds plus the id. The `applicationProfileId` is
+    /// asserted only to be UUID-shaped and **fresh**: never the frozen spec
+    /// literal `3fa85f64-…`, which is illustrative because the id is minted from
+    /// an internal counter + clock (`store::new_profile_id` → `store::mint_uuid`),
+    /// not derived from the request. This pins the illustrative-value contract
+    /// the vendored example now documents (the Phase 5 stable tier's
+    /// qos-provisioning `assignmentId` / carrier-billing `paymentId`
+    /// minted-id convention — application-profiles is that posture's archetype).
+    #[tokio::test]
+    async fn vendored_created_example_matches_the_handler() {
+        let token = mint_token(CREATE_SCOPE).await;
+        // The request that reproduces the vendored `created` example (the
+        // example body minus the server-minted `applicationProfileId`).
+        let body = json!({
+            "networkQualityThresholds": {
+                "packetDelayBudget": { "value": 10, "unit": "Milliseconds" },
+                "packetLossErrorRate": 3
+            }
+        })
+        .to_string();
+        let (status, _, profile) = post_profile(Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // The reproducible part of the body is the request echoed back verbatim.
+        assert_eq!(
+            profile["networkQualityThresholds"],
+            json!({
+                "packetDelayBudget": { "value": 10, "unit": "Milliseconds" },
+                "packetLossErrorRate": 3
+            })
+        );
+        // Exactly the echoed thresholds + the minted id — no stray fields.
+        let obj = profile.as_object().expect("object body");
+        assert_eq!(
+            obj.len(),
+            2,
+            "only networkQualityThresholds + applicationProfileId"
+        );
+
+        // The id is minted (opaque, counter + clock): UUID-shaped and NOT the
+        // illustrative frozen spec literal.
+        let id = profile["applicationProfileId"].as_str().unwrap();
+        assert!(is_uuid_shaped(id), "minted id is UUID-shaped");
+        assert_ne!(
+            id, "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "the spec example id is illustrative, not a reproducible return value"
+        );
+    }
 }

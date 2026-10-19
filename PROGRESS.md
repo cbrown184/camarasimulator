@@ -573,6 +573,21 @@ Verified sub-items:
   `replace`/`remove` ship in that same file. Added
   `vendored_error_example_messages_match_the_handler` pinning the four distinct 400
   example `message` bytes (no prior test guarded them, only `code`).
+  **Re-audited 2026-10-19 for the illustrative-value class the Phase 5 stable tier
+  closed across its minted-id APIs after the vwip sweep (2026-10-13):** the
+  2026-10-12 note recognised the minted `applicationProfileId` as illustrative, but
+  only in PROGRESS — the vendored spec's 201 `created` example still presented the
+  Swagger placeholder `3fa85f64-…` as a plain value with **no** illustrative
+  annotation, so a consumer reading the spec was misled into treating it as a
+  reproducible return value (the qos-provisioning `assignmentId` / carrier-billing
+  `paymentId` gap). Annotated the `created` example summary to bind it to its
+  reproducing request and mark `applicationProfileId` illustrative (minted from an
+  internal counter + clock, opaque, does not reproduce — presence + UUID shape are
+  the contract), and added `vendored_created_example_matches_the_handler` driving
+  that request through the real router, pinning the echoed `networkQualityThresholds`
+  as an exact object (no stray fields) and asserting the id is UUID-shaped and ≠ the
+  frozen spec literal. Spec + `#[cfg(test)]` change only, no behaviour/response change,
+  binary unchanged, no new dependency.
 - 🔧 subscription-status — verified 2026-10-13: the one modelled operation
   (`retrieveSubscriptionStatus`, `POST
   /subscription-status/vwip/retrieve-subscription-status`) is implemented,
@@ -1698,6 +1713,35 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-19 — **vwip residual-drift re-audit — application-profiles illustrative minted-id
+  example, drift found & fixed (new signature class in the vwip tier).** With the three
+  previously-hunted vwip drift classes confirmed clean across all 31 vwip specs this pass
+  (greps: no truncated `cannot be identified."` message, no stale 429 `overpassed` string,
+  no unannotated frozen reference-epoch `2024-01-01T14:27:08Z` in a success body — verified-caller's
+  `expiresAt` already carries its illustrative note), swept the one class the original vwip sweep
+  (2026-10-13) predates and the Phase 5 stable tier only later closed: **minted/placeholder success-example
+  ids presented as plain values with no illustrative annotation.** A grep for the Swagger default UUID
+  `3fa85f64-5717-4562-b3fc-2c963f66afa6` surfaced it across many store-backed vwip specs; took the first
+  in mount order, **application-profiles/vwip**. Its 201 `created` example carried that placeholder as
+  `applicationProfileId` with summary "A network-quality profile" and no note, though `create_application_profile`
+  mints the id via `store::new_profile_id()` (counter + clock, `vwip.rs:294`) — opaque, never reproducing
+  the literal. (The 2026-10-12 inventory note already recognised this, but only in PROGRESS; the vendored
+  spec a consumer reads was never annotated — the qos-provisioning `assignmentId` / carrier-billing
+  `paymentId` gap.) GET/PATCH 200 `$ref` the `ApplicationProfile` schema, whose `applicationProfileId`
+  property is already described "Opaque, UUID-shaped" — no schema-level placeholder to fix. Annotated the
+  `created` example summary to bind it to its reproducing request and mark the id illustrative, and added
+  `vendored_created_example_matches_the_handler` driving that request through the real router: pins the
+  echoed `networkQualityThresholds` as an **exact object** (asserts exactly 2 top-level keys — thresholds +
+  id, no stray field) and asserts `applicationProfileId` is UUID-shaped and **≠** the frozen spec literal.
+  Green: `cargo test` → **3130 passed, 0 failed** (+1); `cargo build --release` ok; binary = **5,467,288 bytes**
+  (unchanged — the longer summary is below section-padding granularity, the test is `#[cfg(test)]`-only). Spec
+  + `#[cfg(test)]` + this doc change only — no behaviour/response change (the handler was already correct;
+  one example value was an unannotated minted placeholder), no new dependency. **Next pass:** continue this
+  illustrative-minted-id sweep across the remaining store-backed vwip specs the `3fa85f64-…` grep flagged
+  (dedicated-network / dedicated-network-accesses / session-insights / qos-booking / network-access-domains /
+  optimal-edge-discovery / network-access-devices), one API per pass, checking each flagged id against its
+  handler (minted → annotate illustrative; deterministic → correct to the derived value). Branch
+  `agent/application-profiles/annotate-vwip-minted-id-example`.
 - 2026-10-19 — **vwip residual-drift re-audit — iot-sim-fraud-prevention 429 example,
   drift found & fixed.** Re-checked the fifteenth vwip API (audited 2026-10-13; the
   `store.rs`-backed bind/query/unbind across the `IMEIBIND`/`AREALIMIT` facets) for the
