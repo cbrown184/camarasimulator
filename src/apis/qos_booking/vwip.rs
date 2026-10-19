@@ -2527,4 +2527,152 @@ mod tests {
         assert_eq!(b["code"], "UNNECESSARY_IDENTIFIER");
         assert_eq!(b["message"], "The device is already identified by the access token.");
     }
+
+    /// Every vendored **success-body** example must match what the handler returns
+    /// through the real router. Two fields carry illustrative, non-reproducing
+    /// values — `bookingId` (opaque, server-minted) and, for an ACTIVATED booking,
+    /// `startedAt` (the current UTC instant) — so this drives each documented
+    /// example request through the router, pins every other field as an exact object,
+    /// and asserts the two illustrative fields are present but are **not** the frozen
+    /// spec placeholders (the drift this pass annotated). The `scheduled` example's
+    /// odd-tail status and the `requested` example's `…000` status are also pinned,
+    /// and the `retrieveBookingByDevice` `someBookings` example (two bookings for one
+    /// device → both ACTIVATED, the derived status, which this pass corrected from a
+    /// non-reproducible SCHEDULED second entry).
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        const SPEC_ID: &str = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+        const SPEC_STARTED_AT: &str = "2024-06-01T12:00:00Z";
+
+        // A UUID-shaped string (five hyphen-separated groups) that is not the frozen
+        // spec placeholder — i.e. a genuinely minted, illustrative-in-the-spec id.
+        fn is_illustrative_minted_id(v: &Value) -> bool {
+            let s = v.as_str().unwrap_or("");
+            s.split('-').count() == 5 && s != SPEC_ID
+        }
+
+        let create = mint_token(CREATE_SCOPE).await;
+
+        // --- createBooking 201 `activated` (…012 → ACTIVATED, device echoed) ----
+        let (status, _, body) =
+            post_booking(Some(&create), &create_body("+123456789012", "QOS_E"), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(is_illustrative_minted_id(&body["bookingId"]));
+        let started = body["startedAt"].as_str().expect("ACTIVATED carries startedAt");
+        assert!(started.ends_with('Z') && started != SPEC_STARTED_AT);
+        let mut rest = body.clone();
+        let obj = rest.as_object_mut().unwrap();
+        obj.remove("bookingId");
+        obj.remove("startedAt");
+        assert_eq!(
+            rest,
+            json!({
+                "bookingStatus": "ACTIVATED",
+                "qosProfile": "QOS_E",
+                "startTime": "2024-06-01T12:00:00Z",
+                "duration": 3600,
+                "serviceArea": valid_area(),
+                "device": { "phoneNumber": "+123456789012" },
+            })
+        );
+
+        // --- createBooking 201 `scheduled` (…013 → SCHEDULED, no startedAt) -----
+        let sched = json!({
+            "device": { "phoneNumber": "+123456789013" },
+            "qosProfile": "QOS_E",
+            "startTime": "2024-06-01T12:00:00Z",
+            "duration": 3600,
+            "serviceArea": { "areaType": "AREANAME", "areaName": "Greater London" },
+        })
+        .to_string();
+        let (status, _, body) = post_booking(Some(&create), &sched, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(is_illustrative_minted_id(&body["bookingId"]));
+        assert!(body.get("startedAt").is_none(), "SCHEDULED has no startedAt");
+        let mut rest = body.clone();
+        rest.as_object_mut().unwrap().remove("bookingId");
+        assert_eq!(
+            rest,
+            json!({
+                "bookingStatus": "SCHEDULED",
+                "qosProfile": "QOS_E",
+                "startTime": "2024-06-01T12:00:00Z",
+                "duration": 3600,
+                "serviceArea": { "areaType": "AREANAME", "areaName": "Greater London" },
+                "device": { "phoneNumber": "+123456789013" },
+            })
+        );
+
+        // --- createBooking 201 `requested` (…000 → REQUESTED, no startedAt) -----
+        let (status, _, body) =
+            post_booking(Some(&create), &create_body("+123456789000", "QOS_E"), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(is_illustrative_minted_id(&body["bookingId"]));
+        assert!(body.get("startedAt").is_none(), "REQUESTED has no startedAt");
+        let mut rest = body.clone();
+        rest.as_object_mut().unwrap().remove("bookingId");
+        assert_eq!(
+            rest,
+            json!({
+                "bookingStatus": "REQUESTED",
+                "qosProfile": "QOS_E",
+                "startTime": "2024-06-01T12:00:00Z",
+                "duration": 3600,
+                "serviceArea": valid_area(),
+                "device": { "phoneNumber": "+123456789000" },
+            })
+        );
+
+        // --- getBooking 200 `activated`: the stored BookingInfo read back verbatim.
+        let (_, _, created) =
+            post_booking(Some(&create), &create_body("+123456789012", "QOS_E"), None).await;
+        let id = created["bookingId"].as_str().unwrap().to_string();
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, got) = get_booking_req(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(got, created, "getBooking returns the stored BookingInfo verbatim");
+        assert!(is_illustrative_minted_id(&got["bookingId"]));
+        assert!(got["startedAt"].as_str().unwrap() != SPEC_STARTED_AT);
+
+        // --- retrieveBookingByDevice 200 `someBookings`: two ACTIVATED bookings --
+        // Listed by device, so both share the device and its derived status (…012 →
+        // ACTIVATED). A dedicated line isolates this list from the global store.
+        let dev = "+198765430012"; // …012 → ACTIVATED
+        let first = json!({
+            "device": { "phoneNumber": dev },
+            "qosProfile": "QOS_E",
+            "startTime": "2024-06-01T12:00:00Z",
+            "duration": 3600,
+            "serviceArea": valid_area(),
+        })
+        .to_string();
+        let second = json!({
+            "device": { "phoneNumber": dev },
+            "qosProfile": "QOS_E",
+            "startTime": "2024-06-02T09:00:00Z",
+            "duration": 1800,
+            "serviceArea": { "areaType": "AREANAME", "areaName": "Greater London" },
+        })
+        .to_string();
+        assert_eq!(post_booking(Some(&create), &first, None).await.0, StatusCode::CREATED);
+        assert_eq!(post_booking(Some(&create), &second, None).await.0, StatusCode::CREATED);
+
+        let retrieve = mint_token(RETRIEVE_SCOPE).await;
+        let (status, _, body) = post_retrieve(Some(&retrieve), &retrieve_body(dev), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = body.as_array().expect("an array of BookingInfo");
+        assert_eq!(arr.len(), 2, "both of the device's bookings");
+        let mut ids = std::collections::HashSet::new();
+        for b in arr {
+            assert_eq!(b["bookingStatus"], "ACTIVATED");
+            assert_eq!(b["device"]["phoneNumber"], dev);
+            assert!(is_illustrative_minted_id(&b["bookingId"]));
+            assert!(
+                ids.insert(b["bookingId"].as_str().unwrap().to_string()),
+                "the two bookings have distinct minted ids"
+            );
+            let started = b["startedAt"].as_str().expect("ACTIVATED carries startedAt");
+            assert!(started.ends_with('Z') && started != SPEC_STARTED_AT);
+        }
+    }
 }

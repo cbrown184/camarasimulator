@@ -191,7 +191,13 @@ paths:
                 $ref: "#/components/schemas/BookingInfo"
               examples:
                 activated:
-                  summary: An ACTIVATED booking (device echoed)
+                  summary: >-
+                    An ACTIVATED booking — the response to a create for device
+                    `+123456789012` (an even, non-zero `…012` tail → ACTIVATED).
+                    `bookingId` is server-minted (opaque, counter + clock) and
+                    `startedAt` is the current UTC instant, so both values shown here
+                    are illustrative and do not reproduce literally; every other field
+                    echoes the request.
                   value:
                     bookingId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
                     bookingStatus: ACTIVATED
@@ -206,7 +212,11 @@ paths:
                     device:
                       phoneNumber: "+123456789012"
                 scheduled:
-                  summary: A SCHEDULED booking (odd identifier tail, no startedAt)
+                  summary: >-
+                    A SCHEDULED booking — the response to a create for device
+                    `+123456789013` (an odd `…013` tail → SCHEDULED, no `startedAt`).
+                    `bookingId` is server-minted, so the value shown here is
+                    illustrative; every other field echoes the request.
                   value:
                     bookingId: "3fa85f64-5717-4562-b3fc-2c963f66afa7"
                     bookingStatus: SCHEDULED
@@ -219,7 +229,11 @@ paths:
                     device:
                       phoneNumber: "+123456789013"
                 requested:
-                  summary: A REQUESTED booking (…000 tail, no startedAt)
+                  summary: >-
+                    A REQUESTED booking — the response to a create for device
+                    `+123456789000` (a `…000` tail → REQUESTED, no `startedAt`).
+                    `bookingId` is server-minted, so the value shown here is
+                    illustrative; every other field echoes the request.
                   value:
                     bookingId: "3fa85f64-5717-4562-b3fc-2c963f66afa8"
                     bookingStatus: REQUESTED
@@ -472,7 +486,11 @@ paths:
                 $ref: "#/components/schemas/BookingInfo"
               examples:
                 activated:
-                  summary: A stored ACTIVATED booking
+                  summary: >-
+                    A stored ACTIVATED booking, read back verbatim as it was created
+                    (e.g. for device `+123456789012`). `bookingId` is server-minted
+                    and `startedAt` is the UTC instant the window became active, so
+                    both values shown here are illustrative.
                   value:
                     bookingId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
                     bookingStatus: ACTIVATED
@@ -628,7 +646,12 @@ paths:
                   $ref: "#/components/schemas/BookingInfo"
               examples:
                 someBookings:
-                  summary: A device with two bookings
+                  summary: >-
+                    A device with two bookings. The list is keyed by device, so both
+                    entries share the device and its derived status (here `…012` →
+                    ACTIVATED); they differ only by window and service area. Each
+                    `bookingId` is server-minted and each `startedAt` is a UTC instant,
+                    so those values shown here are illustrative.
                   value:
                     - bookingId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
                       bookingStatus: ACTIVATED
@@ -643,10 +666,11 @@ paths:
                       device:
                         phoneNumber: "+123456789012"
                     - bookingId: "3fa85f64-5717-4562-b3fc-2c963f66afb0"
-                      bookingStatus: SCHEDULED
+                      bookingStatus: ACTIVATED
                       qosProfile: QOS_E
                       startTime: "2024-06-02T09:00:00Z"
                       duration: 1800
+                      startedAt: "2024-06-02T09:00:00Z"
                       serviceArea:
                         areaType: AREANAME
                         areaName: Greater London
@@ -1007,7 +1031,10 @@ components:
         bookingId:
           type: string
           format: uuid
-          description: The unique id of the QoS booking.
+          description: >-
+            The unique id of the QoS booking. Opaque and server-minted per booking
+            (counter + clock); never caller-chosen, so the example is illustrative and
+            does not reproduce literally.
           example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
         bookingStatus:
           type: string
@@ -1038,7 +1065,8 @@ components:
           format: date-time
           description: >-
             When the booking window became active (RFC 3339, UTC). Present only when
-            `bookingStatus` is `ACTIVATED`.
+            `bookingStatus` is `ACTIVATED`. The server stamps the current UTC instant,
+            so the example is illustrative and does not reproduce literally.
           example: "2024-06-01T12:00:00Z"
         applicationServer:
           $ref: "#/components/schemas/ApplicationServer"
@@ -1081,7 +1109,9 @@ components:
       properties:
         id:
           type: string
-          description: Unique CloudEvent id within `source` (UUID-shaped).
+          description: >-
+            Unique CloudEvent id within `source` (UUID-shaped). Server-minted per
+            event, so the example is illustrative and does not reproduce literally.
           example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
         source:
           type: string
@@ -1108,6 +1138,9 @@ components:
             bookingId:
               type: string
               format: uuid
+              description: >-
+                The opaque, server-minted id of the booking this event concerns
+                (echoes `BookingInfo.bookingId`), so the example is illustrative.
               example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
             bookingStatus:
               type: string

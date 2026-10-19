@@ -489,6 +489,17 @@ Verified sub-items:
   module doc fixed:** `src/apis/qos_booking.rs` claimed "First slice:
   `createBooking`" though all four operations ship — corrected to list them
   (same trap as device-data-volume's "later slice" doc).
+  **Illustrative-minted-id/-timestamp audit 2026-10-19:** the success-body examples
+  presented the minted `bookingId` and the wall-clock `startedAt` as plain frozen
+  literals with no illustrative note (the `3fa85f64-…` placeholder across
+  createBooking/getBooking/retrieveBookingByDevice, plus the `BookingInfo`/`QosBookingEvent`
+  schema `example:`s). Annotated all of them, and **corrected a real example drift** in the
+  `someBookings` retrieve example (its second entry showed `bookingStatus: SCHEDULED` for
+  device `…012`, but status is derived from the identifier tail so `…012` is always
+  `ACTIVATED` → not reproducible; set it to ACTIVATED + added `startedAt`). Added
+  `vendored_success_examples_match_the_handler` pinning all five documented success examples
+  through the router as exact objects minus the two illustrative fields (asserting those are
+  present but ≠ the frozen spec literals).
 - 🔧 media-streaming-rate — verified 2026-10-12: the one modelled operation
   (`retrieveMaximumDownstreamMediaRate`,
   `POST /media-streaming-rate/vwip/retrieve-maximum-downstream-media-rate`) is
@@ -1713,6 +1724,39 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-19 — **vwip illustrative-minted-id sweep — qos-booking, drift found & fixed (incl. a
+  real non-reproducible example).** Continued the store-backed-vwip illustrative-minted-id sweep the
+  prior application-profiles pass set up; took the next flagged vwip spec **in mount order**,
+  **qos-booking/vwip**. All five success-body examples presented server-minted/wall-clock values as
+  plain frozen literals with no illustrative note: the `3fa85f64-…` `bookingId` placeholder in
+  `createBooking` 201 (`activated`/`scheduled`/`requested`), `getBooking` 200 (`activated`) and
+  `retrieveBookingByDevice` 200 (`someBookings`), plus the `BookingInfo.bookingId`/`startedAt` and
+  `QosBookingEvent` `id`/`data.bookingId` schema `example:`s. The handler mints `bookingId` opaquely
+  (`store::new_booking_id()`, counter+clock, `vwip.rs:328`) and stamps `startedAt = rfc3339_utc(now)`
+  for ACTIVATED bookings — neither reproduces the literal (the qos-provisioning `assignmentId` /
+  device-data-volume `lastStatusTime` classes). Annotated every example summary (binding it to its
+  reproducing request) and the four schema property descriptions to mark the values illustrative.
+  **Also corrected a real example drift** (the deterministic-value class): the `someBookings` retrieve
+  example's second entry showed `bookingStatus: SCHEDULED` for device `+123456789012`, but status is
+  derived from the identifier's trailing three digits (`…012` → even, non-zero → ACTIVATED), so the
+  list — keyed by one device — can only show that device's one derived status; set the second entry to
+  ACTIVATED and added its `startedAt`. Added `vendored_success_examples_match_the_handler` driving all
+  five documented example requests through the real router and pinning each body as an **exact object**
+  minus `bookingId` (and, for ACTIVATED, `startedAt`), asserting those two fields are present but **≠**
+  the frozen spec literals, ids distinct & UUID-shaped; the retrieve case uses a dedicated line to
+  isolate it from the process-global store. Green: `cargo test` → **3131 passed, 0 failed** (+1);
+  `cargo build --release` ok; binary = **5,471,384 bytes** (+4,096 vs 5,467,288 = one page of embedded
+  vendored spec-text growth from the longer descriptions/summaries; the test is `#[cfg(test)]`-only, no
+  code-path change, no new dependency). Spec + `#[cfg(test)]` + this doc change only — no
+  behaviour/response change (the handler was already correct; the examples were unannotated minted
+  literals and one non-reproducible status). **Next pass:** continue the sweep across the remaining
+  flagged store-backed vwip specs in mount order — optimal-edge-discovery, session-insights,
+  network-access-devices, dedicated-network, dedicated-network-accesses, network-access-domains — one
+  API per pass, checking each flagged id against its handler (minted → annotate illustrative;
+  deterministic → correct to the derived value). (The `3fa85f64-…` grep also still flags four
+  **stable-tier** specs — qos-provisioning v0.3, geofencing-subscriptions v0.4, connectivity-insights
+  v0.6, carrier-billing v0.5 — for a later targeted check that each is either request-schema/already-annotated
+  or needs the same treatment.) Branch `agent/qos-booking/annotate-vwip-minted-id-examples`.
 - 2026-10-19 — **vwip residual-drift re-audit — application-profiles illustrative minted-id
   example, drift found & fixed (new signature class in the vwip tier).** With the three
   previously-hunted vwip drift classes confirmed clean across all 31 vwip specs this pass
