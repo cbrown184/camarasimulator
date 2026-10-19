@@ -2257,6 +2257,10 @@ mod tests {
             ])
         );
         let id = created["id"].as_str().unwrap().to_string();
+        // The illustrative minted id: UUID-shaped and never the frozen spec
+        // literal, so the `mixed` example's `id` can't silently re-freeze.
+        assert!(is_uuid_shaped(&id));
+        assert_ne!(id, "3fa85f64-5717-4562-b3fc-2c963f66afa6");
 
         // listDevices `200` `onePage` example — the access's recorded roster read
         // back as a one-page `AccessDevicesPage` (default page 1 / perPage 10,
@@ -2303,5 +2307,87 @@ mod tests {
                 { "device": { "phoneNumber": "+123456789404" }, "status": "DENIED" }
             ])
         );
+    }
+
+    /// The readAccess `200` `readBack` vendored example, pinned through the real
+    /// router: a single-device access (networkId …012, device +…012 → GRANTED →
+    /// stats 1/1/0) read back by its minted `accessId` returns exactly the
+    /// example body minus the illustrative `id` — which is UUID-shaped and ≠ the
+    /// frozen `3fa85f64-…` literal, so the example can't silently re-freeze to a
+    /// fixed id (the sibling Networks `readNetwork` precedent).
+    #[tokio::test]
+    async fn vendored_read_example_matches_the_handler() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _h, created) = post_access(
+            &create,
+            json!({
+                "networkId": uuid_ending(12),
+                "devices": [ { "phoneNumber": "+123456789012" } ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _h, body) = get_access(&read, &id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["networkId"], uuid_ending(12));
+        assert_eq!(
+            body["stats"],
+            json!({ "totalDevices": 1, "totalGranted": 1, "totalDenied": 0 })
+        );
+        assert_eq!(
+            body["recentAccessDevices"],
+            json!([ { "device": { "phoneNumber": "+123456789012" }, "status": "GRANTED" } ])
+        );
+        // The illustrative minted id: read back under the same UUID, which is
+        // UUID-shaped and never the frozen spec literal.
+        let read_id = body["id"].as_str().unwrap();
+        assert_eq!(read_id, id, "read back under the same minted id");
+        assert!(is_uuid_shaped(read_id));
+        assert_ne!(read_id, "3fa85f64-5717-4562-b3fc-2c963f66afa6");
+    }
+
+    /// The listAccesses `200` `oneAccess` vendored example, pinned through the
+    /// real router. The example filters on a dedicated, illustrative networkId
+    /// (…061) so exactly one access exists on it in the process-global store: a
+    /// create there with device +…012 (→ GRANTED → stats 1/1/0), then
+    /// `GET …/accesses?networkId=…061` returns a one-item array equal to the
+    /// example body minus the illustrative `id` — UUID-shaped and ≠ the frozen
+    /// `3fa85f64-…` literal.
+    #[tokio::test]
+    async fn vendored_list_example_matches_the_handler() {
+        let net = uuid_ending(61); // dedicated, non-reserved; used by no other test
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _h, _created) = post_access(
+            &create,
+            json!({
+                "networkId": net,
+                "devices": [ { "phoneNumber": "+123456789012" } ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _h, body) =
+            list_accesses_req(Some(&read), Some(&format!("networkId={net}")), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let items = body.as_array().unwrap();
+        assert_eq!(items.len(), 1, "exactly one access on the dedicated networkId");
+        let item = &items[0];
+        assert_eq!(item["networkId"], net);
+        assert_eq!(
+            item["stats"],
+            json!({ "totalDevices": 1, "totalGranted": 1, "totalDenied": 0 })
+        );
+        assert_eq!(
+            item["recentAccessDevices"],
+            json!([ { "device": { "phoneNumber": "+123456789012" }, "status": "GRANTED" } ])
+        );
+        let list_id = item["id"].as_str().unwrap();
+        assert!(is_uuid_shaped(list_id));
+        assert_ne!(list_id, "3fa85f64-5717-4562-b3fc-2c963f66afa6");
     }
 }

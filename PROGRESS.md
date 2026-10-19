@@ -1084,6 +1084,14 @@ Verified sub-items:
   next API (dedicated-network-areas). Doc + spec-string + `#[cfg(test)]` change
   only (no behaviour/response change — the handlers were already correct; the
   drift was doc staleness, not examples); no new dependency.
+  - ✅ illustrative-minted-id annotation (2026-10-19): the three success examples
+    (`mixed`/`oneAccess`/`readBack`) and the `AccessInfo.id` schema now mark the
+    minted `id` an illustrative server-minted placeholder; the `oneAccess` example
+    moved to a dedicated networkId (…061) for store isolation; the create test now
+    asserts the minted `id` ≠ the frozen `3fa85f64-…` literal, and new
+    `vendored_read_example_matches_the_handler` /
+    `vendored_list_example_matches_the_handler` tests pin the read/list example
+    bodies through the router (minus the minted id). See the scan journal.
 - 🔧 dedicated-network-areas — verified 2026-10-13: both modelled operations
   (`readNetworkServiceArea`, `GET /areas/{areaId}`; `retrieveNetworkServiceAreas`,
   `POST /retrieve-service-areas`) are implemented
@@ -1742,6 +1750,50 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-19 — **vwip illustrative-minted-id sweep — dedicated-network-accesses: annotated the
+  three success examples' minted `id` + the schema description, and pinned read/list against the
+  real router.** Continued the sweep in mount order (after dedicated-network); next flagged
+  store-backed vwip spec was **dedicated-network-accesses/vwip** (the `3fa85f64-…` grep flagged
+  three spots — the `mixed` createAccess 201, the `oneAccess` listAccesses 200, and the `readBack`
+  readAccess 200 examples). Checked each against the handler
+  (`src/apis/dedicated_network_accesses/{vwip,store}.rs`): the access `id` is **minted**
+  (`store::new_access_id`, `SHA-256(counter ‖ now)`, v4-shaped, not request-reproducible,
+  `store.rs:111`) — every other field is echoed/derived (`networkId` echoed; `stats` and
+  `recentAccessDevices` derived from the submitted devices, each GRANTED unless its first-present
+  identifier carries a reserved suffix → DENIED). The 2026-10-13 audit already *recognised* the ids
+  as illustrative and pinned the `mixed` example's derived parts, but (a) the vendored spec a
+  consumer reads carried the frozen `3fa85f64-…` literal across all three examples with no note
+  (the session-insights / dedicated-network gap), (b) only the `mixed` example was router-pinned
+  (and it pinned the `id` *shape* only via capture, not that it **≠** the literal), and (c) the
+  `oneAccess` / `readBack` examples were not driven through the router at all. **No
+  deterministic/value drift found** (the reproducible fields byte-match the handler). Fixes, spec +
+  `#[cfg(test)]` only: annotated all three success-example summaries (binding each to its
+  reproducing request) and the `AccessInfo.id` schema description to mark the `id` an illustrative
+  server-minted placeholder; gave the `oneAccess` example a dedicated illustrative networkId
+  (…061, was the heavily-shared …012) so the list example is reproducible in isolation from the
+  process-global store (the dedicated-network `factory-floor-ex` precedent); extended
+  `vendored_success_examples_match_the_handler` to assert the created `id` is UUID-shaped and
+  **≠** `3fa85f64-…`; added `vendored_read_example_matches_the_handler` (create …012/+…012 → read
+  back by minted id → pins the `readBack` body minus `id`, asserts read-back under the same id,
+  UUID-shaped and ≠ the literal) and `vendored_list_example_matches_the_handler` (one access on the
+  dedicated …061 → filter by it → pins the one-item `oneAccess` body minus `id`, asserting it
+  UUID-shaped and ≠ the literal). Green: `cargo test` → **3136 passed, 0 failed** (+2 new tests);
+  `cargo build --release` ok; binary = **5,475,480 bytes** (unchanged vs the prior tip — the added
+  folded-scalar descriptions are below section-padding granularity and the tests are
+  `#[cfg(test)]`-only). No behaviour/response change (the handler was already correct; the examples
+  were unannotated minted-id literals, two of them router-unpinned), no new dependency. **Env note:**
+  HEAD began this pass detached at the real `origin/main` (`b1efcec`) with the local `main` ref
+  stale at an older ancestor (`f15d2f9`); the shallow-clone graft hid the shared history and made
+  them look diverged. Unshallowed, confirmed `origin/main = b1efcec` and `f15d2f9` is its ancestor
+  (no divergence), repointed local `main` to `origin/main`, then branched. **Next pass:** continue
+  the sweep across the remaining flagged store-backed vwip spec in mount order —
+  **network-access-domains** — checking each flagged id against its handler (minted → annotate
+  illustrative + pin ≠ literal; echoed/deterministic → verify reproducible). (The `3fa85f64-…` grep
+  also still flags four stable-tier specs — qos-provisioning v0.3, geofencing-subscriptions v0.4,
+  connectivity-insights v0.6, carrier-billing v0.5 — for a later targeted check; note the grep now
+  also still matches the three dedicated-network-accesses examples, which are intentionally kept as
+  the annotated illustrative placeholder.) Branch
+  `agent/dedicated-network-accesses/annotate-vwip-minted-id-examples`.
 - 2026-10-19 — **vwip illustrative-minted-id sweep — dedicated-network: annotated all three
   success-example minted `id`s + the schema description, and pinned every example against the
   real router.** Continued the sweep in mount order; next flagged store-backed vwip spec was

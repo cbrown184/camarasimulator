@@ -151,7 +151,13 @@ paths:
                 $ref: "#/components/schemas/AccessInfo"
               examples:
                 mixed:
-                  summary: One granted, one denied (…404 device)
+                  summary: >-
+                    One granted, one denied — the 201 for a create of networkId
+                    tail …012 with devices +…012 (→ GRANTED) and +…404 (reserved
+                    …404 suffix → DENIED), giving stats 2/1/1. The `id` shown is
+                    illustrative: it is server-minted (counter/clock-derived, see
+                    `new_access_id`), so a live call returns a different,
+                    non-reproducible UUID.
                   value:
                     id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
                     networkId: "00000000-0000-4000-8000-000000000012"
@@ -264,10 +270,16 @@ paths:
                   $ref: "#/components/schemas/AccessInfo"
               examples:
                 oneAccess:
-                  summary: A single access on the filtered network
+                  summary: >-
+                    A single access on the filtered (dedicated, illustrative)
+                    network — the result of `GET …/accesses?networkId=…061` after
+                    creating one access there with device +…012 (→ GRANTED →
+                    stats 1/1/0). The `id` is illustrative: it is server-minted
+                    (counter/clock-derived), so a live call returns a different,
+                    non-reproducible UUID.
                   value:
                     - id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-                      networkId: "00000000-0000-4000-8000-000000000012"
+                      networkId: "00000000-0000-4000-8000-000000000061"
                       stats:
                         totalDevices: 1
                         totalGranted: 1
@@ -337,7 +349,13 @@ paths:
                 $ref: "#/components/schemas/AccessInfo"
               examples:
                 readBack:
-                  summary: An access read back by id
+                  summary: >-
+                    An access read back by its minted `accessId` — a create of
+                    networkId tail …012 with device +…012 (→ GRANTED → stats
+                    1/1/0), then `GET …/accesses/{accessId}`. The `id` shown is
+                    illustrative: it is server-minted (counter/clock-derived), so
+                    the real read-back key is whatever UUID the prior
+                    `createAccess` returned, not this literal.
                   value:
                     id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
                     networkId: "00000000-0000-4000-8000-000000000012"
@@ -1004,7 +1022,10 @@ components:
               type: string
               format: uuid
               maxLength: 36
-              description: The access identifier (server-minted).
+              description: >-
+                The access identifier. Server-minted (counter/clock-derived, not
+                request-reproducible); the value in every success example is an
+                illustrative placeholder, so a live call returns a different UUID.
             stats:
               $ref: "#/components/schemas/AccessStats"
             recentAccessDevices:
