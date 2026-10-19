@@ -1738,6 +1738,45 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-19 — **vwip illustrative-minted-id sweep — session-insights: annotated the three
+  store-backed success examples (minted `id` + wall-clock `startsAt`/`expiresAt`) and pinned
+  them.** Continued the sweep in mount order; next flagged store-backed vwip spec was
+  **session-insights/vwip** (the `3fa85f64-…` grep flagged nine spots). Checked each against the
+  handler (`src/apis/session_insights/vwip.rs`): the **request-schema** `SessionRequest.applicationProfileId`
+  example (1 spot) is a client-supplied input the handler only checks non-empty — legitimate as-is
+  (not minted, not echoed into `SessionInfo`). The other eight are the server-minted session `id`
+  presented as plain frozen literals with no illustrative note — across the two createSession 201
+  examples (`timeBounded`/`openEnded`), the retrieveSessionsByDevice 200 example (`withSessions`),
+  the `SessionInfo.id` schema example, and the two CloudEvent schemas' `id`/`data.sessionId`
+  (`NetworkQualityScoreEvent`, `SessionEndedEvent`). The handler mints `id` via
+  `store::new_session_id()` (counter+clock, `vwip.rs:287`) and stamps `startsAt = rfc3339_utc(now)`
+  / `expiresAt = now + 24 h` (`vwip.rs:293,306`) — none reproduces the literal (the
+  qos-booking `bookingId`/`startedAt` / application-profiles `applicationProfileId` classes). The
+  2026-10-13 audit already *recognised* these ids as illustrative, but only in PROGRESS — the
+  vendored spec a consumer reads was never annotated (the application-profiles / carrier-billing
+  `paymentId` gap). Annotated every success-example summary (binding it to its reproducing request)
+  and the `SessionInfo.id`/`startsAt`/`expiresAt` + both CloudEvent `id`/`sessionId` schema
+  descriptions to mark the values illustrative, and changed the `withSessions` example device from
+  the heavily-shared `+123456789012` to a dedicated line `+123456789312` so the example is exactly
+  reproducible in isolation from the process-global store. **No deterministic drift found** (unlike
+  qos-booking) — the examples' reproducible fields (echoed `device`/`applicationServer`/`sink`/
+  `applicationSessionId`, `status: ACTIVE`, and `expiresAt` presence keyed on the …000 tail) all
+  byte-match the handler. Added `vendored_success_examples_match_the_handler` driving all three
+  documented example requests through the real router and pinning each body as an **exact object**
+  minus `id`/`startsAt`/`expiresAt`, asserting those are present, UTC (`…Z`) and **≠** the frozen
+  spec literals; the retrieve case uses the dedicated `…312` line to isolate it from the store.
+  Green: `cargo test` → **3132 passed, 0 failed** (+1); `cargo build --release` ok; binary =
+  **5,471,384 bytes** (unchanged — the longer descriptions/summaries are below section-padding
+  granularity and the test is `#[cfg(test)]`-only). Spec + `#[cfg(test)]` + this doc change only —
+  no behaviour/response change (the handler was already correct; the examples were unannotated
+  minted/wall-clock literals), no new dependency. **Next pass:** continue the sweep across the
+  remaining flagged store-backed vwip specs in mount order — network-access-devices,
+  dedicated-network, dedicated-network-accesses, network-access-domains — one API per pass, checking
+  each flagged id against its handler (minted → annotate illustrative; echoed/deterministic → verify
+  reproducible, correct to the derived value). (The `3fa85f64-…` grep also still flags four
+  stable-tier specs — qos-provisioning v0.3, geofencing-subscriptions v0.4, connectivity-insights
+  v0.6, carrier-billing v0.5 — for a later targeted check.) Branch
+  `agent/session-insights/annotate-vwip-minted-id-examples`.
 - 2026-10-19 — **vwip illustrative-minted-id sweep — optimal-edge-discovery: flag is an echoed
   input (not minted), but a real device-echo example drift found & fixed.** Continued the sweep
   in mount order; next flagged vwip spec was **optimal-edge-discovery/vwip** (the `3fa85f64-…`

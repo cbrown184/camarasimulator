@@ -138,7 +138,14 @@ paths:
                 $ref: "#/components/schemas/SessionInfo"
               examples:
                 timeBounded:
-                  summary: Time-bounded ACTIVE session (non-…000 tail)
+                  summary: >-
+                    Time-bounded ACTIVE session. Reproduced by createSession with
+                    device `+123456789012` (a non-…000/…001 tail → time-bounded),
+                    `applicationServer.ipv4Address 198.51.100.1`,
+                    `applicationSessionId game-42` and this `sink`. `id` is
+                    server-minted (opaque) and `startsAt`/`expiresAt` are wall-clock
+                    (the creation instant and +24 h) — all three illustrative, so a
+                    real response never reproduces these exact literals.
                   value:
                     id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
                     applicationSessionId: "game-42"
@@ -151,7 +158,11 @@ paths:
                     expiresAt: "2026-08-06T10:41:38Z"
                     status: ACTIVE
                 openEnded:
-                  summary: Open-ended ACTIVE session (…000 tail — no expiresAt)
+                  summary: >-
+                    Open-ended ACTIVE session (…000 tail → no expiresAt). Reproduced
+                    by createSession with device `+123456789000` and no
+                    `applicationSessionId`. `id` (server-minted, opaque) and
+                    `startsAt` (wall-clock) are illustrative.
                   value:
                     id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
                     device:
@@ -415,11 +426,17 @@ paths:
                   $ref: "#/components/schemas/SessionInfo"
               examples:
                 withSessions:
-                  summary: One active session for the device
+                  summary: >-
+                    One active session for the device. Reproduced by a createSession
+                    for device `+123456789312` (no `applicationSessionId`, a
+                    time-bounded tail) followed by retrieve-sessions for that same
+                    device. `id` (server-minted, opaque) and `startsAt`/`expiresAt`
+                    (wall-clock) are illustrative, so a real response never reproduces
+                    these exact literals.
                   value:
                     - id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
                       device:
-                        phoneNumber: "+123456789012"
+                        phoneNumber: "+123456789312"
                       applicationServer:
                         ipv4Address: "198.51.100.1"
                       sink: "https://callback.example/notify"
@@ -877,7 +894,10 @@ components:
         id:
           type: string
           format: uuid
-          description: Operator-assigned session identifier.
+          description: >-
+            Operator-assigned session identifier — opaque and server-minted
+            (counter+clock, UUID-shaped), so the example value is illustrative and a
+            real response never reproduces it.
           example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
         applicationSessionId:
           type: string
@@ -893,13 +913,16 @@ components:
         startsAt:
           type: string
           format: date-time
-          description: When the session started (RFC 3339 with time zone).
+          description: >-
+            When the session started (RFC 3339 with time zone) — the wall-clock
+            creation instant, so the example value is illustrative.
           example: "2026-08-05T10:41:38Z"
         expiresAt:
           type: string
           format: date-time
           description: >-
-            When the session expires (RFC 3339 with time zone). Absent for an
+            When the session expires (RFC 3339 with time zone) — wall-clock
+            `startsAt + 24 h`, so the example value is illustrative. Absent for an
             open-ended session (a `…000`/no-digit identifier tail).
           example: "2026-08-06T10:41:38Z"
         status:
@@ -931,7 +954,9 @@ components:
       properties:
         id:
           type: string
-          description: Unique CloudEvent id within `source` (UUID-shaped).
+          description: >-
+            Unique CloudEvent id within `source` — server-minted (UUID-shaped), so
+            the example value is illustrative.
           example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
         source:
           type: string
@@ -958,6 +983,9 @@ components:
             sessionId:
               type: string
               format: uuid
+              description: >-
+                The ended/measured session's server-minted `id`, so the example
+                value is illustrative.
               example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
             qualityScore:
               type: integer
@@ -988,7 +1016,9 @@ components:
       properties:
         id:
           type: string
-          description: Unique CloudEvent id within `source` (UUID-shaped).
+          description: >-
+            Unique CloudEvent id within `source` — server-minted (UUID-shaped), so
+            the example value is illustrative.
           example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
         source:
           type: string
@@ -1015,6 +1045,9 @@ components:
             sessionId:
               type: string
               format: uuid
+              description: >-
+                The ended session's server-minted `id`, so the example value is
+                illustrative.
               example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
             terminationReason:
               type: string

@@ -2022,6 +2022,117 @@ mod tests {
         assert_eq!(body["message"], "`packetLossErrorRate` must be between 1 and 10.");
     }
 
+    /// The three vendored vwip success-response examples — createSession 201
+    /// `timeBounded`/`openEnded` and retrieveSessionsByDevice 200 `withSessions` —
+    /// driven through the real router and pinned as **exact objects**, except the
+    /// server-minted `id` and the wall-clock `startsAt`/`expiresAt`, which the spec
+    /// now marks illustrative: those are asserted present, UTC (`…Z`) and **not**
+    /// equal to the frozen spec literals. This guards the examples from drifting back
+    /// to values the handler cannot reproduce.
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        const MINTED_ID: &str = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+        const FROZEN_START: &str = "2026-08-05T10:41:38Z";
+        const FROZEN_EXPIRES: &str = "2026-08-06T10:41:38Z";
+
+        // A timestamp the handler stamps from the wall clock: present, UTC, and not
+        // the frozen illustrative literal.
+        fn assert_illustrative_ts(actual: &Value, frozen: &str) {
+            let s = actual.as_str().expect("timestamp present");
+            assert!(s.ends_with('Z'), "timestamp is UTC (…Z): {s}");
+            assert_ne!(s, frozen, "wall-clock timestamp must not be the frozen spec literal");
+        }
+
+        let create = mint_token(CREATE_SCOPE).await;
+
+        // createSession 201 `timeBounded` — device +123456789012 (time-bounded tail).
+        let (status, _, body) = post_session(Some(&create), &body_for("+123456789012"), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(body["id"].is_string());
+        assert_ne!(body["id"].as_str().unwrap(), MINTED_ID);
+        assert_illustrative_ts(&body["startsAt"], FROZEN_START);
+        assert_illustrative_ts(&body["expiresAt"], FROZEN_EXPIRES);
+        let mut reproducible = body.clone();
+        for k in ["id", "startsAt", "expiresAt"] {
+            reproducible.as_object_mut().unwrap().remove(k);
+        }
+        assert_eq!(
+            reproducible,
+            json!({
+                "applicationSessionId": "game-42",
+                "device": {"phoneNumber": "+123456789012"},
+                "applicationServer": {"ipv4Address": "198.51.100.1"},
+                "sink": "https://callback.example/notify",
+                "status": "ACTIVE",
+            })
+        );
+
+        // createSession 201 `openEnded` — device +123456789000, no applicationSessionId,
+        // so no expiresAt.
+        let open_body = r#"{"applicationProfileId":"3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                            "device":{"phoneNumber":"+123456789000"},
+                            "applicationServer":{"ipv4Address":"198.51.100.1"},
+                            "sink":"https://callback.example/notify"}"#;
+        let (status, _, body) = post_session(Some(&create), open_body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(body["id"].is_string());
+        assert_ne!(body["id"].as_str().unwrap(), MINTED_ID);
+        assert_illustrative_ts(&body["startsAt"], FROZEN_START);
+        assert!(
+            body.get("expiresAt").is_none(),
+            "open-ended session carries no expiresAt"
+        );
+        let mut reproducible = body.clone();
+        for k in ["id", "startsAt"] {
+            reproducible.as_object_mut().unwrap().remove(k);
+        }
+        assert_eq!(
+            reproducible,
+            json!({
+                "device": {"phoneNumber": "+123456789000"},
+                "applicationServer": {"ipv4Address": "198.51.100.1"},
+                "sink": "https://callback.example/notify",
+                "status": "ACTIVE",
+            })
+        );
+
+        // retrieveSessionsByDevice 200 `withSessions` — a line no other test uses
+        // (+123456789312), so the process-global store returns exactly the one session
+        // created here. No applicationSessionId, matching the vendored example.
+        let dedicated = "+123456789312";
+        let retr_create = r#"{"applicationProfileId":"3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                             "device":{"phoneNumber":"+123456789312"},
+                             "applicationServer":{"ipv4Address":"198.51.100.1"},
+                             "sink":"https://callback.example/notify"}"#;
+        let (status, _, _) = post_session(Some(&create), retr_create, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) =
+            retrieve_sessions_req(Some(&read), &retrieve_body(dedicated), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = body.as_array().expect("array response");
+        assert_eq!(arr.len(), 1, "exactly the one session created for this dedicated line");
+        let entry = &arr[0];
+        assert!(entry["id"].is_string());
+        assert_ne!(entry["id"].as_str().unwrap(), MINTED_ID);
+        assert_illustrative_ts(&entry["startsAt"], FROZEN_START);
+        assert_illustrative_ts(&entry["expiresAt"], FROZEN_EXPIRES);
+        let mut reproducible = entry.clone();
+        for k in ["id", "startsAt", "expiresAt"] {
+            reproducible.as_object_mut().unwrap().remove(k);
+        }
+        assert_eq!(
+            reproducible,
+            json!({
+                "device": {"phoneNumber": "+123456789312"},
+                "applicationServer": {"ipv4Address": "198.51.100.1"},
+                "sink": "https://callback.example/notify",
+                "status": "ACTIVE",
+            })
+        );
+    }
+
     // --- Validation --------------------------------------------------------
 
     #[tokio::test]
