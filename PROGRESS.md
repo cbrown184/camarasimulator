@@ -1020,7 +1020,11 @@ Verified sub-items:
   (dedicated-network). Spec + `#[cfg(test)]` change (no behaviour/response change
   — the handlers were already correct; only the one list example was
   incomplete); no new dependency.
-- 🔧 dedicated-network — verified 2026-10-13: all four modelled CRUD operations
+- 🔧 dedicated-network — vwip illustrative-minted-id sweep done 2026-10-19 (annotated the
+  three success-example minted `id`s — `reserved`/create, `twoNetworks`/list, `activated`/read
+  — and the `NetworkInfo.id` schema description as illustrative server-minted placeholders, and
+  pinned all three examples against the real router minus the minted `id`, asserting each `id`
+  is UUID-shaped and ≠ the frozen spec literal). Also verified 2026-10-13: all four modelled CRUD operations
   (`createNetwork`, `readNetwork`, `listNetworks`, `deleteNetwork`) are
   implemented (`src/apis/dedicated_network/vwip.rs` + an in-memory `store.rs`),
   routed, and well-tested, and the vendored
@@ -1738,6 +1742,42 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-19 — **vwip illustrative-minted-id sweep — dedicated-network: annotated all three
+  success-example minted `id`s + the schema description, and pinned every example against the
+  real router.** Continued the sweep in mount order; next flagged store-backed vwip spec was
+  **dedicated-network/vwip** (the `3fa85f64-…` grep flagged three spots — the `reserved` create
+  201, the `twoNetworks` list 200, and the `activated` read 200 examples). Checked each against
+  the handler (`src/apis/dedicated_network/{vwip,store}.rs`): the network `id` is **minted**
+  (`store::new_network_id`, `SHA-256(counter ‖ now)`, `store.rs:86`) — not request-reproducible —
+  while every other field is echoed/derived (`status` = `serviceAreaId` tail `d % 3`). The
+  2026-10-13 audit already *recognised* the ids as illustrative, but only in PROGRESS — the
+  vendored spec a consumer reads carried the frozen `3fa85f64-…`/`7c9e6679-…` literals with no
+  note (the session-insights / network-access-devices gap), and only the `reserved` example was
+  router-pinned (and it pinned `id` *shape* but not that it **≠** the literal, so nothing stopped
+  a future re-freeze). **No deterministic/value drift found** (unlike qos-booking / optimal-edge-
+  discovery — the reproducible fields all byte-match). Fixes, spec + `#[cfg(test)]` only:
+  annotated all three success-example summaries (binding each to its reproducing request) and the
+  `NetworkInfo.id` schema description to mark the `id` an illustrative server-minted placeholder;
+  gave the `twoNetworks` example a dedicated illustrative name `factory-floor-ex` (was the
+  heavily-shared `factory-floor`) so the list example is reproducible in isolation from the
+  process-global store (the session-insights dedicated-line precedent); extended
+  `vendored_success_example_matches_the_handler` to assert the created `id` **≠** `3fa85f64-…`;
+  added `vendored_read_example_matches_the_handler` (create tail-002 → read back → pins the
+  `activated` body minus `id`) and `vendored_list_example_matches_the_handler` (two networks under
+  `factory-floor-ex`, tails 001/002 → list by that name → pins each item minus `id`, asserting both
+  ids UUID-shaped and ≠ the two frozen literals). Green: `cargo test` → **3134 passed, 0 failed**
+  (+2 tests; the create test gained an assertion, no net count change there); `cargo build --release`
+  ok; binary = **5,475,480 bytes** (+4,096 vs 5,471,384 — one 4 KiB page, from the expanded
+  embedded spec descriptions crossing a section-padding boundary; the vendored YAML is compiled
+  into the binary and the tests are `#[cfg(test)]`-only). No behaviour/response change (the handler
+  was already correct; the examples were unannotated minted literals), no new dependency. **Next
+  pass:** continue the sweep across the remaining flagged store-backed vwip specs in mount order —
+  dedicated-network-accesses, network-access-domains — one API per pass, checking each flagged id
+  against its handler (minted → annotate illustrative + pin ≠ literal; echoed/deterministic →
+  verify reproducible). (The `3fa85f64-…` grep also still flags four stable-tier specs —
+  qos-provisioning v0.3, geofencing-subscriptions v0.4, connectivity-insights v0.6,
+  carrier-billing v0.5 — for a later targeted check.) Branch
+  `agent/dedicated-network/annotate-vwip-minted-id-examples`.
 - 2026-10-19 — **vwip illustrative-minted-id sweep — network-access-devices: success
   bodies already clean & pinned; closed the schema-description + test-invariant gap.**
   Continued the sweep in mount order; next flagged store-backed vwip spec was

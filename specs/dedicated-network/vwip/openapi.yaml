@@ -117,7 +117,12 @@ paths:
                 $ref: "#/components/schemas/NetworkInfo"
               examples:
                 reserved:
-                  summary: A newly reserved network (serviceAreaId tail 001)
+                  summary: >-
+                    A newly reserved network — the response to the `withProfile`
+                    request above (serviceAreaId tail 001 → RESERVED). The `id`
+                    shown is illustrative: it is server-minted
+                    (counter/clock-derived, see `new_network_id`), so a live call
+                    returns a different, non-reproducible UUID.
                   value:
                     id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
                     status: RESERVED
@@ -227,11 +232,17 @@ paths:
                   $ref: "#/components/schemas/NetworkInfo"
               examples:
                 twoNetworks:
-                  summary: Two networks sharing a name
+                  summary: >-
+                    Two networks sharing a (dedicated, illustrative) name, the
+                    result of `GET …/networks?name=factory-floor-ex` after
+                    creating one network with serviceAreaId tail 001 (→ RESERVED)
+                    and one with tail 002 (→ ACTIVATED) under that name. Each `id`
+                    is illustrative: it is server-minted (counter/clock-derived),
+                    so live calls return different, non-reproducible UUIDs.
                   value:
                     - id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
                       status: RESERVED
-                      name: factory-floor
+                      name: factory-floor-ex
                       networkProfileId: "00000000-0000-4000-8000-000000000abc"
                       serviceTime:
                         start: "2024-01-01T00:00:00Z"
@@ -239,7 +250,7 @@ paths:
                       serviceAreaId: "00000000-0000-4000-8000-000000000001"
                     - id: "7c9e6679-7425-40de-944b-e07fc1f90ae7"
                       status: ACTIVATED
-                      name: factory-floor
+                      name: factory-floor-ex
                       networkProfileId: "00000000-0000-4000-8000-000000000abc"
                       serviceTime:
                         start: "2024-01-01T00:00:00Z"
@@ -305,7 +316,12 @@ paths:
                 $ref: "#/components/schemas/NetworkInfo"
               examples:
                 activated:
-                  summary: An activated network read back
+                  summary: >-
+                    An activated network (serviceAreaId tail 002) read back by its
+                    minted `networkId`. The `id` shown is illustrative: it is
+                    server-minted (counter/clock-derived), so the real read-back
+                    key is whatever UUID the prior `createNetwork` returned, not
+                    this literal.
                   value:
                     id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
                     status: ACTIVATED
@@ -525,7 +541,12 @@ components:
               type: string
               format: uuid
               maxLength: 36
-              description: The dedicated network's identifier (server-minted).
+              description: >-
+                The dedicated network's identifier. Server-minted
+                (counter/clock-derived, not request-reproducible); the value in
+                every success example is an illustrative placeholder, so a live
+                call returns a different UUID.
+              example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
             status:
               $ref: "#/components/schemas/NetworkStatus"
 

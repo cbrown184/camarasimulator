@@ -1267,9 +1267,83 @@ mod tests {
         assert_eq!(body["serviceTime"]["end"], "2024-12-31T23:59:59Z");
         assert_eq!(body["serviceAreaId"], "00000000-0000-4000-8000-000000000001");
         // The `id` in the vendored example is illustrative: `new_network_id` is
-        // counter/clock-derived, not request-reproducible, so pin only its shape.
+        // counter/clock-derived, not request-reproducible, so pin its shape AND
+        // that it is NOT the frozen spec literal — this stops a future edit from
+        // re-freezing the handler (or the example) to the placeholder UUID.
         assert!(is_uuid_shaped(body["id"].as_str().unwrap()));
+        assert_ne!(body["id"], "3fa85f64-5717-4562-b3fc-2c963f66afa6");
         assert!(body.get("sinkCredential").is_none());
+    }
+
+    #[tokio::test]
+    async fn vendored_read_example_matches_the_handler() {
+        // The spec's readNetwork 200 `activated` example (serviceAreaId tail 002
+        // → ACTIVATED) is reproduced by creating with `valid_body(2)` and reading
+        // the minted id back. Pins every documented field; the `id` is
+        // illustrative (server-minted), so assert only its shape and that it is
+        // not the frozen spec literal.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) = post_network(Some(&create), valid_body(2), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) = get_network(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "ACTIVATED");
+        assert_eq!(body["name"], "factory-floor");
+        assert_eq!(body["networkProfileId"], "00000000-0000-4000-8000-000000000abc");
+        assert_eq!(body["serviceTime"]["start"], "2024-01-01T00:00:00Z");
+        assert_eq!(body["serviceTime"]["end"], "2024-12-31T23:59:59Z");
+        assert_eq!(body["serviceAreaId"], "00000000-0000-4000-8000-000000000002");
+        assert!(is_uuid_shaped(body["id"].as_str().unwrap()));
+        assert_ne!(body["id"], "3fa85f64-5717-4562-b3fc-2c963f66afa6");
+    }
+
+    #[tokio::test]
+    async fn vendored_list_example_matches_the_handler() {
+        // The spec's listNetworks 200 `twoNetworks` example is reproduced by
+        // creating two networks under the dedicated illustrative name
+        // `factory-floor-ex` — tail 001 (RESERVED) and tail 002 (ACTIVATED) —
+        // then listing by that name. The dedicated name isolates the assertion
+        // from the process-global store. Each `id` is illustrative (server-minted);
+        // pin the per-item documented fields and that the ids are UUID-shaped and
+        // not the frozen spec literals.
+        let name = "factory-floor-ex";
+        let id1 = create_named(name, 1).await;
+        let id2 = create_named(name, 2).await;
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) =
+            list_networks_req(Some(&read), Some(&format!("name={name}")), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = body.as_array().expect("array");
+        assert_eq!(arr.len(), 2, "only the two `{name}` networks");
+
+        let reserved = arr
+            .iter()
+            .find(|n| n["serviceAreaId"] == "00000000-0000-4000-8000-000000000001")
+            .expect("the tail-001 network");
+        let activated = arr
+            .iter()
+            .find(|n| n["serviceAreaId"] == "00000000-0000-4000-8000-000000000002")
+            .expect("the tail-002 network");
+        assert_eq!(reserved["status"], "RESERVED");
+        assert_eq!(activated["status"], "ACTIVATED");
+        for n in [reserved, activated] {
+            assert_eq!(n["name"], name);
+            assert_eq!(n["networkProfileId"], "00000000-0000-4000-8000-000000000abc");
+            assert_eq!(n["serviceTime"]["start"], "2024-01-01T00:00:00Z");
+            assert_eq!(n["serviceTime"]["end"], "2024-12-31T23:59:59Z");
+            let id = n["id"].as_str().unwrap();
+            assert!(is_uuid_shaped(id));
+            assert_ne!(id, "3fa85f64-5717-4562-b3fc-2c963f66afa6");
+            assert_ne!(id, "7c9e6679-7425-40de-944b-e07fc1f90ae7");
+        }
+        // The minted ids are distinct and are the ones returned at creation.
+        assert_ne!(id1, id2);
+        let ids: Vec<&str> = arr.iter().map(|n| n["id"].as_str().unwrap()).collect();
+        assert!(ids.contains(&id1.as_str()) && ids.contains(&id2.as_str()));
     }
 
     #[tokio::test]
