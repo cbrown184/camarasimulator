@@ -1750,6 +1750,45 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-19 — **minted-id sweep — stable-tier, qos-provisioning v0.3: annotated the three
+  minted-id *schema-component* examples (`AssignmentInfo.assignmentId`, `StatusChangedEvent.id`,
+  `StatusChangedEvent.data.assignmentId`) as illustrative server-minted placeholders, and pinned
+  that neither mint can equal the frozen literal.** First of the four stable-tier specs the
+  dedicated-network-accesses entry flagged for a targeted minted/deterministic-id check
+  (qos-provisioning v0.3 → geofencing-subscriptions v0.4 → connectivity-insights v0.6 →
+  carrier-billing v0.5). The `3fa85f64-…` grep flagged exactly three spots in
+  **qos-provisioning/v0.3**, and all three are **schema-component** `example:`s, not operation
+  examples. Checked each flagged id against the handler
+  (`src/apis/qos_provisioning/{store,notifications}.rs`): both `assignmentId` (`store::new_assignment_id`)
+  and the CloudEvent `id` (`store::new_event_id`) are **minted** via `mint_uuid` = `SHA-256(counter ‖
+  now)` (v4-shaped, not request-reproducible, `store.rs:144`); `StatusChangedEvent.data.assignmentId`
+  is that same minted assignment id echoed into the event. **The operation-level examples were
+  already fully handled** by an earlier pass — the 201/200 `createQosAssignment` /
+  `getQosAssignmentById` / `getQosAssignmentByDevice` examples use distinctive illustrative
+  placeholders (`11111111-…`/`22222222-…`), annotate `assignmentId`+`startedAt` as illustrative, and
+  `vendored_examples_match_the_handler` already pins the minted id **≠** those frozen literals and
+  `startedAt` **≠** the frozen epoch; the pure `status_changed_event` builder is caller-supplied-id
+  and pinned by `notifications.rs` tests. **No deterministic/value drift found.** The real gap was
+  the three **schema descriptions**: the vendored spec a consumer reads carried the bare canonical
+  `3fa85f64-…` placeholder for these server-minted ids with no note (the dedicated-network /
+  dedicated-network-accesses `*.id` schema-description gap). Fixes, spec + `#[cfg(test)]` only:
+  annotated all three schema descriptions to mark the id server-minted and the example an
+  illustrative placeholder that will not reproduce (adding a description to
+  `StatusChangedEvent.data.assignmentId`, which had none); added
+  `minted_ids_never_equal_the_vendored_schema_placeholder` (`store.rs`), asserting over 16 iterations
+  that neither `new_assignment_id()` nor `new_event_id()` ever equals
+  `3fa85f64-5717-4562-b3fc-2c963f66afa6`, so a future re-freeze that pastes the placeholder back as a
+  reproducible value is caught. Green: `cargo test` → **3138 passed, 0 failed** (+1 new test);
+  `cargo build --release` ok; binary = **5,479,576 bytes** (+4,096 vs the prior tip 5,475,480 — one
+  4 KiB page from the expanded embedded spec descriptions crossing a section-padding boundary, the
+  dedicated-network precedent; the vendored YAML is compiled into the binary and the test is
+  `#[cfg(test)]`-only). No behaviour/response change (the handler was already correct; the schema
+  examples were unannotated minted-id placeholders), no new dependency. **Env note:** HEAD began
+  detached at the real `origin/main` (`b5f4b73`) with local `main` stale at an older ancestor
+  (`f15d2f9`) — the shallow-clone graft again; repointed local `main` to `origin/main` and branched.
+  **Next pass:** continue the stable-tier minted-id check with **geofencing-subscriptions v0.4**
+  (verify each flagged id against its handler: reproducible → pin; wall-clock / minted → annotate
+  illustrative + pin ≠ literal). Branch `agent/qos-provisioning/annotate-schema-minted-id-examples`.
 - 2026-10-19 — **vwip illustrative-minted-id sweep — network-access-domains: verified the
   deterministic Trust Domain ids are reproducible (no drift), annotated the three sibling 200
   examples' illustrative audit stamps, and router-pinned the updateTrustDomain rename example.**

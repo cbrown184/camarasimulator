@@ -814,7 +814,12 @@ components:
         assignmentId:
           type: string
           format: uuid
-          description: The unique id of the QoS assignment.
+          description: >-
+            The unique id of the QoS assignment. **Server-minted** per
+            `createQosAssignment` (a fresh UUID-shaped id from a monotonic
+            counter + the clock, not derived from the input), so the example
+            below is an **illustrative placeholder** that will not reproduce —
+            only its UUID shape is part of the contract.
           example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
         qosProfile:
           $ref: "#/components/schemas/QosProfileName"
@@ -866,7 +871,11 @@ components:
       properties:
         id:
           type: string
-          description: Unique CloudEvent id within `source` (UUID-shaped).
+          description: >-
+            Unique CloudEvent id within `source` (UUID-shaped). **Server-minted**
+            per delivery (`new_event_id`, a monotonic counter + the clock), so the
+            example below is an **illustrative placeholder** that will not
+            reproduce — only its UUID shape is part of the contract.
           example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
         source:
           type: string
@@ -893,6 +902,10 @@ components:
             assignmentId:
               type: string
               format: uuid
+              description: >-
+                The id of the affected assignment — the **server-minted**
+                `AssignmentInfo.assignmentId`, so the example below is an
+                **illustrative placeholder** that will not reproduce.
               example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
             status:
               type: string

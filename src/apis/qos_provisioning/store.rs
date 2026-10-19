@@ -221,6 +221,31 @@ mod tests {
         assert_eq!(a.split('-').count(), 5);
     }
 
+    /// The vendored spec's `AssignmentInfo.assignmentId`, `StatusChangedEvent.id`,
+    /// and `StatusChangedEvent.data.assignmentId` schemas all carry the canonical
+    /// CAMARA placeholder `3fa85f64-5717-4562-b3fc-2c963f66afa6` as their
+    /// `example`, annotated as an illustrative server-minted value that will not
+    /// reproduce. Both id mints (`new_assignment_id`, `new_event_id`) draw from the
+    /// counter+clock, so neither can ever equal that frozen literal — this pins the
+    /// annotation against a future re-freeze that pastes the placeholder back in as
+    /// a reproducible value.
+    #[test]
+    fn minted_ids_never_equal_the_vendored_schema_placeholder() {
+        const SCHEMA_PLACEHOLDER: &str = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+        for _ in 0..16 {
+            assert_ne!(
+                new_assignment_id(),
+                SCHEMA_PLACEHOLDER,
+                "assignmentId schema example is illustrative, never minted"
+            );
+            assert_ne!(
+                new_event_id(),
+                SCHEMA_PLACEHOLDER,
+                "CloudEvent id schema example is illustrative, never minted"
+            );
+        }
+    }
+
     #[test]
     fn credential_side_store_is_single_use() {
         let id = new_assignment_id();
