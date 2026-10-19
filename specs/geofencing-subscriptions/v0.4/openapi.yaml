@@ -835,7 +835,12 @@ components:
         id:
           type: string
           format: uuid
-          description: Server-assigned subscription identifier.
+          description: >-
+            Server-assigned subscription identifier. **Server-minted** (a
+            monotonic counter + the clock, `SHA-256(counter ‖ now)` rendered
+            UUID-shaped — not derived from the request), so the `example` below
+            is an illustrative placeholder that will not reproduce; only its
+            shape (a UUID) is part of the contract.
           example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
         protocol:
           type: string
@@ -853,7 +858,12 @@ components:
         startsAt:
           type: string
           format: date-time
-          description: RFC 3339 time the subscription started.
+          description: >-
+            RFC 3339 time the subscription started. Stamped from the live clock
+            (`rfc3339_utc(now)`), so the `example` below is an illustrative
+            placeholder (the module's RFC-3339 reference epoch) that will not
+            reproduce; only its shape (an RFC-3339 UTC instant) is part of the
+            contract.
           example: "2026-08-03T14:27:08Z"
         status:
           type: string
@@ -884,7 +894,12 @@ components:
         id:
           type: string
           format: uuid
-          description: Unique event id within the `source`.
+          description: >-
+            Unique event id within the `source`. **Server-minted** (the same
+            `SHA-256(counter ‖ now)` mint as the subscription `id`, sharing its
+            monotonic counter — not derived from the event), so the `example`
+            below is an illustrative placeholder that will not reproduce; only
+            its shape (a UUID) is part of the contract.
           example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
         source:
           type: string

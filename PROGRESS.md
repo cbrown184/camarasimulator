@@ -1750,6 +1750,41 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-19 — **minted-id sweep — stable-tier, geofencing-subscriptions v0.4: annotated the three
+  minted/wall-clock *schema-component* examples (`SubscriptionInfo.id`, `SubscriptionInfo.startsAt`,
+  `CloudEvent.id`) as illustrative server-minted/live-clock placeholders, and pinned that neither
+  mint can equal the frozen literal.** Second of the four stable-tier specs the
+  dedicated-network-accesses entry flagged for a targeted minted/deterministic-id check
+  (qos-provisioning v0.3 → **geofencing-subscriptions v0.4** → connectivity-insights v0.6 →
+  carrier-billing v0.5). The `3fa85f64-…` grep flagged exactly three spots in
+  **geofencing-subscriptions/v0.4** — all **schema-component** `example:`s, not operation examples.
+  Checked each flagged id against the handler: `SubscriptionInfo.id` is `store::new_subscription_id()`
+  (`v0_4.rs:329`) and `CloudEvent.id` is `store::new_event_id()` (`notifications.rs`/`v0_4.rs:369…`),
+  both `mint_uuid()` = `SHA-256(counter ‖ now)` v4-shaped (not request-reproducible, sharing one
+  monotonic counter, `store.rs:176`); `SubscriptionInfo.startsAt` is `rfc3339_utc(now_unix_secs())`
+  (`v0_4.rs:670`, wall-clock). **The operation-level `active` 201 example was already fully handled**
+  by the 2026-10-14 Phase 4 audit — `id`/`startsAt` annotated illustrative and
+  `vendored_success_example_matches_the_handler` pins the minted `id` UUID-shaped and `startsAt` ≠
+  the frozen epoch. **No deterministic/value drift found.** The real gap was the three **schema
+  descriptions**: the vendored spec a consumer reads carried the bare canonical `3fa85f64-…`/
+  `2026-08-03T14:27:08Z` placeholders for these server-minted / live-clock values with no note (the
+  qos-provisioning / dedicated-network-accesses schema-description gap). Fixes, spec + `#[cfg(test)]`
+  only: annotated all three schema descriptions to mark the value server-minted / live-clock and the
+  example an illustrative placeholder that will not reproduce (only its shape is contract); added
+  `minted_ids_never_equal_the_vendored_schema_placeholder` (`store.rs`), asserting over 16 iterations
+  that neither `new_subscription_id()` nor `new_event_id()` ever equals
+  `3fa85f64-5717-4562-b3fc-2c963f66afa6`, so a future re-freeze that pastes the placeholder back as a
+  reproducible value is caught (the qos-provisioning precedent). Green: `cargo test` → **3139 passed,
+  0 failed** (+1 new test); `cargo build --release` ok; binary = **5,479,576 bytes** (unchanged vs the
+  prior tip — the added folded-scalar schema descriptions are below section-padding granularity and
+  the test is `#[cfg(test)]`-only). No behaviour/response change (the handlers were already correct;
+  the schema examples were unannotated minted/wall-clock placeholders), no new dependency. **Env note:**
+  HEAD began detached at the real `origin/main` (`54d84a7`) with local `main` stale at an older
+  ancestor (`f15d2f9`) — the shallow-clone graft again; fetched, confirmed `origin/main = 54d84a7`,
+  repointed local `main` to `origin/main` and branched. **Next pass:** continue the stable-tier
+  minted-id check with **connectivity-insights v0.6** (verify each flagged id against its handler:
+  reproducible → pin; wall-clock / minted → annotate illustrative + pin ≠ literal), then
+  carrier-billing v0.5. Branch `agent/geofencing-subscriptions/annotate-minted-id-examples`.
 - 2026-10-19 — **minted-id sweep — stable-tier, qos-provisioning v0.3: annotated the three
   minted-id *schema-component* examples (`AssignmentInfo.assignmentId`, `StatusChangedEvent.id`,
   `StatusChangedEvent.data.assignmentId`) as illustrative server-minted placeholders, and pinned

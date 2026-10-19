@@ -221,6 +221,21 @@ mod tests {
     }
 
     #[test]
+    fn minted_ids_never_equal_the_vendored_schema_placeholder() {
+        // The `SubscriptionInfo.id` and `CloudEvent.id` schema examples in the
+        // vendored spec carry the canonical `3fa85f64-…` UUID placeholder,
+        // annotated as an illustrative server-minted value that never
+        // reproduces. Both ids are `mint_uuid()` = `SHA-256(counter ‖ now)`, so
+        // guard that a future re-freeze can't paste the placeholder back as a
+        // reproducible literal.
+        const PLACEHOLDER: &str = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+        for _ in 0..16 {
+            assert_ne!(new_subscription_id(), PLACEHOLDER);
+            assert_ne!(new_event_id(), PLACEHOLDER);
+        }
+    }
+
+    #[test]
     fn event_ids_are_unique_and_never_collide_with_subscription_ids() {
         let e1 = new_event_id();
         let e2 = new_event_id();
