@@ -638,7 +638,7 @@ async fn update_trust_domain_device(
 /// sibling `readNetwork` / `getApp` read legs — the **in-memory store is the only
 /// control plane** (docs/DESIGN.md §7): a stored id → `200` with the persisted
 /// `TrustDomain` verbatim (write-only WPA password already stripped at create);
-/// any other id (never created, already deleted in a later slice, or malformed) →
+/// any other id (never created, already deleted by `deleteTrustDomain`, or malformed) →
 /// `404 NOT_FOUND`. There is no store entry to distinguish a malformed id from an
 /// unknown one, so both fold into the same `404` (mirroring `getService`).
 ///

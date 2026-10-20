@@ -1750,6 +1750,40 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-20 — **stale-slice-doc trap — network-access-domains vwip `getTrustDomain` handler doc, the
+  last unjudged `later slice` residual the prior (carrier-billing `prepare_payment`) pass flagged for a
+  future judgment pass, found stale & fixed; the `later slice` class is now clean across `src/`.** The
+  2026-10-20 carrier-billing entry's "Next pass" note listed five surviving `later slice` hits in `src/`
+  not yet judged against their handlers: `click_to_dial/store.rs:32`, `edge_application_management/vwip.rs:583`
+  and `:741`, `qos_booking/vwip.rs:912`, and `network_access_domains/vwip.rs:641`. Judged each this pass.
+  **Four are legitimate descriptions of genuinely-unmodelled behaviour, not shipped operations framed as
+  future work:** click-to-dial's "ongoing lifecycle `status` transitions (a live call engine)" (no autonomous
+  telephony engine is modelled), edge-application-management's two `subscriptionRequest` "status-change
+  notifications" docs, and qos-booking's callback "delivery" — all three name the deferred, human-gated
+  notification/provisioning-delivery layer (DESIGN decision point), not a routed op. The two `registry.rs`
+  hits are generic test comments. **One is genuinely stale:** `network_access_domains/vwip.rs:641` (the
+  `getTrustDomain` doc) said an id yields `404` if "never created, already deleted **in a later slice**, or
+  malformed" — but `deleteTrustDomain` ships, is routed (`vwip.rs:167`) and tested (`vwip.rs:4274+`), and the
+  module header (`vwip.rs:18`) + the handler doc two blocks down (`vwip.rs:712`) already name it in present
+  tense, so an id is "already deleted" **now**, not "in a later slice". This is the exact residual the
+  2026-10-20 network-access-devices pass fixed in the parent/header docs but missed in this read-leg handler
+  doc. Fix, **doc-only**: "already deleted in a later slice" → "already deleted by `deleteTrustDomain`". No
+  spec touched (Rust module doc, not vendored-spec prose) and no behaviour/response change — the existing
+  getTrustDomain + deleteTrustDomain router tests already prove both legs live; module-doc source is not
+  runtime-observable so no cheap drift-back guard exists (the network-access-devices / carrier-billing
+  doc-fix precedent likewise added none). Green: `cargo test` → **3141 passed, 0 failed** (unchanged);
+  `cargo build --release` ok; binary = **5,479,576 bytes** (identical to the prior tip — doc-comment change,
+  below section-padding granularity); no new dependency. **Env note:** on arrival HEAD was detached at
+  `48ea324` (the carrier-billing `prepare_payment` doc pass), **4 commits ahead of `origin/main`** (`9b0de71`,
+  the carrier-billing minted-id tip) — the four most-recent 2026-10-20 passes (quality-on-demand CloudEvent,
+  iot-sim 429, network-access-devices, carrier-billing `prepare_payment`) are committed locally but
+  unpushed; local `main` tracks the stale `9b0de71`. Branched from `48ea324`; the merge below fast-forwards
+  `main` over all five commits and pushes, bringing `origin/main` current. **Next pass:** the stale-slice-doc
+  (`later slice`) class is now clean across `src/`, and the other known drift classes (truncated identifier
+  message, stale 429 `overpassed`, unannotated frozen epoch, minted-id placeholders) are clean across
+  `specs/**` per the last several passes. Per the standing 2026-09-27 decision point, an idle pass that finds
+  no drift should confirm nothing changed and stop without committing.
+  Branch `agent/network-access-domains/fix-stale-trust-domain-delete-doc`.
 - 2026-10-20 — **stale-slice-doc trap — carrier-billing v0.5 `prepare_payment` fn doc, the residual the
   prior (network-access-devices) pass explicitly flagged for a dedicated judgment pass, found stale on
   three counts & fixed.** The 2026-10-20 network-access-devices entry left one related-but-nuanced item:
