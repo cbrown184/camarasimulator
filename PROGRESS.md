@@ -1750,6 +1750,40 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-20 — **stale-slice-doc trap — network-access-devices vwip, two surviving "later slices"
+  module-doc references to already-shipped operations found & fixed.** The 2026-09-27 decision point
+  and the last two passes report `specs/**` drift classes (truncated identifier message, `overpassed`
+  429 prose, frozen epoch, minted-id placeholders) all clean — re-grepped this pass and confirmed:
+  `overpassed` = 0, truncated `missingIdentifier` = 0 in `specs/`. But grepping the **stale-slice-doc**
+  signature (`later slice`) in `src/` — the trap caught on device-data-volume / qos-booking /
+  dedicated-network-* / esim-remote-management / network-access-domains / carrier-billing — flagged
+  two residual hits in `network_access_devices`: `store.rs:6` ("…mints a `rebootRequestId`; later
+  slices read/patch/delete it by that id") and `vwip.rs:199` (the `create_reboot_request` doc: "so
+  later slices (`getRebootRequest` / `updateRebootRequest` / `deleteRebootRequest`) can address it").
+  Both present operations that **ship, are routed, and are tested** as future work — `get_reboot_request`
+  (`vwip.rs:348`), `delete_reboot_request` (`:392`), `update_reboot_request` (`:451`), routed at
+  `vwip.rs:86-95`, with by-id get/delete/patch tests at `vwip.rs:1353/1457/1586` — and directly
+  contradict the module's own authoritative header two blocks away (`vwip.rs:20` "All five legs are
+  live and tested"; `store.rs:24` the read/patch/delete legs "are all live"). Fix, **doc-only**:
+  rewrote both to present tense ("the read/patch/delete legs (`getRebootRequest`/`updateRebootRequest`/
+  `deleteRebootRequest`) address/can address it by its minted `id`"). No spec touched (these are Rust
+  module docs, not vendored-spec prose) and no behaviour/response change, so nothing new to test — the
+  existing by-id get/delete/patch router tests already prove the legs live; module-doc source is not
+  runtime-observable so no cheap drift-back guard exists (the network-access-domains / carrier-billing
+  doc-fix precedent likewise added none). Green: `cargo test` → **3141 passed, 0 failed** (unchanged);
+  `cargo build --release` ok; binary = **5,479,576 bytes** (identical to the prior tip — doc-comment
+  change, below section-padding granularity); no new dependency. **Env note:** on arrival HEAD was
+  detached at the real `origin/main` (`372c266`, the iot-sim 429 pass) with local `main` stale at the
+  `9b0de71` graft (carrier-billing tip); fetched, repointed local `main` to `origin/main` and branched.
+  **Next pass / flagged:** one related-but-nuanced residual remains — `carrier_billing/v0_5.rs:395-408`
+  (the `prepare_payment` doc) still says the reserved payment is "in later slices — driven to `succeeded`
+  by `confirmPayment` or to `cancelled` by `cancelPayment`" and the OTP / 409 `ALREADY_EXISTS` path is a
+  "later slice … delivered with `validatePayment`", though all three sibling operations now ship; it is
+  arguably accurate as slice-delivery sequencing (the 2026-10-15 carrier-billing pass fixed only the
+  *parent* module doc), so left for a dedicated judgment pass rather than conflating two APIs here. Per
+  the 2026-09-27 decision point (still standing), once the stale-slice-doc class is fully clean an idle
+  pass that finds no drift should confirm and stop without committing.
+  Branch `agent/network-access-devices/fix-stale-later-slice-docs`.
 - 2026-10-20 — **vwip residual-drift re-audit — iot-sim-fraud-prevention, stale 429 example-object
   description prose found & fixed (completes the prior 2026-10-19 iot-sim 429 pass).** Re-grepping the
   known drift signatures across `specs/**` to confirm the post-sweep state found all classes clean

@@ -196,7 +196,7 @@ struct RebootRequestCreate {
 ///
 /// This is the create leg of the **stateful** reboot-request lifecycle: the
 /// created `RebootRequest` is persisted in the shared in-memory [`super::store`]
-/// so later slices (`getRebootRequest` / `updateRebootRequest` /
+/// so the read/patch/delete legs (`getRebootRequest` / `updateRebootRequest` /
 /// `deleteRebootRequest`) can address it by its minted `id`. Answers `201` with
 /// the created resource and a `Location` header.
 ///

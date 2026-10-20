@@ -3,7 +3,8 @@
 //!
 //! The reboot-request resource lifecycle is **stateful**: `POST /reboot-requests`
 //! creates a reboot request targeting one or more of the subscriber's Network
-//! Access Devices and mints a `rebootRequestId`; later slices read/patch/delete it
+//! Access Devices and mints a `rebootRequestId`; the read/patch/delete legs
+//! (`getRebootRequest`/`updateRebootRequest`/`deleteRebootRequest`) address it
 //! by that id. This module is the state that bridges those requests. It mirrors
 //! [`crate::apis::qos_provisioning::store`].
 //!
