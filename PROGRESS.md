@@ -1750,6 +1750,51 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-20 — **stale-slice-doc trap — carrier-billing v0.5 `prepare_payment` fn doc, the residual the
+  prior (network-access-devices) pass explicitly flagged for a dedicated judgment pass, found stale on
+  three counts & fixed.** The 2026-10-20 network-access-devices entry left one related-but-nuanced item:
+  `carrier_billing/v0_5.rs` `prepare_payment`'s own doc still framed shipped behaviour as "later slices",
+  and deferred the call rather than conflate two APIs. Judged this pass — it is **not** merely accurate
+  slice-sequencing, it directly contradicts the code two blocks below. (1) The function header said the
+  reservation "can be read back by `retrievePayment` and — **in later slices** — driven to `succeeded` by
+  `confirmPayment` or to `cancelled` by `cancelPayment`", but both ship and are routed (the 2026-10-15
+  carrier-billing parent-doc audit established all seven operations live). (2) The **"Documented cuts
+  (this slice)"** block claimed "the reserved payment **always** lands in the `reserved` state — the
+  `pending_validation` / `validationInfo` (OTP) path … are later slices, delivered with `validatePayment`",
+  but `prepare_payment` (`v0_5.rs:452-507`) lands a `…888`-tail (`VALIDATION_REQUIRED_TAIL`) reservation
+  in `pending_validation` with a `validationInfo` right here, tested by
+  `prepare_with_validation_tail_lands_in_pending_validation` (`v0_5.rs:2113`) and the pending-validation
+  event tests (`:2922`, `:2986`). (3) The same block said "`sink` / `sinkCredential` are accepted but
+  **not acted on**", but both reservation paths fire a `payment-reserved` / `payment-pending-validation`
+  CloudEvent and stash the notify target (`v0_5.rs:481-500`, `:527-543`), tested at `:2922`/`:3276`. The
+  module header (`v0_5.rs:72-73`) already described the pending_validation placement correctly — only this
+  function doc was stale. Fix, **doc-only**: rewrote the header to present tense and replaced the stale
+  "Documented cuts" block with a "Two-step placement" block stating the `pending_validation`-vs-`reserved`
+  split, that `prepare_payment` itself never emits the 409 `ALREADY_EXISTS` (that is `validatePayment`'s),
+  and that `sink`/`sinkCredential` are acted on. **A fourth hit in the same file surfaced on re-grep and
+  was fixed in the same pass:** the shared `CreatePayment.sink` field doc (`v0_5.rs:221`) carried the
+  identical falsehood ("`preparePayment` accepts it for schema fidelity but does not yet act on it (later
+  slice)") — corrected to state the `payment-reserved` / `payment-pending-validation` delivery and the
+  stashed target. No spec touched (Rust module doc, not vendored-spec prose)
+  and no behaviour/response change — the existing pending_validation + notification router tests already
+  prove every leg live; module-doc source is not runtime-observable so no cheap drift-back guard exists
+  (the network-access-devices / network-access-domains / carrier-billing-parent doc-fix precedent likewise
+  added none). Green: `cargo test` → **3141 passed, 0 failed** (unchanged); `cargo build --release` ok;
+  binary = **5,479,576 bytes** (identical to the prior tip — doc-comment change, below section-padding
+  granularity); no new dependency. **Env note:** on arrival HEAD was detached at the real `origin/main`
+  (`05c755c`, the network-access-devices stale-slice-doc pass) with local `main` stale at the `9b0de71`
+  graft (carrier-billing minted-id tip); fetched, repointed local `main` to `origin/main` and branched.
+  **Next pass:** carrier-billing is now clean of the stale-slice-doc class. A re-grep of `later slice` in
+  `src/` still returns hits in **other** APIs not audited this pass — `click_to_dial/store.rs:32`,
+  `edge_application_management/vwip.rs:583/741`, `qos_booking/vwip.rs:912`,
+  `network_access_domains/vwip.rs:641`, plus two generic mentions in `registry.rs` test comments. These
+  were **not** verified this pass and may well be legitimate descriptions of genuinely-unmodelled
+  behaviour (a live call engine; status-change notifications) rather than shipped operations presented as
+  future work; a future pass should judge each against its handler before claiming the class globally
+  clean. The other known drift classes (truncated identifier message, stale 429 `overpassed`,
+  unannotated frozen epoch, minted-id placeholders) are clean across `specs/**` per the last several
+  passes. Per the standing 2026-09-27 decision point, an idle pass that finds no drift should confirm
+  nothing changed and stop without committing. Branch `agent/carrier-billing/fix-stale-prepare-payment-doc`.
 - 2026-10-20 — **stale-slice-doc trap — network-access-devices vwip, two surviving "later slices"
   module-doc references to already-shipped operations found & fixed.** The 2026-09-27 decision point
   and the last two passes report `specs/**` drift classes (truncated identifier message, `overpassed`

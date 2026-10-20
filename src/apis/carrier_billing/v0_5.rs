@@ -217,8 +217,9 @@ struct CreatePayment {
     amount_transaction: AmountTransactionInput,
     /// Optional `http://` callback for charging notifications. On a successful
     /// one-step `createPayment` charge, CamaraSim delivers a `payment-completed`
-    /// CloudEvent here (fire-and-forget; see [`notifications`]). `preparePayment`
-    /// accepts it for schema fidelity but does not yet act on it (later slice).
+    /// CloudEvent here (fire-and-forget; see [`notifications`]); `preparePayment`
+    /// delivers a `payment-reserved` or `payment-pending-validation` CloudEvent
+    /// and stashes the target so a later `confirmPayment` reaches the same sink.
     sink: Option<String>,
     /// Optional credential for the callback `sink`. An `ACCESSTOKEN` credential's
     /// bearer token is applied to the callback as an `Authorization: Bearer` header,
@@ -392,8 +393,8 @@ async fn create_payment(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
 /// `paymentId`, records a payment with `paymentStatus: "reserved"` (no
 /// `paymentDate` — nothing has been charged) and returns `201`. The reserved
 /// payment is persisted in the shared in-memory [`super::store`], so it can be
-/// read back by `retrievePayment` and — in later slices — driven to `succeeded`
-/// by `confirmPayment` or to `cancelled` by `cancelPayment`.
+/// read back by `retrievePayment` and driven to `succeeded` by `confirmPayment`
+/// or to `cancelled` by `cancelPayment`.
 ///
 /// It shares `createPayment`'s two control planes (docs/DESIGN.md §7): the
 /// reserved phone number (submitted `amountTransaction.phoneNumber`, else the
@@ -403,11 +404,16 @@ async fn create_payment(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
 /// ceiling → 422 `CARRIER_BILLING.UNAUTHORIZED_AMOUNT`). Requires the
 /// `carrier-billing:payments:create` scope.
 ///
-/// **Documented cuts (this slice):** the reserved payment always lands in the
-/// `reserved` state — the `pending_validation` / `validationInfo` (OTP) path and
-/// the 409 `ALREADY_EXISTS` duplicate-session case are later slices, delivered
-/// with `validatePayment`. `sink` / `sinkCredential` are accepted but not acted
-/// on (mirroring `createPayment`).
+/// **Two-step placement:** a reservation whose resolved phone number ends in
+/// [`VALIDATION_REQUIRED_TAIL`] lands in `pending_validation` carrying a
+/// `validationInfo` (an `authorizationId` plus the OTP the caller must echo),
+/// which `validatePayment` clears to `reserved`; every other reservation lands
+/// in `reserved` directly. `preparePayment` itself never emits the 409
+/// `ALREADY_EXISTS` duplicate-session error — that belongs to `validatePayment`.
+/// A supplied `sink` / `sinkCredential` is acted on (mirroring `createPayment`):
+/// the reservation fires a `payment-reserved` or `payment-pending-validation`
+/// CloudEvent off the request path, and the target is stashed so the terminal
+/// `confirmPayment` notification reaches the same callback.
 async fn prepare_payment(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
     // Optional correlation header, echoed on every response (CAMARA Commonalities).
     let correlator = headers.get("x-correlator").cloned();
