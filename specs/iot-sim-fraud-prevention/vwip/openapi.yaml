@@ -852,7 +852,7 @@ components:
                       - OUT_OF_RANGE
           examples:
             Insufficient Device Parameters:
-              description: The submitted `device` object carries no identifier (`minProperties: 1` violated)
+              description: "The submitted `device` object carries no identifier (`minProperties: 1` violated)"
               value:
                 status: 400
                 code: INVALID_ARGUMENT

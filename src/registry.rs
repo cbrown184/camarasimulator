@@ -1607,6 +1607,87 @@ mod tests {
         j
     }
 
+    /// Every vendored spec must be **loadable YAML**: no mapping-entry line may
+    /// carry a *plain* (unquoted, non-block) scalar value that embeds `": "`
+    /// (colon-space) or ends in `":"`. A strict YAML parser reads such a value as
+    /// a nested mapping and aborts with "mapping values are not allowed here", so
+    /// the document never loads — which defeats the whole point of a vendored
+    /// OpenAPI spec meant to be consumed by standard tooling (e.g. a single-line
+    /// `description: The bearer token (for `credentialType: ACCESSTOKEN`).` whose
+    /// value's `credentialType: ` reads as a key). The fix is to quote the value
+    /// (or make it a block scalar), exactly as the same files already do for their
+    /// multi-line descriptions.
+    ///
+    /// Block-scalar continuation regions (`>-`/`|`) are skipped whole via
+    /// [`block_scalar_end`], so a legitimate `: ` inside a `description: >-` prose
+    /// block (or a flow/quoted value) is never mistaken for this error. Same
+    /// line-based approach as the scenario/structure tests here — **no YAML dep**.
+    #[test]
+    fn every_spec_plain_scalar_value_has_no_embedded_unquoted_colon() {
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut offenders: Vec<String> = Vec::new();
+        for api in APIS {
+            let lines: Vec<&str> = api.body.lines().collect();
+            let n = lines.len();
+            let mut i = 0;
+            while i < n {
+                let raw = lines[i];
+                let t = raw.trim_start();
+                if t.is_empty() || t.starts_with('#') {
+                    i += 1;
+                    continue;
+                }
+                let ind = indent(raw);
+                // Strip any leading block-sequence markers (`- `, possibly nested).
+                let mut rest = t;
+                while let Some(s) = rest.strip_prefix("- ") {
+                    rest = s;
+                }
+                // Split `key: value` on the first colon-space; a line with no
+                // inline value (`key:`) or none at all is not a plain scalar here.
+                let value = match rest.find(": ") {
+                    Some(p) => rest[p + 2..].trim(),
+                    None => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                if value.is_empty() || value.starts_with('#') {
+                    i += 1;
+                    continue;
+                }
+                if value_opens_block_scalar(value) {
+                    i = block_scalar_end(&lines, i, ind);
+                    continue;
+                }
+                // Quoted, flow-collection, anchor/alias and tag values are not
+                // plain scalars — their `: ` (if any) is already well-formed.
+                let first = value.chars().next().unwrap();
+                if matches!(first, '|' | '>' | '"' | '\'' | '[' | '{' | '&' | '*' | '!') {
+                    i += 1;
+                    continue;
+                }
+                if value.contains(": ") || value.ends_with(':') {
+                    offenders.push(format!(
+                        "{}/{} line {}: {}",
+                        api.name,
+                        api.version,
+                        i + 1,
+                        raw.trim()
+                    ));
+                }
+                i += 1;
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "vendored spec(s) carry a plain mapping scalar with an embedded, \
+             unquoted `: ` (invalid YAML — a strict parser reads it as a nested \
+             mapping and fails to load the document); quote the value:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// Line numbers (1-based), in document order, of every `x-camarasim-scenarios`
     /// case whose `input:` **or** `result:` carries an *empty* value — the
     /// documented functional case names an input or an outcome that is blank.

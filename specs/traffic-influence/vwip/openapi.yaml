@@ -948,7 +948,7 @@ components:
           description: The type of the credential.
         accessToken:
           type: string
-          description: The access token (for `credentialType: ACCESSTOKEN`).
+          description: "The access token (for `credentialType: ACCESSTOKEN`)."
         accessTokenType:
           type: string
           enum: [bearer]

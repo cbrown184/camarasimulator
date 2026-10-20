@@ -847,7 +847,7 @@ components:
             permitted (the schema requires the field, not a value).
         accessToken:
           type: string
-          description: The bearer token (for `credentialType: ACCESSTOKEN`).
+          description: "The bearer token (for `credentialType: ACCESSTOKEN`)."
         accessTokenExpiresUtc:
           type: string
           format: date-time

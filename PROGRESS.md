@@ -1750,6 +1750,37 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-20 — **non-conformant YAML in vendored specs — three single-line `description:` plain scalars
+  embedded an unquoted `: ` (colon-space), so a strict YAML parser fails to load the whole document;
+  found & fixed, plus a dependency-free guard.** A consistency dimension never swept before: every prior
+  pass compared *example values* against the handler, but none checked whether the vendored spec itself
+  **parses as YAML**. Ran a strict YAML parse over all 61 `specs/**/openapi.yaml`. Six specs failed;
+  three were the unambiguous, every-parser-invalid **embedded-colon class** — a `description:` whose
+  plain (unquoted, non-block) value contains `credentialType: ` / `minProperties: `, which YAML reads as
+  a nested mapping ("mapping values are not allowed here"): `specs/click-to-dial/vwip/openapi.yaml:850`
+  (`accessToken`), `specs/iot-sim-fraud-prevention/vwip/openapi.yaml:855` (an `examples` entry's
+  description) and `specs/traffic-influence/vwip/openapi.yaml:951` (`accessToken`). Each file already
+  block-quotes (`>-`) its *multi-line* descriptions correctly — only these three single-liners were left
+  as bare plain scalars that happened to carry a `: `. For a project whose point is to **serve vendored
+  CAMARA specs to consumers**, a spec strict OpenAPI/YAML tooling cannot load is genuine drift. Fix,
+  **spec text + `#[cfg(test)]` only**: double-quoted the three values (backticks need no escaping; the
+  parsed value is unchanged) and added `every_spec_plain_scalar_value_has_no_embedded_unquoted_colon` to
+  `registry.rs` — a block-scalar-aware line scan (reusing the existing `value_opens_block_scalar` /
+  `block_scalar_end` helpers, **no YAML dep**, matching the codebase's deliberate line-based spec-test
+  style; a naive scan over-flags 58 block-scalar/markdown prose lines, so block-scalar skipping is
+  essential) that flags any plain mapping scalar containing `": "` or ending `":"` across every `APIS`
+  body. Proven discriminating: it fails pre-fix naming exactly the three lines, passes post-fix. Green:
+  `cargo test` → **3142 passed, 0 failed** (+1 new test fn); `cargo build --release` ok; binary =
+  **5,479,576 bytes** (identical to the prior tip — the +6 bytes of quotes in the embedded specs are
+  below section-padding granularity); no new dependency. **Deferred (lower-confidence):** the other
+  three strict-parse failures are a distinct **reserved-indicator class** — a `summary:` plain scalar
+  *starting* with a backtick (`` `maxAge` outside… ``) in `specs/device-swap/v1`, `specs/kyc-tenure/v0.2`
+  and `specs/number-recycling/v0.2`; `` ` `` is YAML-reserved so pyyaml rejects them, but libyaml-class
+  parsers (serde_yaml / js-yaml, what real consumers use) accept it, so it is left for a decision on
+  whether strict reserved-char conformance is in scope. **Next pass:** the embedded-colon class now
+  returns 0 across `specs/**` (guarded by the new test); a follow-up could either quote the three
+  backtick-leading summaries too (if strict conformance is wanted) or confirm the chosen consumer parser
+  accepts them. Branch `agent/specs/fix-invalid-yaml-embedded-colon`.
 - 2026-10-20 — **generic-409-`CONFLICT` inline example message drift — qos-booking vwip `createBooking`
   carried the Commonalities placeholder, not `for_status(409)`'s canonical; found & fixed.** Generalising
   the 2026-10-20 was→is 404 sweep from the single NOT_FOUND signature to every reserved-suffix generic
