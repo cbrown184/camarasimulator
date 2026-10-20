@@ -1106,7 +1106,7 @@ components:
                       - TOO_MANY_REQUESTS
           examples:
             GENERIC_429_TOO_MANY_REQUESTS:
-              description: API Server request limit is overpassed
+              description: Rate limit reached
               value:
                 status: 429
                 code: TOO_MANY_REQUESTS

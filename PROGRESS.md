@@ -1750,6 +1750,39 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-20 — **vwip residual-drift re-audit — iot-sim-fraud-prevention, stale 429 example-object
+  description prose found & fixed (completes the prior 2026-10-19 iot-sim 429 pass).** Re-grepping the
+  known drift signatures across `specs/**` to confirm the post-sweep state found all classes clean
+  except **one surviving `overpassed` hit** the 2026-10-19 application-profiles pass had reported swept
+  — `specs/iot-sim-fraud-prevention/vwip/openapi.yaml:1109`. Inspected it: iot-sim is the **only mounted
+  spec that inlines its own 429 example** (its custom `QUOTA_EXCEEDED`/`TOO_MANY_REQUESTS` code enum
+  cannot `$ref` the shared catalog, which every other spec uses), and that example object
+  (`GENERIC_429_TOO_MANY_REQUESTS`) carried `description: API Server request limit is overpassed` — the
+  stale upstream CAMARA-template prose. The 2026-10-19 iot-sim pass corrected this example's
+  `value.message` to `Rate limit reached.` (the reserved-suffix `…429` → `for_status(429)` message) and
+  pinned it through the router, but **overlooked the example-object `description`**, so a consumer reading
+  the spec saw a description that contradicted both the example's own value and this spec's local
+  convention (each named example's `description` glosses its `message` — e.g. the two `UNNECESSARY_UNBIND_*`
+  examples: description = message minus the trailing period). Not a returned value and so not a spec↔code
+  behavioural drift, but a genuine stale-prose inconsistency in a vendored spec. Fix, spec +
+  `#[cfg(test)]` only: corrected the description to `Rate limit reached` (the local convention) and
+  extended the existing `vendored_examples_match_the_handler` test with a string-scan guard over the
+  embedded spec body (`crate::registry::APIS` — no YAML dep, the registry contract-test style) asserting
+  the spec no longer contains `overpassed` and does carry the corrected description, so it can't drift
+  back. **No deterministic/value drift elsewhere** — the epoch (`2024-01-01T14:27:08Z`, 45 hits) and
+  minted-id (`3fa85f64-…` 53 / `83a1c8e0-…` 4) literals that remain are all annotated-illustrative,
+  caller-supplied, or `Opaque, UUID-shaped` schema examples (expected; the sweep annotates, it does not
+  remove). Green: `cargo test` → **3141 passed, 0 failed** (no net new test — the guard rides the
+  existing fn); `cargo build --release` ok; binary = **5,479,576 bytes** (identical to the prior tip —
+  the shorter spec string and `#[cfg(test)]`-only guard are below section-padding granularity). No
+  behaviour/response change (the handler and the returned 429 message were already correct; only the
+  vendored example-description prose was stale), no new dependency. **Env note:** on arrival HEAD was
+  detached at the real `origin/main` (`29ce314`, the quality-on-demand minted-id pass) with local `main`
+  stale at the `9b0de71` graft; fetched, repointed local `main` to `origin/main` and branched. **Next
+  pass:** the known drift classes (truncated identifier message, stale 429 `overpassed`, unannotated
+  frozen epoch, minted-id placeholders, stale slice docs) are now all clean across `specs/**`; per the
+  standing 2026-09-27 decision point, an idle pass that finds no drift should confirm nothing changed and
+  stop without committing. Branch `agent/iot-sim-fraud-prevention/fix-vwip-429-example-description`.
 - 2026-10-20 — **minted-id sweep — stable-tier straggler, quality-on-demand v1: annotated the
   `CloudEvent.id` (server-minted) and `CloudEvent.time` (wall-clock) schema examples plus the
   composite `CloudEvent` example note (`id`/`time`/`data.sessionId`) as illustrative placeholders,

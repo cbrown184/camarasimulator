@@ -1499,5 +1499,30 @@ mod tests {
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(body["code"], "TOO_MANY_REQUESTS");
         assert_eq!(body["message"], "Rate limit reached.");
+
+        // --- vendored-spec example prose (the one inlined 429 example) -------
+        // This is the only mounted spec that inlines its own 429 example (its
+        // custom QUOTA_EXCEEDED/TOO_MANY_REQUESTS enum can't `$ref` the shared
+        // catalog). A prior pass corrected the example `value.message` to
+        // "Rate limit reached." but left the example-object `description` as the
+        // stale upstream template prose "API Server request limit is overpassed",
+        // which contradicted both the value above and this spec's own convention
+        // (each named example's description glosses its `message`, e.g. the two
+        // UNNECESSARY_UNBIND_* examples). Guard the corrected prose so it can't
+        // drift back. Scan the embedded spec body (no YAML dep — the registry
+        // contract-test style).
+        let spec = crate::registry::APIS
+            .iter()
+            .find(|a| a.name == "iot-sim-fraud-prevention")
+            .expect("iot-sim-fraud-prevention is mounted")
+            .body;
+        assert!(
+            !spec.contains("overpassed"),
+            "the stale 429 example-description prose has drifted back"
+        );
+        assert!(
+            spec.contains("description: Rate limit reached\n"),
+            "the inlined 429 example description should gloss its own message"
+        );
     }
 }
