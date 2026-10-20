@@ -1307,7 +1307,16 @@ mod tests {
         let (status, _, body) =
             post_booking(Some(&token), &create_body("+123456789409", "QOS_E"), None).await;
         assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["status"], 409);
         assert_eq!(body["code"], "CONFLICT");
+        // Pin the full `message` too, not just the `code`: the reserved `…409`
+        // suffix routes through `scenarios::reserved_error` → `for_status(409)`,
+        // whose canonical Commonalities message is the one the vendored 409
+        // `conflict` example must show. Guarding only the `code` let that example
+        // carry the generic "There is a conflict with the current state of the
+        // resource." placeholder (the same drift the qos-provisioning audit fixed
+        // on its own 409 example); pinning the bytes here closes that gap.
+        assert_eq!(body["message"], "A specified resource duplicate entry found.");
     }
 
     #[tokio::test]
@@ -2361,9 +2370,12 @@ mod tests {
     /// per-case tests above already guard. This pins the full `status`/`code`/
     /// `message` triple so a reworded handler string (or a re-truncated example, the
     /// drift this pass fixed on the two `MISSING_IDENTIFIER` examples) cannot slip
-    /// past. The `createBooking` 409 `CONFLICT` example is deliberately absent: its
-    /// message is the shared-catalog `for_status(409)` canonical (reserved-suffix
-    /// path), not an API-own string.
+    /// past. The `createBooking` 409 `CONFLICT` example is deliberately absent
+    /// here: its message is the shared-catalog `for_status(409)` canonical
+    /// (reserved-suffix path), not an API-own string — and its exact bytes are
+    /// pinned through the router by `reserved_409_suffix_is_conflict`, so the
+    /// "generic catalog message, not pinned" reasoning (which once let that
+    /// example's bytes drift to a placeholder) no longer leaves it unchecked.
     #[tokio::test]
     async fn vendored_error_example_messages_match_the_handler() {
         let create = mint_token(CREATE_SCOPE).await; // two-legged (subject not a line)

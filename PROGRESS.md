@@ -1750,6 +1750,41 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-20 — **generic-409-`CONFLICT` inline example message drift — qos-booking vwip `createBooking`
+  carried the Commonalities placeholder, not `for_status(409)`'s canonical; found & fixed.** Generalising
+  the 2026-10-20 was→is 404 sweep from the single NOT_FOUND signature to every reserved-suffix generic
+  catalog code: re-grepped each `code: <generic>` inline example in `specs/**` against its
+  `CamaraError::for_status` canonical message. All of NOT_FOUND / TOO_MANY_REQUESTS / UNAVAILABLE /
+  SERVICE_NOT_APPLICABLE / INTERNAL were clean; the only non-canonical **CONFLICT** examples were
+  carrier-billing's two (`PAYMENT_CONFIRMED`/`PAYMENT_CANCELLED` custom messages the handler genuinely
+  emits — already pinned by its 2026-10-15 audit, not drift) and **one genuine drift**:
+  `specs/qos-booking/vwip/openapi.yaml:312` — the `createBooking` 409 `conflict` example showed
+  `message: There is a conflict with the current state of the resource.` (the generic Commonalities
+  placeholder) though the reserved `…409` suffix routes through `scenarios::reserved_error` →
+  `CamaraError::for_status(409)` (`src/errors.rs:120`), whose canonical bytes are "A specified resource
+  duplicate entry found." This is the **exact** drift the qos-provisioning v0.3 audit (2026-10-15) fixed on
+  *its* 409 example — but qos-booking's vwip audit (2026-10-12) predated that discovery, and its
+  `vendored_error_example_messages_match_the_handler` test deliberately **excluded** the 409 example as
+  "the shared-catalog `for_status(409)` canonical, not an API-own string, so not pinned" — the identical
+  reasoning that let the `…404` bytes drift (the per-case `reserved_409_suffix_is_conflict` test guarded
+  only `status`/`code`, never `message`). Fix, **spec example + `#[cfg(test)]` only**: corrected line 312 to
+  the canonical message, extended `reserved_409_suffix_is_conflict` to drive the reserved `…409` suffix
+  through the real router and pin the exact `status`/`code`/`message` triple, and rewrote the now-coherent
+  exclusion comment on `vendored_error_example_messages_match_the_handler` to note the 409 bytes are pinned
+  by that per-case test. Green: `cargo test` → **3141 passed, 0 failed** (count unchanged — one assertion
+  added to an existing test fn); `cargo build --release` ok; binary = **5,479,576 bytes** (identical to the
+  prior tip — spec-example text + `#[cfg(test)]`-only change, below section-padding granularity); no new
+  dependency. **Env note:** on arrival HEAD was detached at `0fe8574` (the was→is 404 pass); a `git fetch`
+  showed `origin/main` had already advanced to that same commit (the prior pass *was* pushed; only the local
+  `main` ref was stale at `4337e0b`), so branched from a synced `main`. **Next pass:** the generic-catalog-code
+  message signature now returns 0 genuine drift across `specs/**` for all nine reserved statuses; a repo-wide
+  grep for "There is a conflict with the current state of the resource" returns 0. The other known drift
+  classes (truncated identifier message, was→is `was not found`, `overpassed` 429, frozen epoch, minted-id
+  placeholders, stale slice docs) remain clean per the last several passes. Per the standing 2026-09-27
+  decision point, an idle pass that finds no drift confirms nothing changed and stops without committing —
+  but this pass again shows the item-2 audit is not idle: generalising a signature class (NOT_FOUND → every
+  reserved generic) surfaced a sibling-API survivor the single-code grep could never reach.
+  Branch `agent/qos-booking/fix-409-conflict-example-drift`.
 - 2026-10-20 — **was→is drift class — reserved-`…404` inline `notFound` example message, found stale in
   three vwip 404 examples (device-data-volume both ops, device-visit-location) & fixed.** The prior pass
   declared the known `specs/**` drift classes (truncated identifier message, `overpassed` 429, frozen epoch,

@@ -309,7 +309,7 @@ paths:
                   value:
                     status: 409
                     code: CONFLICT
-                    message: There is a conflict with the current state of the resource.
+                    message: A specified resource duplicate entry found.
         "422":
           description: |
             422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
