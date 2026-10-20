@@ -676,8 +676,12 @@ mod tests {
     /// "The device cannot be identified." but the handler emits the full
     /// "…: supply a `device` or use a token that identifies a device.") would
     /// slip past them; this pins the exact bytes. The reserved-suffix `404
-    /// NOT_FOUND` example is intentionally excluded — its message is the shared
-    /// catalog's `for_status(404)`, not an API-own string.
+    /// NOT_FOUND` example is `for_status(404)`'s shared-catalog message, not an
+    /// API-own string, but the inline example still carries concrete bytes a
+    /// consumer reads, and they drifted (it once showed "…resource **was** not
+    /// found." though the handler emits "…**is** not found.", the
+    /// media-streaming-rate / optimal-edge-discovery was→is class), so it is now
+    /// pinned too.
     #[tokio::test]
     async fn vendored_error_example_messages_match_the_handler() {
         // 400 INVALID_ARGUMENT — the malformed-window message the spec example shows.
@@ -734,6 +738,14 @@ mod tests {
             out["message"],
             "The device is already identified by the access token."
         );
+
+        // 404 NOT_FOUND — the reserved `…404` suffix → `for_status(404)`.
+        let (status, _, out) =
+            call_ok(&body_with(r#""device":{"phoneNumber":"+123456789404"}"#)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(out["status"], 404);
+        assert_eq!(out["code"], "NOT_FOUND");
+        assert_eq!(out["message"], "The specified resource is not found.");
     }
 
     #[tokio::test]

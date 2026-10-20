@@ -190,7 +190,7 @@ paths:
                   value:
                     status: 404
                     code: NOT_FOUND
-                    message: The specified resource was not found.
+                    message: The specified resource is not found.
         "409":
           $ref: "../../shared/errors.yaml#/components/responses/Conflict"
         "422":

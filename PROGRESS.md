@@ -1750,6 +1750,39 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-20 — **was→is drift class — reserved-`…404` inline `notFound` example message, found stale in
+  three vwip 404 examples (device-data-volume both ops, device-visit-location) & fixed.** The prior pass
+  declared the known `specs/**` drift classes (truncated identifier message, `overpassed` 429, frozen epoch,
+  minted-id placeholders) and the `src/` `later slice` class all clean. Re-grepping the **404 `was not
+  found.`** signature — the was→is class the 2026-10-12 sweep fixed on media-streaming-rate and
+  optimal-edge-discovery — turned up **three surviving hits**: the inline `notFound` example (summary
+  "Reserved `…404` suffix") in `specs/device-data-volume/vwip/openapi.yaml` (both `retrieveDataVolume` **and**
+  `checkDataVolume`, lines 180/358) and in `specs/device-visit-location/vwip/openapi.yaml` (line 193) each
+  carried `message: The specified resource was not found.` but `CamaraError::for_status(404)`
+  (`src/errors.rs:119`) emits "The specified resource **is** not found." — the exact bytes a consumer reads
+  for the router-reachable `…404` suffix path, and the bytes dozens of other APIs' tests pin. This is genuine
+  spec↔code drift that the 2026-10-18 residual re-audit of these two specs missed: that pass hunted the
+  *truncated-identifier* signature, and both `vendored_error_example_messages_match_the_handler` tests
+  explicitly **excluded** the 404 example as "the shared catalog's generic message, not this API's own, so not
+  pinned" — exactly the reasoning that let its concrete inline bytes drift unchecked (the existing
+  `reserved_suffix_selects_a_canonical_camara_error` tests guard only `status`/`code`, never `message`). Fix,
+  spec + `#[cfg(test)]` only: corrected all three example messages to "…is not found.", extended both
+  `vendored_error_example_messages_match_the_handler` tests to drive the reserved `…404` suffix through the
+  real router and pin the exact `status`/`code`/`message` bytes (device-data-volume on **both** operations),
+  and rewrote the two now-falsified test doc comments (the 404 example *is* `for_status(404)`'s shared message,
+  but its inline bytes are a consumer-visible contract that drifted, so it is pinned). Green: `cargo test` →
+  **3141 passed, 0 failed** (count unchanged — assertions added to existing test fns, no new fn);
+  `cargo build --release` ok; binary = **5,479,576 bytes** (identical to the prior tip — spec-example text +
+  `#[cfg(test)]`-only change, below section-padding granularity); no new dependency. **Env note:** on arrival
+  HEAD was detached at the real `origin/main` (`4337e0b`, the network-access-domains stale-doc pass) with a
+  clean tree and local `main` already in sync; branched directly. **Next pass:** a repo-wide grep for the
+  was→is signature (`was not found` in `specs/`) now returns **0**; the other known drift classes (truncated
+  identifier message, `overpassed` 429, frozen epoch, minted-id placeholders, stale slice docs) are clean per
+  the last several passes. Per the standing 2026-09-27 decision point, an idle pass that finds no drift should
+  confirm nothing changed and stop without committing — but note this pass shows the item-2 audit is still
+  **not** idle: a drift class fixed on two APIs in one sweep can survive on others whose audit predated the
+  class's discovery, so re-grepping each known signature repo-wide remains productive.
+  Branch `agent/device-data-volume/fix-404-was-is-example-drift`.
 - 2026-10-20 — **stale-slice-doc trap — network-access-domains vwip `getTrustDomain` handler doc, the
   last unjudged `later slice` residual the prior (carrier-billing `prepare_payment`) pass flagged for a
   future judgment pass, found stale & fixed; the `later slice` class is now clean across `src/`.** The

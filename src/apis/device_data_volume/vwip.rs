@@ -1121,13 +1121,18 @@ mod tests {
     /// truncated-identifier-message class (the `MISSING_IDENTIFIER` example in
     /// both `/retrieve` and `/check` carried the short "…identified." but
     /// `resolve_identifier` emits the full "…: supply a `device` or use a token
-    /// that identifies a device."). The 404 reserved-suffix examples show the
-    /// shared catalog's generic message, not this API's own, so are not pinned.
+    /// that identifies a device."). The 404 reserved-suffix examples are
+    /// `for_status(404)`'s shared-catalog message, not this API's own — but the
+    /// inline example still carries concrete bytes a consumer reads, and those
+    /// drifted (both operations once showed "…resource **was** not found." though
+    /// the handler emits "…**is** not found.", the media-streaming-rate /
+    /// optimal-edge-discovery was→is class), so this now pins them too.
     #[tokio::test]
     async fn vendored_error_example_messages_match_the_handler() {
         const MISSING: &str =
             "The device cannot be identified: supply a `device` or use a token that identifies a device.";
         const UNNECESSARY: &str = "The device is already identified by the access token.";
+        const NOT_FOUND: &str = "The specified resource is not found.";
 
         // --- /retrieve -----------------------------------------------------
         // 400 INVALID_ARGUMENT — an empty `device` object has no identifier.
@@ -1152,6 +1157,13 @@ mod tests {
         assert_eq!(body["status"], 422);
         assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
         assert_eq!(body["message"], UNNECESSARY);
+
+        // 404 NOT_FOUND — the reserved `…404` suffix → `for_status(404)`.
+        let (status, _, body) = call_ok(r#"{"device":{"phoneNumber":"+123456789404"}}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["status"], 404);
+        assert_eq!(body["code"], "NOT_FOUND");
+        assert_eq!(body["message"], NOT_FOUND);
 
         // --- /check --------------------------------------------------------
         // 400 OUT_OF_RANGE — value outside 0..=1024 (checked before resolution).
@@ -1193,6 +1205,16 @@ mod tests {
         assert_eq!(body["status"], 422);
         assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
         assert_eq!(body["message"], UNNECESSARY);
+
+        // 404 NOT_FOUND — the reserved `…404` suffix → `for_status(404)`.
+        let (status, _, body) = check_ok(
+            r#"{"device":{"phoneNumber":"+123456789404"},"volumeToCheck":{"value":1,"unit":"MiB"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["status"], 404);
+        assert_eq!(body["code"], "NOT_FOUND");
+        assert_eq!(body["message"], NOT_FOUND);
     }
 
     /// The vendored 200 success examples must match the handler's body. The
