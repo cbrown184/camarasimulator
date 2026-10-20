@@ -909,7 +909,11 @@ components:
       description: |
         A CloudEvents 1.0 event delivered to a session's `sink`. CamaraSim emits
         the `qos-status-changed` type; the `data` payload is
-        `EventQosStatusChanged`.
+        `EventQosStatusChanged`. In the composite example below, `id` is
+        server-minted (counter+clock, UUID-shaped), `time` is stamped from the
+        live server clock, and `data.sessionId` is the session's server-minted
+        id — all three are illustrative placeholders whose shape, not whose
+        literal bytes, is the contract, so a real event never reproduces them.
       required:
         - id
         - source
@@ -920,7 +924,11 @@ components:
       properties:
         id:
           type: string
-          description: Identifier of this event, unique within the source context.
+          description: >-
+            Identifier of this event, unique within the source context.
+            Server-minted (counter+clock, UUID-shaped), so the example value is
+            an illustrative placeholder that never reproduces — only its shape is
+            the contract.
           example: "83a1c8e0-2b6a-4a2e-9c1f-0a1b2c3d4e5f"
         source:
           type: string
@@ -942,7 +950,10 @@ components:
         time:
           type: string
           format: date-time
-          description: RFC 3339 timestamp (with time zone) of the occurrence.
+          description: >-
+            RFC 3339 timestamp (with time zone) of the occurrence. Stamped from
+            the live server clock when the event fires, so the example value is
+            illustrative and never reproduces.
           example: "2024-01-01T15:27:08Z"
         data:
           $ref: "#/components/schemas/EventQosStatusChanged"

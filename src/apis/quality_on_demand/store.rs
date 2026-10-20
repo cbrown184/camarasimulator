@@ -206,6 +206,25 @@ mod tests {
     }
 
     #[test]
+    fn minted_ids_never_equal_the_vendored_schema_placeholder() {
+        // The vendored `CloudEvent.id` schema example carries the canonical
+        // `83a1c8e0-…` placeholder, and the composite CloudEvent example's
+        // `data.sessionId` carries `11111111-…` — both annotated as illustrative
+        // server-minted values that never reproduce. `new_event_id`/
+        // `new_session_id` are `mint_uuid()` = `SHA-256(counter ‖ now)`, so guard
+        // that a future re-freeze can't paste either placeholder back as a
+        // reproducible literal (the carrier-billing / geofencing precedent).
+        const EVENT_PLACEHOLDER: &str = "83a1c8e0-2b6a-4a2e-9c1f-0a1b2c3d4e5f";
+        const SESSION_PLACEHOLDER: &str = "11111111-1111-4111-8111-111111111111";
+        for _ in 0..16 {
+            assert_ne!(new_event_id(), EVENT_PLACEHOLDER);
+            assert_ne!(new_event_id(), SESSION_PLACEHOLDER);
+            assert_ne!(new_session_id(), EVENT_PLACEHOLDER);
+            assert_ne!(new_session_id(), SESSION_PLACEHOLDER);
+        }
+    }
+
+    #[test]
     fn stored_session_can_be_read_back_and_unknown_is_none() {
         let id = new_session_id();
         assert!(get(&id).is_none(), "not stored yet");

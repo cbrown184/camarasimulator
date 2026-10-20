@@ -1750,6 +1750,47 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-20 — **minted-id sweep — stable-tier straggler, quality-on-demand v1: annotated the
+  `CloudEvent.id` (server-minted) and `CloudEvent.time` (wall-clock) schema examples plus the
+  composite `CloudEvent` example note (`id`/`time`/`data.sessionId`) as illustrative placeholders,
+  and pinned that the mint never equals the frozen literal.** The four-unit stable-tier minted-id
+  sweep (qos-provisioning / geofencing-subscriptions / connectivity-insights / carrier-billing,
+  completed 2026-10-19) was driven by a grep for `3fa85f64-…`; **quality-on-demand v1 uses the other
+  canonical CloudEvent placeholder `83a1c8e0-…`, so it was never a sweep unit** even though it is a
+  stateful, CloudEvent-emitting stable-tier API. Re-grepping both placeholders this pass flagged
+  `specs/quality-on-demand/v1/openapi.yaml`: the `CloudEvent.id` property carried the bare
+  `83a1c8e0-2b6a-4a2e-9c1f-0a1b2c3d4e5f` with the description "Identifier of this event, unique within
+  the source context" (no note that the value is server-minted), `CloudEvent.time` carried a frozen
+  `2024-01-01T15:27:08Z` described only as "RFC 3339 timestamp … of the occurrence", and the composite
+  schema `example` repeated both plus `data.sessionId: 11111111-…`. Checked each against the handler:
+  `CloudEvent.id` is `store::new_event_id()` = `mint_uuid()` = `SHA-256(counter ‖ now)` v4-shaped
+  (`store.rs:131-160`, delivered at `v1.rs:363`/`:397`), `CloudEvent.time` is `rfc3339_utc(now)`
+  (`v1.rs:364`/`:398`, wall-clock), and the session's `sessionId` is likewise `new_session_id()` =
+  `mint_uuid()` — so none of the three composite-example values can reproduce. **No deterministic/value
+  drift found** (the handler is correct; the 2026-10-14 Phase-3 audit had already handled
+  `sessionId`/`startedAt`/`expiresAt` on the *operation* examples); the gap was purely the three
+  **CloudEvent schema descriptions** a consumer reads, which carried bare canonical/frozen placeholders
+  for these server-minted / live-clock values with no note (the carrier-billing / geofencing /
+  qos-provisioning schema-description gap). Fixes, spec + `#[cfg(test)]` only: annotated
+  `CloudEvent.id` and `CloudEvent.time` to mark the value server-minted / live-clock and the example an
+  illustrative placeholder that never reproduces (only its shape is contract), and added a sentence to
+  the `CloudEvent` schema description covering the composite example's minted/wall-clock
+  `id`/`time`/`data.sessionId`; added `minted_ids_never_equal_the_vendored_schema_placeholder`
+  (`store.rs`) asserting over 16 iterations that neither `new_event_id()` nor `new_session_id()` ever
+  equals `83a1c8e0-2b6a-4a2e-9c1f-0a1b2c3d4e5f` nor the composite `data.sessionId` placeholder
+  `11111111-1111-4111-8111-111111111111` (the carrier-billing / geofencing precedent). Green:
+  `cargo test` → **3141 passed, 0 failed** (+1 new test); `cargo build --release` ok; binary =
+  **5,479,576 bytes** (identical to the prior tip — the folded-scalar schema annotations are below
+  section-padding granularity and the test is `#[cfg(test)]`-only). No behaviour/response change (the
+  handler was already correct; the schema examples were unannotated minted/wall-clock placeholders),
+  no new dependency. **Env note:** HEAD, local `main`, and `origin/main` all at `9b0de71` (the
+  carrier-billing tip) on arrival — no shallow-clone graft this pass; branched directly.
+  **Next pass:** both canonical CloudEvent placeholders (`3fa85f64-…` and `83a1c8e0-…`) are now swept
+  across every stable- and vwip-tier spec that carries them (each remaining occurrence is either an
+  annotated server-minted value or a legitimately caller-supplied / echoed request field — verified by
+  grep this pass); the minted-id sweep is complete with no further units flagged. Per the 2026-09-27
+  decision point (still standing), an idle pass that finds no drift should confirm nothing changed and
+  stop without committing. Branch `agent/quality-on-demand/annotate-cloudevent-minted-id-examples`.
 - 2026-10-19 — **minted-id sweep — stable-tier, carrier-billing v0.5 (fourth and FINAL unit):
   annotated the four minted/wall-clock *schema-component* examples (`PaymentCreated.paymentId`,
   `Payment.paymentId`, `CloudEvent.id`, `CloudEvent.time`) plus the `CloudEvent` composite-example
