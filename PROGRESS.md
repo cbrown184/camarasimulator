@@ -1750,6 +1750,39 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-20 — **reserved-indicator class resolved — three `summary:` plain scalars that *start* with a
+  backtick, which strict (pyyaml-class) YAML parsers refuse to load, found & fixed, plus a dependency-free
+  guard; a strict parse now succeeds on all 61 specs.** Follow-up to this morning's embedded-colon YAML pass
+  (`0127503`), which fixed the three every-parser-invalid `description:` scalars and **deferred** this
+  distinct reserved-indicator class for a scope decision. Decision taken: **quote them.** YAML 1.1/1.2
+  reserve `` ` `` (and `@`) and forbid a plain scalar from beginning with either, so pyyaml and the many
+  OpenAPI validators built on it reject the whole document ("found character '`' that cannot start any
+  token"); libyaml-class parsers (serde_yaml / js-yaml) tolerate it, but for a project whose point is to
+  **serve vendored CAMARA specs to consumers**, a spec that strict tooling cannot load is genuine drift —
+  the same standard the embedded-colon pass applied. The three, each an `examples` entry's single-line
+  `summary`: `specs/device-swap/v1/openapi.yaml:142` (`` summary: `maxAge` outside the allowed range ``),
+  `specs/kyc-tenure/v0.2/openapi.yaml:150` (`` `tenureDate` in the future ``) and
+  `specs/number-recycling/v0.2/openapi.yaml:146` (`` `specifiedDate` in the future ``). Fix, **spec text +
+  `#[cfg(test)]` only**: double-quoted the three values (backticks need no escaping inside double quotes;
+  the parsed string is unchanged) and added
+  `every_spec_plain_scalar_value_does_not_start_with_a_yaml_reserved_indicator` to `registry.rs` — a sibling
+  of the embedded-colon guard reusing the same block-scalar-aware line scan (the `value_opens_block_scalar` /
+  `block_scalar_end` helpers, **no YAML dep**, matching the codebase's line-based spec-test style) that
+  flags any plain mapping scalar whose value opens with `` ` `` or `@` across every `APIS` body.
+  Block-scalar skipping is again essential: three backtick-opening *continuation* lines inside `>-` prose
+  blocks (`specs/auth` discovery descriptions — "On success: …", "Claims: …") would otherwise over-flag.
+  Proven discriminating: pre-fix it fails naming exactly the three lines (device-swap:142, kyc-tenure:150,
+  number-recycling:146), passes post-fix. Cross-checked with an actual strict parse: `python3 + pyyaml
+  safe_load` over all 61 `specs/**/openapi.yaml` now reports **0 failures** (was 6 before `0127503` — the 3
+  embedded-colon + these 3 reserved-indicator). Green: `cargo test` → **3143 passed, 0 failed** (+1 new test
+  fn); `cargo build --release` ok; binary = **5,479,576 bytes** (identical to the prior tip — the +6 bytes
+  of quotes in the embedded specs are below section-padding granularity, exactly as the embedded-colon pass
+  saw). No new dependency. **Next pass:** the YAML-loadability dimension is now clean end to end — both the
+  embedded-colon and the reserved-indicator classes return 0 across `specs/**` (each guarded by its own
+  test), and a strict parse loads every spec. The other long-standing drift classes (truncated identifier
+  message, was→is `was not found` / generic-catalog-code messages, `overpassed` 429, frozen epoch, minted-id
+  placeholders, stale slice docs) remain clean per the last several passes. Branch
+  `agent/specs/quote-reserved-indicator-summaries`.
 - 2026-10-20 — **non-conformant YAML in vendored specs — three single-line `description:` plain scalars
   embedded an unquoted `: ` (colon-space), so a strict YAML parser fails to load the whole document;
   found & fixed, plus a dependency-free guard.** A consistency dimension never swept before: every prior
@@ -1772,12 +1805,13 @@ Respect phase order. Preferred next work:
   body. Proven discriminating: it fails pre-fix naming exactly the three lines, passes post-fix. Green:
   `cargo test` → **3142 passed, 0 failed** (+1 new test fn); `cargo build --release` ok; binary =
   **5,479,576 bytes** (identical to the prior tip — the +6 bytes of quotes in the embedded specs are
-  below section-padding granularity); no new dependency. **Deferred (lower-confidence):** the other
-  three strict-parse failures are a distinct **reserved-indicator class** — a `summary:` plain scalar
-  *starting* with a backtick (`` `maxAge` outside… ``) in `specs/device-swap/v1`, `specs/kyc-tenure/v0.2`
-  and `specs/number-recycling/v0.2`; `` ` `` is YAML-reserved so pyyaml rejects them, but libyaml-class
-  parsers (serde_yaml / js-yaml, what real consumers use) accept it, so it is left for a decision on
-  whether strict reserved-char conformance is in scope. **Next pass:** the embedded-colon class now
+  below section-padding granularity); no new dependency. **Deferred (lower-confidence) — RESOLVED
+  2026-10-20, see the entry above:** the other three strict-parse failures are a distinct
+  **reserved-indicator class** — a `summary:` plain scalar *starting* with a backtick (`` `maxAge` outside… ``)
+  in `specs/device-swap/v1`, `specs/kyc-tenure/v0.2` and `specs/number-recycling/v0.2`; `` ` `` is
+  YAML-reserved so pyyaml rejects them, but libyaml-class parsers (serde_yaml / js-yaml, what real consumers
+  use) accept it, so it is left for a decision on whether strict reserved-char conformance is in scope.
+  **Next pass:** the embedded-colon class now
   returns 0 across `specs/**` (guarded by the new test); a follow-up could either quote the three
   backtick-leading summaries too (if strict conformance is wanted) or confirm the chosen consumer parser
   accepts them. Branch `agent/specs/fix-invalid-yaml-embedded-colon`.

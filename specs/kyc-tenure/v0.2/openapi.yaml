@@ -147,7 +147,7 @@ paths:
                     code: INVALID_ARGUMENT
                     message: "`tenureDate` must be a valid RFC 3339 full-date (YYYY-MM-DD)."
                 outOfRange:
-                  summary: `tenureDate` in the future
+                  summary: "`tenureDate` in the future"
                   value:
                     status: 400
                     code: OUT_OF_RANGE

@@ -139,7 +139,7 @@ paths:
                     code: INVALID_ARGUMENT
                     message: "`phoneNumber` must be in E.164 format (e.g. +123456789)."
                 outOfRange:
-                  summary: `maxAge` outside the allowed range
+                  summary: "`maxAge` outside the allowed range"
                   value:
                     status: 400
                     code: OUT_OF_RANGE

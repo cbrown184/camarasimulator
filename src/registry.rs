@@ -1688,6 +1688,85 @@ mod tests {
         );
     }
 
+    /// Every vendored spec must be **loadable YAML**: no mapping-entry line may
+    /// carry a *plain* (unquoted, non-block) scalar value whose first character
+    /// is a YAML **reserved indicator** — `` ` `` or `@`. YAML 1.1/1.2 reserve
+    /// both for future use and forbid a plain scalar from starting with either,
+    /// so a strict parser (PyYAML and the many OpenAPI validators built on it)
+    /// rejects the document outright ("found character '`' that cannot start any
+    /// token"), e.g. a single-line `summary: `maxAge` outside the allowed range`
+    /// whose value opens with a backtick. libyaml-class parsers (serde_yaml,
+    /// js-yaml) happen to tolerate it, but a spec that strict tooling cannot load
+    /// is drift for a project whose point is to serve vendored specs to consumers.
+    /// The fix is to quote the value (the parsed string is unchanged), exactly as
+    /// the sibling embedded-colon guard requires.
+    ///
+    /// Same block-scalar-aware line scan as
+    /// [`every_spec_plain_scalar_value_has_no_embedded_unquoted_colon`]: block
+    /// scalars (`>-`/`|`) are skipped whole via [`block_scalar_end`] so a backtick
+    /// opening a prose *continuation* line inside a `description: >-` is never
+    /// mistaken for a mapping value, and quoted/flow/anchor/alias/tag values are
+    /// left alone. **No YAML dep.**
+    #[test]
+    fn every_spec_plain_scalar_value_does_not_start_with_a_yaml_reserved_indicator() {
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut offenders: Vec<String> = Vec::new();
+        for api in APIS {
+            let lines: Vec<&str> = api.body.lines().collect();
+            let n = lines.len();
+            let mut i = 0;
+            while i < n {
+                let raw = lines[i];
+                let t = raw.trim_start();
+                if t.is_empty() || t.starts_with('#') {
+                    i += 1;
+                    continue;
+                }
+                let ind = indent(raw);
+                let mut rest = t;
+                while let Some(s) = rest.strip_prefix("- ") {
+                    rest = s;
+                }
+                let value = match rest.find(": ") {
+                    Some(p) => rest[p + 2..].trim(),
+                    None => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                if value.is_empty() || value.starts_with('#') {
+                    i += 1;
+                    continue;
+                }
+                if value_opens_block_scalar(value) {
+                    i = block_scalar_end(&lines, i, ind);
+                    continue;
+                }
+                // A plain scalar may not begin with the reserved indicators
+                // `` ` `` or `@`; every other leading indicator (`"`/`'`/`[`/`{`
+                // flow or quoted, `&`/`*`/`!` anchor/alias/tag, `|`/`>` block) is
+                // either well-formed or already handled above.
+                if matches!(value.chars().next(), Some('`') | Some('@')) {
+                    offenders.push(format!(
+                        "{}/{} line {}: {}",
+                        api.name,
+                        api.version,
+                        i + 1,
+                        raw.trim()
+                    ));
+                }
+                i += 1;
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "vendored spec(s) carry a plain mapping scalar starting with a \
+             YAML-reserved indicator (`` ` `` or `@`) — a strict YAML parser \
+             refuses to load the document; quote the value:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// Line numbers (1-based), in document order, of every `x-camarasim-scenarios`
     /// case whose `input:` **or** `result:` carries an *empty* value — the
     /// documented functional case names an input or an outcome that is blank.
