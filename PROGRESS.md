@@ -1865,6 +1865,26 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-21 — **Correction to the entry immediately below (`241f7e5`): there was NO
+  integration gap. The 12 audit commits were already on `origin/main` (true remote tip
+  `6355b5e`); my local `origin/main` tracking ref was merely stale at `4337e0b` because this
+  container had never run `git fetch`.** The preceding "integration-gap recovery" entry read
+  that un-fetched local tracking ref and wrongly concluded `4337e0b..6355b5e` had never been
+  pushed. The `git push` summary proved otherwise — it reported `6355b5e..241f7e5`, i.e. the
+  remote was already at `6355b5e`, and a subsequent `git fetch` confirms prior passes' merges
+  *did* reach `main`. **Lesson for future passes: `git fetch` first (or read the push range,
+  never the un-fetched local `origin/main`) before diagnosing any integration gap.** What
+  still stands and remains useful: the real tip `6355b5e` was re-verified green this pass —
+  `cargo build --release` exit 0, binary **5,491,864 bytes** (no regression); `cargo test`
+  **3149 passed; 0 failed** — so `main` is confirmed green and the simulator remains
+  feature-complete. Net effect on the remote from this pass: **two docs-only commits**
+  (`241f7e5` + this correction) with no code/spec/behaviour change. **In substance this was
+  an idle verification pass**; the 2026-09-27 / 10-14 decision point is unchanged and
+  human-gated. Future idle passes: `git fetch`, confirm `origin/main` == local tip, and stop
+  WITHOUT committing — do not re-derive a phantom gap from a stale tracking ref, and do not
+  append a duplicate idle note (the decision-point block stands for the whole idle period).
+  (Branch `agent/integration/push-stranded-audit-work` — name retained from the mistaken
+  diagnosis; its substantive content is this correction.)
 - 2026-10-21 — **Integration-gap recovery: 12 completed audit commits were stranded on a
   detached HEAD — never merged to `main` or pushed despite the journal recording them as
   "merged to main and pushed"; re-verified green and fast-forwarded `main` to the real tip.**
