@@ -1740,6 +1740,36 @@ Respect phase order. Preferred next work:
      example was truncated), no new dependency. Next in phase order: device-swap v1 (the
      next stateless Phase 5 stable API; the stateful ones — carrier-billing v0.5,
      blockchain-public-address v0.3 — follow).
+   - ✅ device-swap v1 — verified 2026-10-21 (fourth Phase 5 stable/numbered API;
+     the device counterpart of sim-swap v2). Both operations (`checkDeviceSwap`
+     `POST /check`, `retrieveDeviceSwapDate` `POST /retrieve-date`) are implemented
+     (`src/apis/device_swap/v1.rs`), routed, and well-tested. The two control planes
+     match the handler/spec: the identifier reserved-error-suffix plane and, once
+     resolved, the swap-recency plane (trailing three digits = hours-since-swap;
+     `/check` → `swapped = hoursAgo < maxAge` with `maxAge` a genuine second control
+     plane, `/retrieve-date` → `latestDeviceChange = now − hoursAgo` when inside the
+     fixed 240 h monitored period else `null`), plus the `maxAge` `[1,2400]`
+     OUT_OF_RANGE validation, the genuinely-enforced E.164 pattern, and the
+     two-legged/three-legged identifier resolution. The error-message dimension was
+     already pinned by a prior pass (`vendored_error_example_messages_match_the_handler`,
+     the truncated-identifier fix). **Spec↔code drift found and fixed — the
+     illustrative-timestamp class** (the exact drift fixed on sim-swap v2's
+     `latestSimChange` 2026-10-14; device-swap's error-message pass left the success
+     examples unchecked): the `/retrieve-date` `recentSwap` 200 example presented
+     `latestDeviceChange: "2026-08-02T14:27:08Z"` as a plain response value, but
+     `last_swap_timestamp` returns `rfc3339_utc(now − hoursAgo·3600)` (wall-clock
+     dependent), so that frozen literal can never reproduce. Marked it **illustrative**
+     with a derivation note (its presence as a non-null RFC-3339 UTC instant +
+     `monitoredPeriod` 10 are the contract; the `noRecentSwap` `null` case and the
+     `/check` booleans are reproducible), mirroring sim-swap v2's wording, and added
+     `vendored_success_examples_match_the_handler` (drives both `/check` booleans and
+     both `/retrieve-date` shapes through the real router, pins the reproducible fields
+     as exact objects, and asserts the illustrative timestamp is a non-null RFC-3339
+     UTC instant but ≠ the frozen 2026 literal). Spec + `#[cfg(test)]` change only — no
+     behaviour/response change (the handler was already correct; only the one
+     illustrative timestamp lacked its caveat), no new dependency. Next in phase order:
+     the remaining stateless Phase 5 stable APIs, then the stateful
+     blockchain-public-address v0.3 (carrier-billing v0.5 audited 2026-10-15).
 3. **Deepen `vwip` APIs** (🔧) one endpoint/scenario at a time, in mount order,
    only after the earlier phases are verified. **The per-API vwip verification sweep
    is complete (2026-10-13); further deepening needs the deferred stateful /
@@ -1750,6 +1780,38 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-21 — **illustrative-timestamp class — device-swap v1 `/retrieve-date` `recentSwap` 200 example
+  presented a frozen `latestDeviceChange` literal the wall-clock handler can never return; found & fixed,
+  plus the missing success-example pin.** Per-API audit of device-swap v1 (backlog item 2, the fourth
+  Phase 5 stable API, the device counterpart of sim-swap v2). A prior pass had already pinned this API's
+  inline *error* examples (`vendored_error_example_messages_match_the_handler`, the truncated-identifier
+  class) but — like the vwip 404 pass's precedent — left the *success* examples unchecked, and device-swap
+  had no `vendored_success_examples_match_the_handler` though its direct counterpart sim-swap v2 grew one
+  in the 2026-10-14 audit that found the identical drift on `latestSimChange`. The `/retrieve-date`
+  `recentSwap` example (`specs/device-swap/v1/openapi.yaml:269`) showed
+  `latestDeviceChange: "2026-08-02T14:27:08Z"` as a plain response value, but `last_swap_timestamp`
+  (`src/apis/device_swap/v1.rs:255`) returns `rfc3339_utc(now_unix_secs() − hoursAgo·3600)` (wall-clock
+  dependent), so that frozen epoch can never reproduce — genuine spec↔code drift. Fix, **spec text +
+  `#[cfg(test)]` only**: marked the example `latestDeviceChange` **illustrative** with a derivation note
+  (its *presence* as a non-null RFC-3339 UTC instant + the `monitoredPeriod` literal 10 are the contract;
+  the `noRecentSwap` `null` case and both `/check` booleans are reproducible), mirroring sim-swap v2's exact
+  wording, and added `vendored_success_examples_match_the_handler` — drives both `/check` booleans
+  (`…012`→true, `…365`→false) and both `/retrieve-date` shapes (`…012`→non-null ts + `monitoredPeriod` 10,
+  `…365`→`{latestDeviceChange:null, monitoredPeriod:10}`) through the real router, pins the reproducible
+  fields as exact objects, and asserts the recent-swap timestamp is RFC-3339 UTC but ≠ the frozen 2026
+  literal (guarding against someone "correcting" the example to a literal). No behaviour/response change —
+  the handler was already correct; only the one illustrative example lacked its caveat. Green: `cargo test`
+  → **3144 passed, 0 failed** (+1 new test fn); `cargo build --release` ok; binary = **5,483,672 bytes**
+  (+4,096 vs the prior tip 5,479,576 — one 4 KiB section-padding page crossed by the embedded spec's new
+  illustrative description; the new test is `#[cfg(test)]`, compiled out of the release binary); no new
+  dependency. **Env note:** on arrival HEAD was detached at `1cb749e` == `origin/main` (the prior
+  reserved-indicator pass was pushed), so branched from a synced `main`. **Next pass:** the
+  illustrative-timestamp class is now pinned on device-swap as it is on sim-swap / location-* /
+  quality-on-demand / geofencing; the stable Phase 5 per-API audit continues with the remaining stateless
+  APIs, then the stateful blockchain-public-address v0.3 (carrier-billing v0.5 done 2026-10-15). The other
+  long-standing drift classes (truncated identifier message, was→is / generic-catalog-code messages,
+  `overpassed` 429, minted-id placeholders, stale slice docs, YAML-loadability) remain clean per the last
+  several passes. Branch `agent/device-swap/pin-success-examples`.
 - 2026-10-20 — **reserved-indicator class resolved — three `summary:` plain scalars that *start* with a
   backtick, which strict (pyyaml-class) YAML parsers refuse to load, found & fixed, plus a dependency-free
   guard; a strict parse now succeeds on all 61 specs.** Follow-up to this morning's embedded-colon YAML pass

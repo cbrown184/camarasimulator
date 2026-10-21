@@ -920,4 +920,48 @@ mod tests {
                 .await;
         pin(s, &b, 422, "UNNECESSARY_IDENTIFIER", unnecessary_identifier);
     }
+
+    // --- Spec ↔ handler: inline success-example bodies ---------------------
+
+    /// The vendored spec's 200 success examples, pinned through the real router
+    /// so they can't silently drift (DESIGN §9), mirroring the sim-swap v2
+    /// audit (device-swap is its device counterpart). Both `/check` booleans and
+    /// both `/retrieve-date` shapes are reproducible; `retrieve-date`'s
+    /// `latestDeviceChange` is deliberately **illustrative** (now − hoursAgo,
+    /// wall-clock dependent), so only its presence/absence and the documented
+    /// `monitoredPeriod` literal are part of the contract — this test also proves
+    /// the frozen 2026 timestamp in the spec example is *not* a value the handler
+    /// returns, guarding against someone "correcting" the example to a literal.
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        // `/check` `swapped` example: a recent-swap tail (…012 = 12 h ago) → true.
+        let (status, _, body) = check_ok(r#"{"phoneNumber":"+123456789012"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "swapped": true }));
+
+        // `/check` `notSwapped` example: a tail past the default window → false.
+        let (status, _, body) = check_ok(r#"{"phoneNumber":"+123456789365"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "swapped": false }));
+
+        // `/retrieve-date` `recentSwap` example: a recent-swap tail → a non-null
+        // RFC 3339 UTC timestamp and the documented `monitoredPeriod` literal 10.
+        let (status, _, body) = retrieve_date_ok(r#"{"phoneNumber":"+123456789012"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["monitoredPeriod"], 10); // the vendored example's literal
+        let ts = body["latestDeviceChange"].as_str().expect("a non-null timestamp");
+        assert!(ts.contains('T') && ts.ends_with('Z'), "RFC 3339 UTC, got {ts}");
+        // Illustrative: the handler returns `now − 12 h`, never the spec's frozen
+        // reference epoch — so the example value must not be taken as a literal.
+        assert_ne!(
+            ts, "2026-08-02T14:27:08Z",
+            "the recentSwap example timestamp is illustrative, not a returned literal"
+        );
+
+        // `/retrieve-date` `noRecentSwap` example: a tail past the monitored
+        // period → null, with the same documented `monitoredPeriod` literal 10.
+        let (status, _, body) = retrieve_date_ok(r#"{"phoneNumber":"+123456789365"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "latestDeviceChange": null, "monitoredPeriod": 10 }));
+    }
 }
