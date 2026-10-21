@@ -120,7 +120,16 @@ paths:
               $ref: "#/components/schemas/RetrieveStatusRequestBody"
       responses:
         "200":
-          description: The current consent status for the requested scopes/purpose.
+          description: |
+            The current consent status for the requested scopes/purpose.
+
+            Two example values are **illustrative**, not reproducible literals:
+            the `expirationDate` is wall-clock derived (a valid consent reports
+            `now + 365d`; an `EXPIRED` one `now − d·3600`, `d` = the identifier's
+            trailing three digits), and the `captureUrl` token is a deterministic
+            opaque hash of the (identifier, purpose) pair, which the response
+            example does not pin. Their presence and shape are the contract, not
+            the exact value shown.
           headers:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
@@ -130,7 +139,7 @@ paths:
                 $ref: "#/components/schemas/RetrieveStatusResponseBody"
               examples:
                 valid:
-                  summary: Consent valid for processing (happy-path default, `…000` tail)
+                  summary: Consent valid for processing (happy-path default, `…000` tail). `expirationDate` illustrative (handler returns `now + 365d`).
                   value:
                     statusInfo:
                       - scopes: ["kyc-match:match"]
@@ -138,7 +147,7 @@ paths:
                         statusValidForProcessing: true
                         expirationDate: "2027-08-06T12:00:00Z"
                 pendingWithCapture:
-                  summary: Consent pending, capture URL requested (`…001` tail)
+                  summary: Consent pending, capture URL requested (`…001` tail). `captureUrl` token illustrative (a deterministic opaque hash of identifier+purpose).
                   value:
                     statusInfo:
                       - scopes: ["kyc-match:match"]
@@ -147,7 +156,7 @@ paths:
                         statusReason: PENDING
                     captureUrl: "https://consent.camarasim.example/capture/9f2b1c0a4d5e6f70"
                 expired:
-                  summary: Consent expired (`…004` tail)
+                  summary: Consent expired (`…004` tail). `expirationDate` illustrative (handler returns `now − d·3600`, in the past).
                   value:
                     statusInfo:
                       - scopes: ["kyc-match:match"]
@@ -382,7 +391,11 @@ components:
           description: >-
             Present only when consent is not valid for processing and the request
             set `requestCaptureUrl: true`. A URL where the end user can be
-            redirected to grant the missing consent.
+            redirected to grant the missing consent. The path token is a
+            deterministic opaque hash of the (identifier, purpose) pair (so the
+            same request always yields the same URL without leaking the
+            identifier); any example token is illustrative — its presence and
+            shape are the contract, not the literal shown.
 
     StatusInfoObject:
       type: object
@@ -419,7 +432,11 @@ components:
           format: date-time
           description: >-
             When the consent expires (future for a valid consent, past for an
-            `EXPIRED` one). Omitted for the other not-yet-granted reasons.
+            `EXPIRED` one). Omitted for the other not-yet-granted reasons. The
+            value is wall-clock derived — a valid consent reports `now + 365d`,
+            an `EXPIRED` one `now − d·3600` (`d` = the identifier's trailing
+            three digits) — so any example value is illustrative; its presence
+            and RFC-3339-UTC shape are the contract, not the literal shown.
 
     ConsentInfoError:
       description: >-

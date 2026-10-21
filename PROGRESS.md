@@ -699,6 +699,20 @@ Verified sub-items:
   the router. The 403 `permissionDenied` example intentionally shows the shared
   catalog's canonical message (the auth layer's runtime message is scope-specific),
   so it is not pinned here; the 401/404/409/429/500/503 responses are `$ref`s.
+  **Success-example audit 2026-10-21 (illustrative-value class):** the error-only
+  2026-10-13 pass left the three 200 examples' *values* unchecked. The `valid`
+  (`expirationDate: 2027-08-06T12:00:00Z`) and `expired`
+  (`expirationDate: 2026-07-01T12:00:00Z`) examples froze wall-clock-derived
+  timestamps (`now + 365d` / `now − d·3600`) the handler can never return, and
+  `pendingWithCapture`'s `captureUrl` token (`…/9f2b1c0a4d5e6f70`) is a
+  deterministic opaque hash of (identifier, purpose) the example does not pin to a
+  phone number — both illustrative, not reproducible. Marked all three illustrative
+  (200 `description`, the three example `summary`s, the `expirationDate`/`captureUrl`
+  schema-property `description`s) and added `vendored_success_examples_match_the_handler`
+  pinning all three through the router (reproducible scalars + exact key set exact;
+  timestamps RFC-3339-UTC, on the correct side of `now`, ≠ the frozen literals;
+  capture token = the deterministic `capture_url(...)` yet ≠ the example token).
+  Spec text + `#[cfg(test)]` only; no behaviour/response change; no new dependency.
 - 🔧 iot-sim-fraud-prevention — verified 2026-10-13: all three modelled operations
   over both CAMARA facets — `bindDeviceImei` (`POST /bind`), `query` (`POST /query`),
   `unBindDeviceImei` (`POST /unbind`), each carrying `IMEIBIND` and `AREALIMIT` — are
@@ -1794,6 +1808,43 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-21 — **illustrative-value class — consent-info vwip 200 examples froze two wall-clock
+  `expirationDate` literals and an opaque `captureUrl` token the handler can never reproduce; found
+  & fixed, plus the missing success-example pin.** Follow-up to today's device-authenticity / device-swap
+  passes — same error-only-audit gap, the explicitly named next candidate. consent-info's own 2026-10-13
+  pass added `vendored_error_example_messages_match_the_handler` but left the three 200 examples' *values*
+  unchecked. Two drift sub-classes in the same success block: (1) `expirationDate` —
+  `specs/consent-info/vwip/openapi.yaml` `valid` (`2027-08-06T12:00:00Z`) and `expired`
+  (`2026-07-01T12:00:00Z`) showed frozen timestamps, but the handler
+  (`src/apis/consent_info/vwip.rs:206-210`) stamps a valid consent's expiry `now + 365·86400` and an
+  `EXPIRED` one `now − d·3600` (`d` = identifier trailing three digits), both wall-clock dependent —
+  those epochs can never reproduce; (2) `captureUrl` — `pendingWithCapture` showed
+  `…/capture/9f2b1c0a4d5e6f70`, but `capture_url` (`:237`) is an FNV-1a hash of `identifier|purpose`
+  and the example pins no phone number, so the token is illustrative (computed: no plausible identifier
+  for the example's `dpv:FraudPreventionAndDetection` purpose yields that token). Fix, **spec text +
+  `#[cfg(test)]` only**: marked all three illustrative — the 200 `description` (both derivations spelled
+  out), each example `summary`, and the `expirationDate` + `captureUrl` schema-property `description`s
+  (presence + RFC-3339-UTC shape / opaque-token shape are the contract, not the literal) — mirroring the
+  device-authenticity/device-swap/sim-swap wording, and added `vendored_success_examples_match_the_handler`
+  driving all three documented requests (`…000` valid, `…001` pending+capture, `…004` expired) through
+  the real router: reproducible scalars (`scopes`/`purpose`/`statusValidForProcessing`/`statusReason`) and
+  the exact key set pinned exactly; both timestamps asserted RFC-3339-UTC, on the correct side of a
+  same-shape `now` reference (valid in the future, expired in the past, valid > expired), and ≠ the frozen
+  spec literals; the capture token asserted equal to the deterministic `capture_url(ident, purpose)` yet ≠
+  the illustrative example token (guards both a renamed/stray field and a "corrected" frozen literal). No
+  behaviour/response change — the handler was already correct; only the three examples lacked their caveat
+  and the success pin. Green: `cargo test` → **3146 passed, 0 failed** (+1 new test fn); `cargo build
+  --release` ok; binary = **5,483,672 bytes** (identical to the prior tip `bd2b698` — the added embedded-spec
+  description text is below the 4 KiB section-padding granularity; the new test is `#[cfg(test)]`, compiled
+  out of the release binary); no new dependency. **Env note:** on arrival HEAD was detached at `bd2b698` ==
+  `origin/main` (today's device-authenticity pass was pushed), so branched from a synced `main`. **Next
+  pass:** the illustrative-value class is now pinned on consent-info as on device-authenticity / device-swap
+  / sim-swap / device-identifier / location-* / quality-on-demand / geofencing. The remaining large
+  candidate the device-authenticity note flagged is **sponsored-data (17 timestamps)** — each to be checked
+  for handler-stamped vs echoed/request before pinning. Other long-standing drift classes (truncated
+  identifier message, generic-catalog-code messages, `overpassed` 429, minted-id placeholders, stale slice
+  docs, YAML-loadability) remain clean per the last several passes. Branch
+  `agent/consent-info/pin-success-examples`.
 - 2026-10-21 — **illustrative-timestamp class — device-authenticity vwip `allowed`/`stolen` 200 examples
   (and the `lastChecked`/`reportedDate` schema examples) froze two wall-clock timestamps the handler can
   never return; found & fixed, plus the missing success-example pin.** Follow-up to this morning's

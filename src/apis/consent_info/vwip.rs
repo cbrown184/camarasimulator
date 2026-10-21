@@ -556,6 +556,125 @@ mod tests {
         assert!(info["expirationDate"].as_str().unwrap().ends_with('Z'));
     }
 
+    /// Pin the three vendored 200 examples (`specs/consent-info/vwip/openapi.yaml`)
+    /// against the live router. Two of the shown values are **illustrative**, not
+    /// reproducible literals: the `expirationDate` is wall-clock derived (valid →
+    /// `now + 365d`, EXPIRED → `now − d·3600`) and the `captureUrl` token is a
+    /// deterministic opaque hash of (identifier, purpose), which the example does
+    /// not pin to a phone number — so the frozen literals (`2027-08-06T12:00:00Z`,
+    /// `2026-07-01T12:00:00Z`, `…/capture/9f2b1c0a4d5e6f70`) can never reproduce.
+    /// Prior tests checked the status *mapping* and that timestamps end in `Z`, so
+    /// a stray/renamed field or a "corrected" frozen literal could slip past. Drive
+    /// each documented request through the real router and pin each body: the
+    /// reproducible scalars exactly, the exact key set, the timestamps present /
+    /// RFC-3339-UTC / on the correct side of `now` / ≠ the frozen spec literals, and
+    /// the capture token equal to the deterministic `capture_url(...)` yet ≠ the
+    /// illustrative example token.
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        use std::collections::BTreeSet;
+
+        // The frozen literals the spec shows purely to convey the shape.
+        const FROZEN_VALID_EXP: &str = "2027-08-06T12:00:00Z";
+        const FROZEN_EXPIRED_EXP: &str = "2026-07-01T12:00:00Z";
+        const FROZEN_CAPTURE_TOKEN: &str = "9f2b1c0a4d5e6f70";
+        const SCOPE: &str = "kyc-match:match";
+        const PURPOSE: &str = "dpv:FraudPreventionAndDetection";
+
+        // A reference `now` in the handler's own fixed shape. Both derivations are
+        // ≥ 4h from now, so a ±1s clock tick between reads is irrelevant to the
+        // lexical before/after comparisons (the format sorts chronologically).
+        let now_str = rfc3339_utc(now_unix_secs());
+
+        // `valid` example — `…000` tail: future expiry, no statusReason, no captureUrl.
+        let (status, _, body) = retrieve_ok(&format!(
+            r#"{{"phoneNumber":"+123456789000","scopes":["{SCOPE}"],"purpose":"{PURPOSE}","requestCaptureUrl":false}}"#
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.get("captureUrl").is_none(), "valid consent reports no captureUrl");
+        let info = &body["statusInfo"][0];
+        assert_eq!(info["scopes"][0], SCOPE);
+        assert_eq!(info["purpose"], PURPOSE);
+        assert_eq!(info["statusValidForProcessing"], true);
+        let valid_exp = info["expirationDate"].as_str().unwrap();
+        assert!(is_rfc3339_utc(valid_exp), "valid expirationDate not RFC-3339 UTC: {valid_exp}");
+        assert_ne!(valid_exp, FROZEN_VALID_EXP, "frozen valid expiry must not reproduce");
+        assert!(valid_exp > now_str.as_str(), "valid expiry {valid_exp} must be in the future (> {now_str})");
+        let keys: BTreeSet<&str> = info.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["scopes", "purpose", "statusValidForProcessing", "expirationDate"].into_iter().collect(),
+            "valid example has an unexpected field set"
+        );
+
+        // `pendingWithCapture` example — `…001` tail: PENDING, no expiry, opaque captureUrl.
+        let ident = "+123456789001";
+        let (status, _, body) = retrieve_ok(&format!(
+            r#"{{"phoneNumber":"{ident}","scopes":["{SCOPE}"],"purpose":"{PURPOSE}","requestCaptureUrl":true}}"#
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let capture = body["captureUrl"].as_str().unwrap();
+        // Deterministic: equals the handler's own hash of (identifier, purpose),
+        // and the opaque token is illustrative, not the frozen example literal.
+        assert_eq!(capture, capture_url(ident, PURPOSE), "captureUrl must be the deterministic hash URL");
+        assert!(!capture.contains(FROZEN_CAPTURE_TOKEN), "frozen capture token must not reproduce");
+        let info = &body["statusInfo"][0];
+        assert_eq!(info["scopes"][0], SCOPE);
+        assert_eq!(info["purpose"], PURPOSE);
+        assert_eq!(info["statusValidForProcessing"], false);
+        assert_eq!(info["statusReason"], "PENDING");
+        assert!(info.get("expirationDate").is_none(), "PENDING has no expiry");
+        let keys: BTreeSet<&str> = info.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["scopes", "purpose", "statusValidForProcessing", "statusReason"].into_iter().collect(),
+            "pendingWithCapture entry has an unexpected field set"
+        );
+
+        // `expired` example — `…004` tail: EXPIRED, past expiry, no captureUrl.
+        let (status, _, body) = retrieve_ok(&format!(
+            r#"{{"phoneNumber":"+123456789004","scopes":["{SCOPE}"],"purpose":"{PURPOSE}","requestCaptureUrl":false}}"#
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.get("captureUrl").is_none(), "expired consent without a capture request reports no captureUrl");
+        let info = &body["statusInfo"][0];
+        assert_eq!(info["scopes"][0], SCOPE);
+        assert_eq!(info["purpose"], PURPOSE);
+        assert_eq!(info["statusValidForProcessing"], false);
+        assert_eq!(info["statusReason"], "EXPIRED");
+        let expired_exp = info["expirationDate"].as_str().unwrap();
+        assert!(is_rfc3339_utc(expired_exp), "expired expirationDate not RFC-3339 UTC: {expired_exp}");
+        assert_ne!(expired_exp, FROZEN_EXPIRED_EXP, "frozen expired expiry must not reproduce");
+        assert!(expired_exp < now_str.as_str(), "expired expiry {expired_exp} must be in the past (< {now_str})");
+        assert!(valid_exp > expired_exp, "valid expiry {valid_exp} must be after expired expiry {expired_exp}");
+        let keys: BTreeSet<&str> = info.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["scopes", "purpose", "statusValidForProcessing", "statusReason", "expirationDate"].into_iter().collect(),
+            "expired example has an unexpected field set"
+        );
+    }
+
+    /// A string is RFC-3339 UTC in the handler's fixed `YYYY-MM-DDTHH:MM:SSZ`
+    /// second-precision shape: 20 bytes, trailing `Z`, digits and separators where
+    /// the format requires them.
+    fn is_rfc3339_utc(s: &str) -> bool {
+        let b = s.as_bytes();
+        b.len() == 20
+            && b[4] == b'-'
+            && b[7] == b'-'
+            && b[10] == b'T'
+            && b[13] == b':'
+            && b[16] == b':'
+            && b[19] == b'Z'
+            && [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18]
+                .iter()
+                .all(|&i| b[i].is_ascii_digit())
+    }
+
     // --- requestCaptureUrl control plane -----------------------------------
 
     #[tokio::test]
