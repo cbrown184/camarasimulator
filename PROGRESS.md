@@ -1865,6 +1865,34 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-21 — **Integration-gap recovery: 12 completed audit commits were stranded on a
+  detached HEAD — never merged to `main` or pushed despite the journal recording them as
+  "merged to main and pushed"; re-verified green and fast-forwarded `main` to the real tip.**
+  On session entry HEAD was **detached** at `6355b5e` (the commit of the previous journal
+  entry), a clean 12-commit **fast-forward ahead** of `main` = `origin/main` = `4337e0b`
+  (`git merge-base --is-ancestor main HEAD` → yes; `HEAD..main` empty; `main..HEAD` = 12
+  commits `4337e0b..6355b5e`). Those twelve — the whole vwip illustrative-timestamp sweep
+  (`fad99e7` device-swap … `6355b5e` close-sweep, incl. device-authenticity / consent-info /
+  sponsored-data ×2 / network-health-assessment / capabilities-and-restrictions) plus the
+  YAML-loadability quoting fixes (`0127503`, `1cb749e`), the qos-booking generic-409 message
+  fix (`fc92ea2`) and the two-spec 404 "was→is not found" fix (`0fe8574`) — are exactly the
+  work the last several entries describe as integrated, but git shows they never reached
+  `main`: a prior pass committed on a detached HEAD and the merge+push step did not take
+  effect (container reclaimed or a silent push failure). **No divergence or revert** — `main`
+  is a strict ancestor, so this is an unambiguous fast-forward, not an override of any human
+  reset. Diff is docs/spec/test-only: `git diff main..HEAD -- src/` adds 8
+  `#[test]`/`#[tokio::test]` fns + `registry.rs` contract tests + frozen-constant assertions
+  and RFC-3339 helpers inside test modules, with **no added/changed `pub fn` / `impl` /
+  `struct`** — matching every entry's "no behaviour change". Re-verified the real tip green
+  before integrating: `cargo build --release` exit 0, binary **5,491,864 bytes** (identical to
+  the recorded size — no regression); `cargo test` **3149 passed; 0 failed** (exit 0).
+  Fast-forwarded `main` → this tip (+ this entry) and pushed `origin/main`. Branch
+  `agent/integration/push-stranded-audit-work`. **Next pass:** the audit backlog is now
+  actually on `main`; the 2026-09-27 / 10-14 decision point stands — remaining work (the vwip
+  stateful / provisioning-worker layer) is human-gated. An idle pass should first confirm
+  `origin/main` still equals the local tip (i.e. this integration held) and otherwise stop
+  without committing; if the tip has again been reset behind completed work, that is a
+  recurring integration/push failure worth escalating rather than silently re-pushing.
 - 2026-10-21 — **vwip illustrative-timestamp sweep closed — the three remaining
   explicitly-named candidates carry request-derived windows, not wall-clock `now`, so
   there is no drift to pin; docs-only.** The last three passes' "Next pass" note flagged
