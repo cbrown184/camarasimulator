@@ -1449,6 +1449,68 @@ mod tests {
         assert_ne!(body["startTime"], body["endTime"]);
     }
 
+    /// Guard against the vendored spec's lifecycle 200/201 examples drifting back
+    /// to *reproducible-looking* window instants. `startSponsorship`,
+    /// `getSessionStatus` and `revokeSponsorship` all stamp `startTime`/`endTime`
+    /// from the wall clock (`startTime` = now, `endTime` = now + duration; the
+    /// read/revoke views echo the stored grant), so the frozen
+    /// `2024-06-01T00:00:00Z` / `…00:10:00Z` literals shown in the spec examples
+    /// can never reproduce through the real router. Each example is therefore
+    /// marked **illustrative** in `specs/sponsored-data/vwip/openapi.yaml`; this
+    /// pins the actual contract (presence + RFC-3339-UTC shape + `start < end`
+    /// ordering) and asserts the illustrative literals are not returned.
+    #[tokio::test]
+    async fn vendored_lifecycle_example_timestamps_are_illustrative() {
+        // The frozen instants the spec examples display (startSponsorship `created`,
+        // getSessionStatus `active`/`exhausted`, revokeSponsorship `revoked`).
+        const EXAMPLE_START: &str = "2024-06-01T00:00:00Z";
+        const EXAMPLE_END: &str = "2024-06-01T00:10:00Z";
+
+        // An RFC-3339 UTC instant of the fixed `YYYY-MM-DDTHH:MM:SSZ` width the
+        // handler emits (so string ordering is chronological ordering).
+        fn assert_rfc3339_utc(v: &Value) -> String {
+            let s = v.as_str().expect("timestamp is a string");
+            assert_eq!(s.len(), 20, "{s} is not fixed-width RFC-3339 UTC");
+            assert!(s.ends_with('Z'), "{s} is not UTC (`Z`)");
+            assert_eq!(&s[10..11], "T", "{s} missing date/time `T`");
+            s.to_string()
+        }
+
+        // --- startSponsorship 201 `created` ---------------------------------
+        let create_tok = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) =
+            post(Some(&create_tok), &body_for("+123456789012", None, None), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let start = assert_rfc3339_utc(&created["startTime"]);
+        let end = assert_rfc3339_utc(&created["endTime"]);
+        assert!(start < end, "endTime must follow startTime ({start} !< {end})");
+        assert_ne!(start, EXAMPLE_START, "frozen example startTime reproduced");
+        assert_ne!(end, EXAMPLE_END, "frozen example endTime reproduced");
+        let session = created["sessionId"].as_str().unwrap().to_string();
+
+        // --- getSessionStatus 200 (reads back the stored wall-clock window) --
+        let read_tok = mint_token(READ_SCOPE).await;
+        let (status, _, read) =
+            get_status(Some(&read_tok), &status_url(SPONSOR, CAMPAIGN, &session), None).await;
+        assert_eq!(status, StatusCode::OK);
+        // The read echoes exactly the window stamped at start — still illustrative.
+        assert_eq!(read["startTime"], created["startTime"]);
+        assert_eq!(read["endTime"], created["endTime"]);
+        assert_ne!(assert_rfc3339_utc(&read["startTime"]), EXAMPLE_START);
+        assert_ne!(assert_rfc3339_utc(&read["endTime"]), EXAMPLE_END);
+
+        // --- revokeSponsorship 200 (echoes the evicted grant's window) -------
+        let del_tok = mint_token(DELETE_SCOPE).await;
+        let (status, _, revoked) =
+            delete_revoke(Some(&del_tok), &revoke_url(SPONSOR, CAMPAIGN, &session), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(revoked["requestResult"], "successful_revocation");
+        assert_eq!(revoked["startTime"], created["startTime"]);
+        assert_eq!(revoked["endTime"], created["endTime"]);
+        assert_ne!(assert_rfc3339_utc(&revoked["startTime"]), EXAMPLE_START);
+        assert_ne!(assert_rfc3339_utc(&revoked["endTime"]), EXAMPLE_END);
+    }
+
     #[tokio::test]
     async fn explicit_data_volume_is_reflected() {
         let token = mint_token(CREATE_SCOPE).await;

@@ -154,7 +154,14 @@ paths:
                   callbackToken: 550e8400-e29b-41d4-a716-446655440000
       responses:
         "201":
-          description: Successful operation. New sponsorship session created.
+          description: >-
+            Successful operation. New sponsorship session created. The
+            `startTime`/`endTime` window is stamped from the wall clock at the
+            moment of the call (`startTime` = now, `endTime` = now + duration
+            minutes), so the instants in the example below are **illustrative**:
+            their presence, RFC-3339-UTC shape, and the
+            `endTime = startTime + duration` relationship are the contract, not
+            the frozen literal values.
           headers:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
@@ -164,7 +171,7 @@ paths:
                 $ref: "#/components/schemas/SponsorshipSession"
               examples:
                 created:
-                  summary: A granted session (10-minute default window, 50 MB)
+                  summary: A granted session (10-minute default window, 50 MB); timestamps illustrative (wall-clock-derived)
                   value:
                     sponsorId: acme@sponsor.example.com
                     campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
@@ -298,7 +305,13 @@ paths:
             $ref: "#/components/schemas/SessionId"
       responses:
         "200":
-          description: Successful operation. The session's current status.
+          description: >-
+            Successful operation. The session's current status. The
+            `startTime`/`endTime` window echoes the stored grant, which was
+            stamped from the wall clock when the session was started, so the
+            instants in the examples below are **illustrative**: their presence
+            and RFC-3339-UTC shape are the contract, not the frozen literal
+            values.
           headers:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
@@ -308,7 +321,7 @@ paths:
                 $ref: "#/components/schemas/SponsorshipSessionStatus"
               examples:
                 active:
-                  summary: An active session with data remaining
+                  summary: An active session with data remaining; timestamps illustrative (wall-clock-derived)
                   value:
                     sponsorId: acme@sponsor.example.com
                     campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
@@ -320,7 +333,7 @@ paths:
                     dataVolumeConsumed: 12
                     dataVolumeAvailable: 38
                 exhausted:
-                  summary: An inactive session that used up its grant
+                  summary: An inactive session that used up its grant; timestamps illustrative (wall-clock-derived)
                   value:
                     sponsorId: acme@sponsor.example.com
                     campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
@@ -402,7 +415,13 @@ paths:
             $ref: "#/components/schemas/SessionId"
       responses:
         "200":
-          description: Session revoked successfully. The revoked session is evicted.
+          description: >-
+            Session revoked successfully. The revoked session is evicted. The
+            `startTime`/`endTime` window echoes the evicted grant, which was
+            stamped from the wall clock when the session was started, so the
+            instants in the example below are **illustrative**: their presence
+            and RFC-3339-UTC shape are the contract, not the frozen literal
+            values.
           headers:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
@@ -412,7 +431,7 @@ paths:
                 $ref: "#/components/schemas/RevokedSponsorship"
               examples:
                 revoked:
-                  summary: A revoked session
+                  summary: A revoked session; timestamps illustrative (wall-clock-derived)
                   value:
                     sponsorId: acme@sponsor.example.com
                     campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
@@ -1016,11 +1035,19 @@ components:
         startTime:
           allOf:
             - $ref: "#/components/schemas/Time"
-          description: When the sponsorship started.
+          description: >-
+            When the sponsorship started. CamaraSim stamps this from the wall
+            clock at the moment the session is started, so the value is
+            **illustrative** — its presence and RFC-3339-UTC shape are the
+            contract, not the literal.
         endTime:
           allOf:
             - $ref: "#/components/schemas/Time"
-          description: When the sponsorship ends (`startTime + duration` minutes).
+          description: >-
+            When the sponsorship ends (`startTime + duration` minutes). Derived
+            from the wall-clock `startTime`, so the value is **illustrative** —
+            its presence and RFC-3339-UTC shape are the contract, not the
+            literal.
         sponsoredDataVolume:
           type: integer
           minimum: 1
@@ -1051,11 +1078,19 @@ components:
         startTime:
           allOf:
             - $ref: "#/components/schemas/Time"
-          description: When the sponsorship started.
+          description: >-
+            When the sponsorship started. CamaraSim stamps this from the wall
+            clock at the moment the session is started, so the value is
+            **illustrative** — its presence and RFC-3339-UTC shape are the
+            contract, not the literal.
         endTime:
           allOf:
             - $ref: "#/components/schemas/Time"
-          description: When the sponsorship ends (`startTime + duration` minutes).
+          description: >-
+            When the sponsorship ends (`startTime + duration` minutes). Derived
+            from the wall-clock `startTime`, so the value is **illustrative** —
+            its presence and RFC-3339-UTC shape are the contract, not the
+            literal.
         sessionStatus:
           type: string
           description: Whether the session is still serving sponsored data.
@@ -1114,11 +1149,19 @@ components:
         startTime:
           allOf:
             - $ref: "#/components/schemas/Time"
-          description: When the sponsorship started.
+          description: >-
+            When the sponsorship started. CamaraSim stamps this from the wall
+            clock at the moment the session is started, so the value is
+            **illustrative** — its presence and RFC-3339-UTC shape are the
+            contract, not the literal.
         endTime:
           allOf:
             - $ref: "#/components/schemas/Time"
-          description: When the sponsorship was scheduled to end (`startTime + duration` minutes).
+          description: >-
+            When the sponsorship was scheduled to end (`startTime + duration`
+            minutes). Derived from the wall-clock `startTime`, so the value is
+            **illustrative** — its presence and RFC-3339-UTC shape are the
+            contract, not the literal.
         requestResult:
           type: string
           description: The outcome of the revoke request.

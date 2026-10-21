@@ -1808,6 +1808,45 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-21 — **illustrative-timestamp class — sponsored-data vwip sponsorship-lifecycle 200/201
+  examples froze a wall-clock `startTime`/`endTime` window the handler can never reproduce; found &
+  fixed (lifecycle facet), plus the missing success-example pin.** The explicitly-named next candidate
+  from today's consent-info note ("sponsored-data (17 timestamps) — each to be checked for
+  handler-stamped vs echoed/request before pinning"). Checked all 17: the lone `Time` schema example
+  (`2024-06-01T00:00:00Z`) is a legitimate **format** illustration (kept); the other 16 are response
+  examples, **none echoed from the request — all wall-clock-derived**. Split on the two timestamp
+  derivations: this pass took the **sponsorship-lifecycle facet** (8 timestamps across 4 examples) whose
+  window is `startTime = now` / `endTime = now + duration` — `startSponsorship` 201 `created`
+  (`build_response`, `src/apis/sponsored_data/vwip.rs:419-420`), and `getSessionStatus` 200
+  `active`/`exhausted` (`:517-518`) + `revokeSponsorship` 200 `revoked` (`:601-602`), both echoing the
+  grant stored at start. The spec examples showed `startTime: 2024-06-01T00:00:00Z` /
+  `endTime: …T00:10:00Z` as plain response values, but through the real router `now` is wall-clock, so
+  those frozen instants can never reproduce (genuine spec↔code drift — the `…00:10:00` tail merely
+  happens to match the 10-min default window). Fix, **spec text + `#[cfg(test)]` only**: marked the
+  window illustrative — the three 200/201 response `description`s (derivation spelled out), each of the
+  four example `summary`s, and the `startTime`/`endTime` schema-property `description`s on
+  `SponsorshipSession`/`SponsorshipSessionStatus`/`RevokedSponsorship` (presence + RFC-3339-UTC shape +
+  `end = start + duration` ordering are the contract, not the literal), mirroring the
+  device-authenticity / consent-info / sim-swap wording. Added
+  `vendored_lifecycle_example_timestamps_are_illustrative`: starts a session, reads it back, and revokes
+  it through the real router, pinning each `startTime`/`endTime` as fixed-width RFC-3339 UTC with
+  `start < end`, asserting the read/revoke views echo the start window exactly, and asserting none equals
+  the frozen spec literals (guards a "corrected" frozen value and a renamed/stray field). The existing
+  `build_response_sets_the_window_from_duration` already pins the exact `+duration` derivation under an
+  injected clock, so this adds only the through-router anti-drift guard. No behaviour/response change —
+  the handler was already correct; only the examples lacked their caveat and the success pin. Green:
+  `cargo test` → **3147 passed, 0 failed** (+1 new test fn); `cargo build --release` ok; binary =
+  **5,487,768 bytes** (+4,096 over the prior tip `5690794`'s 5,483,672 — one 4 KiB section-padding step
+  from the added embedded-spec description text; the new test is `#[cfg(test)]`, compiled out); no new
+  dependency. **Env note:** on arrival HEAD was detached at `5690794` == `origin/main` (the consent-info
+  pass was pushed), so branched from a synced `main`. **Next pass:** the sponsored-data **campaign facet**
+  — `getCampaignStatus` 200 `activePrepaid`/`completedExhausted`/`pausedPostpaid` (6 timestamps,
+  `campaign_status_body` `:701-706`: `start = now − 24h`, `end = now ± 24h/1h`) and `manageCampaign` 200
+  `paused` (1 timestamp, `manage_campaign_body` `:1033`: `startTime = now`) — same illustrative class, a
+  different (`now ± offset`) derivation, left as the documented sub-step. Other long-standing drift
+  classes (truncated identifier message, generic-catalog-code messages, minted-id placeholders, stale
+  slice docs, YAML-loadability) remain clean per the last several passes. Branch
+  `agent/sponsored-data/pin-lifecycle-timestamps`.
 - 2026-10-21 — **illustrative-value class — consent-info vwip 200 examples froze two wall-clock
   `expirationDate` literals and an opaque `captureUrl` token the handler can never reproduce; found
   & fixed, plus the missing success-example pin.** Follow-up to today's device-authenticity / device-swap
