@@ -480,6 +480,12 @@ Verified sub-items:
   partly-supported) and added a `vendored_success_example_matches_the_mapping` test
   that pins it so it can't drift again. All error-case examples were already
   byte-accurate.
+  - ✅ illustrative-timestamp follow-up 2026-10-21: the 200 `startTime`/`endTime`
+    are echoed verbatim from the request window (`vwip.rs:299-302`), not wall-clock
+    `now`, so they are reproducible and are **not** the illustrative-timestamp drift
+    class fixed on device-authenticity / network-health-assessment / etc. The echo is
+    already pinned through the router (`returns_one_cell_per_geohash`). Nothing to
+    change.
 - 🔧 qos-booking — verified 2026-10-12: all four modelled operations
   (`createBooking`, `getBooking`, `deleteBooking`, `retrieveBookingByDevice`)
   are implemented, tested, and documented in `specs/qos-booking/vwip/openapi.yaml`;
@@ -552,6 +558,12 @@ Verified sub-items:
   added a `vendored_success_example_matches_the_mapping` test pinning the exact
   documented records + `totalCount: 3` so it can't drift again. All 400 error
   examples already matched the handler.
+  - ✅ illustrative-timestamp follow-up 2026-10-21: each slot's 200
+    `startDate`/`endDate` is derived deterministically from the request window via
+    `rfc3339_utc(slot_start/slot_end)` (`vwip.rs:369-370`), not wall-clock `now`, so
+    the windows are reproducible and are **not** the illustrative-timestamp drift
+    class. The slots are already pinned (`vendored_success_example_matches_the_mapping`
+    and the page tests). Nothing to change.
 - 🔧 optimal-edge-discovery — verified 2026-10-12: both modelled operations
   (`discoverOptimalEdge`, `POST …/retrieve-optimal-edge-cloud-zones`; `getRegions`,
   `GET …/regions`) implemented, routed, and well-tested. **Spec↔code drift found
@@ -985,6 +997,11 @@ Verified sub-items:
   This advances the vwip audit cursor to the next API (network-access-devices).
   Spec + `#[cfg(test)]` change (no behaviour/response change — the handler was
   already correct; only the one success example was wrong); no new dependency.
+  - ✅ illustrative-timestamp follow-up 2026-10-21: the 200 `startTime`/`endTime`
+    are echoed verbatim from the request window (`vwip.rs:403-404`), not wall-clock
+    `now`, so they are reproducible and are **not** the illustrative-timestamp drift
+    class. The echo is already pinned by the through-router
+    `vendored_success_example_matches_the_handler`. Nothing to change.
 - 🔧 network-access-devices — verified 2026-10-13: all five modelled operations
   over the full device-listing + stateful reboot-request lifecycle —
   `getNetworkAccessDevices` (`GET /network-access-devices`),
@@ -1848,6 +1865,36 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-21 — **vwip illustrative-timestamp sweep closed — the three remaining
+  explicitly-named candidates carry request-derived windows, not wall-clock `now`, so
+  there is no drift to pin; docs-only.** The last three passes' "Next pass" note flagged
+  population-density-data / predictive-connectivity-data / network-traffic-analysis for a
+  handler-stamped-vs-echoed check before any timestamp pin. Checked all three at the
+  handler: population-density-data echoes `req.start_time`/`req.end_time` straight into the
+  200 body (`src/apis/population_density_data/vwip.rs:299-302`); predictive-connectivity-data
+  echoes them likewise (`src/apis/predictive_connectivity_data/vwip.rs:403-404`);
+  network-traffic-analysis derives each slot's `startDate`/`endDate` deterministically from
+  the request window via `rfc3339_utc(slot_start/slot_end)`
+  (`src/apis/network_traffic_analysis/vwip.rs:369-370`). **None reads the wall clock**, so
+  their success-example windows are reproducible — they are *not* the illustrative class
+  fixed on device-authenticity / consent-info / sponsored-data / network-health-assessment /
+  capabilities-and-restrictions — and each is **already** pinned through the router
+  (pop-density `returns_one_cell_per_geohash`; predictive
+  `vendored_success_example_matches_the_handler`; network-traffic
+  `vendored_success_example_matches_the_mapping` + its page tests). So there is nothing to
+  fix or add: no code/spec/test change. This entry closes the recurring breadcrumb so the
+  next pass does not re-check these three or wrongly mark a request-derived window
+  illustrative; device-visit-location's two timestamps stand as previously assessed (schema
+  format examples only). **With this, the vwip illustrative-timestamp sweep is complete.**
+  Docs-only (PROGRESS.md — not in the build graph: `grep -rn PROGRESS src/` finds only the
+  unrelated `PROGRESSION` constant), so the prior tip `29e231d` carries its green state over
+  unchanged (3149 tests passing, release binary 5,491,864 bytes; no Rust touched, so a cold
+  full rebuild+test for a markdown-only edit was deliberately not re-run). Branch
+  `agent/population-density-data/close-timestamp-sweep`. **Next pass:** the vwip
+  illustrative-timestamp drift class is exhausted. Remaining standing work is the
+  2026-09-27/10-14 decision point above (human-gated); other long-standing drift classes
+  (truncated identifier message, generic-catalog-code messages, minted-id placeholders,
+  stale slice docs, YAML-loadability) remain clean per the last several passes.
 - 2026-10-21 — **illustrative-timestamp class — capabilities-and-restrictions vwip
   `postServiceCapability` 201 `info` example froze `createdAt`/`lastModifiedAt`
   (`2025-05-09T14:25:38Z`) while the handler stamps both with `now`; found & fixed,
