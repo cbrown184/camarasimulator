@@ -507,7 +507,14 @@ paths:
             $ref: "#/components/schemas/CampaignId"
       responses:
         "200":
-          description: Successful operation. The campaign's current status.
+          description: >-
+            Successful operation. The campaign's current status. The
+            `startTime`/`endTime` window is stamped from the wall clock at the
+            moment of the call (`startTime` = now − 24 h; `endTime` = now + 24 h
+            while the campaign is ongoing, or now − 1 h once it has completed), so
+            the literal instants in the examples below are **illustrative** — their
+            presence, RFC-3339-UTC shape and `startTime < endTime` ordering are the
+            contract, not the values.
           headers:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
@@ -517,7 +524,9 @@ paths:
                 $ref: "#/components/schemas/CampaignStatus"
               examples:
                 activePrepaid:
-                  summary: An active prepaid campaign with its full allotment remaining
+                  summary: >-
+                    An active prepaid campaign with its full allotment remaining
+                    (`startTime`/`endTime` illustrative — wall-clock derived)
                   value:
                     sponsorId: acme@sponsor.example.com
                     campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
@@ -530,7 +539,9 @@ paths:
                     remainingDataVolume: 1000
                     completionReason: not_available
                 completedExhausted:
-                  summary: A completed prepaid campaign that used up its contracted data
+                  summary: >-
+                    A completed prepaid campaign that used up its contracted data
+                    (`startTime`/`endTime` illustrative — wall-clock derived)
                   value:
                     sponsorId: acme@sponsor.example.com
                     campaignId: 123e4567-e89b-12d3-a456-426614174010@sponsor.example.com
@@ -543,7 +554,9 @@ paths:
                     remainingDataVolume: 0
                     completionReason: data_exhausted
                 pausedPostpaid:
-                  summary: A paused postpaid campaign (no contracted ceiling)
+                  summary: >-
+                    A paused postpaid campaign (no contracted ceiling)
+                    (`startTime`/`endTime` illustrative — wall-clock derived)
                   value:
                     sponsorId: acme@sponsor.example.com
                     campaignId: 123e4567-e89b-12d3-a456-426614174003@sponsor.example.com
@@ -849,7 +862,12 @@ paths:
                   action: pause
       responses:
         "200":
-          description: The campaign management action was acknowledged.
+          description: >-
+            The campaign management action was acknowledged. `startTime` is
+            stamped from the wall clock (now) at the moment the command is
+            acknowledged, so the literal instant in the example below is
+            **illustrative** — its presence and RFC-3339-UTC shape are the
+            contract, not the value.
           headers:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
@@ -859,7 +877,8 @@ paths:
                 $ref: "#/components/schemas/ManageCampaignResult"
               examples:
                 paused:
-                  summary: Campaign paused
+                  summary: >-
+                    Campaign paused (`startTime` illustrative — wall-clock derived)
                   value:
                     sponsorId: acme@sponsor.example.com
                     campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
@@ -1249,11 +1268,19 @@ components:
         startTime:
           allOf:
             - $ref: "#/components/schemas/Time"
-          description: When the campaign started.
+          description: >-
+            When the campaign started. CamaraSim stamps this from the wall clock
+            (now − 24 h) at the moment of the call, so the value is
+            **illustrative** — its presence and RFC-3339-UTC shape are the
+            contract, not the literal.
         endTime:
           allOf:
             - $ref: "#/components/schemas/Time"
-          description: When the campaign ends (future while ongoing; past once completed).
+          description: >-
+            When the campaign ends (future while ongoing — now + 24 h; past once
+            completed — now − 1 h). Derived from the wall clock, so the value is
+            **illustrative** — its presence, RFC-3339-UTC shape and ordering after
+            `startTime` are the contract, not the literal.
         campaignType:
           type: string
           description: Whether the campaign is prepaid (has a contracted allotment) or postpaid.
@@ -1424,7 +1451,12 @@ components:
           description: Human-readable outcome of the management request.
           example: "CAMPAIGN PAUSED SUCCESSFULLY"
         startTime:
-          $ref: "#/components/schemas/Time"
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: >-
+            The moment the management action was acknowledged. CamaraSim stamps
+            this from the wall clock (now), so the value is **illustrative** — its
+            presence and RFC-3339-UTC shape are the contract, not the literal.
         status:
           type: string
           description: >-

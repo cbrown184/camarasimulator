@@ -770,6 +770,25 @@ Verified sub-items:
   `vendored_error_example_messages_match_the_handler` pinning the exact
   `status`/`code`/`message` bytes of both through the router so they can't drift.
   This advances the vwip audit cursor to the next API (click-to-dial).
+  **Success-example follow-up 2026-10-21 — illustrative-timestamp drift found &
+  fixed across both facets** (the device-authenticity / consent-info precedent:
+  the 2026-10-13 pass pinned only the inline *error* examples and the
+  counter-derived `sessionId`s, leaving every success-example *timestamp* frozen):
+  the 16 wall-clock-derived response timestamps split into two derivations. (1)
+  **Sponsorship-lifecycle facet** — `startSponsorship` 201, `getSessionStatus` 200,
+  `revokeSponsorship` 200 (`startTime = now`, `endTime = now + duration`); marked
+  illustrative and added `vendored_lifecycle_example_timestamps_are_illustrative`.
+  (2) **Campaign facet** — `getCampaignStatus` 200 (`activePrepaid`/
+  `completedExhausted`/`pausedPostpaid`: `startTime = now − 24 h`, `endTime = now
+  + 24 h` ongoing or `now − 1 h` completed) and `manageCampaign` 200 `paused`
+  (`startTime = now`); marked illustrative (200 `description`s, each example
+  `summary`, and the `CampaignStatus.startTime`/`.endTime` +
+  `ManageCampaignResult.startTime` schema-property `description`s) and added
+  `vendored_campaign_example_timestamps_are_illustrative` driving all four through
+  the router — pins the reproducible scalars (status/type/volumes/completionReason)
+  and asserts the window is RFC-3339-UTC, `startTime < endTime`, and ≠ the frozen
+  spec literals. Spec + `#[cfg(test)]` change only, no behaviour change, no new
+  dependency. Both facets are now pinned.
 - 🔧 click-to-dial — verified 2026-10-13: all four modelled operations
   (`createCall` `POST /calls`, the stateful `getCall` `GET /calls/{callId}`,
   `terminateCall` `DELETE /calls/{callId}`, `getRecording`
@@ -1808,6 +1827,48 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-21 — **illustrative-value class — sponsored-data vwip campaign facet: `getCampaignStatus`
+  200 (3 examples, 6 timestamps) + `manageCampaign` 200 (1 timestamp) froze wall-clock windows the
+  handlers can never reproduce; found & fixed, completing the sponsored-data success-example audit.**
+  The explicitly-named next candidate from this morning's lifecycle-facet note ("the sponsored-data
+  **campaign facet** … same illustrative class, a different (`now ± offset`) derivation, left as the
+  documented sub-step"). This is the second of the two timestamp derivations the lifecycle pass split
+  out. `campaign_status_body` (`src/apis/sponsored_data/vwip.rs:701-706`) stamps `startTime = now −
+  24 h` and `endTime = now + 24 h` (ongoing) or `now − 1 h` (completed); `manage_campaign_body`
+  (`:1033`) stamps `startTime = now`. The three `getCampaignStatus` 200 examples showed `startTime:
+  2024-05-31T00:00:00Z` with `endTime` `2024-06-02T00:00:00Z` (active/paused) or `2024-05-31T23:00:00Z`
+  (completed), and `manageCampaign`'s `paused` example showed `startTime: 2024-06-01T00:00:00Z`, all as
+  plain response values — through the real router `now` is wall-clock, so those frozen instants can
+  never reproduce (the 48 h / 23 h window spreads merely happen to match the −24 h/+24 h and −24 h/−1 h
+  derivations). Fix, **spec text + `#[cfg(test)]` only**: marked the windows illustrative — the two 200
+  `description`s (derivations spelled out), each of the four example `summary`s, and the
+  `CampaignStatus.startTime`/`.endTime` and `ManageCampaignResult.startTime` schema-property
+  `description`s (presence + RFC-3339-UTC shape + `startTime < endTime` ordering are the contract, not
+  the literal; `ManageCampaignResult.startTime` was also lifted from a bare `$ref` to the `allOf`+
+  description form the sibling fields use), mirroring the lifecycle / device-authenticity / consent-info
+  / sim-swap wording. Added `vendored_campaign_example_timestamps_are_illustrative`: drives all three
+  documented campaignIds (`…000` active/prepaid, `…010` completed/data_exhausted, `…003`
+  paused/postpaid) and the `pause` management request through the real router, pinning the reproducible
+  scalars (status/campaignType/volumes/completionReason, and postpaid's absent ceiling) and asserting
+  each window is fixed-width RFC-3339 UTC with `start < end` (true for the completed case too, since
+  −24 h < −1 h) and ≠ the frozen spec literals (guards a "corrected" frozen value and a renamed/stray
+  field). The existing `campaign_status_body_derives_facets_from_the_control_digit` and
+  `manage_campaign_body_pause_and_resume` already pin the exact derivations under an injected clock, so
+  this adds only the through-router anti-drift guard. No behaviour/response change — the handlers were
+  already correct; only the examples lacked their caveat and the campaign facet lacked a success pin.
+  Green: `cargo test` → **3148 passed, 0 failed** (+1 new test fn); `cargo build --release` ok; binary =
+  **5,487,768 bytes** (identical to the prior tip `9903d0d` — the added embedded-spec description text is
+  below the 4 KiB section-padding granularity; the new test is `#[cfg(test)]`, compiled out); no new
+  dependency. **Env note:** on arrival HEAD was detached at `9903d0d` == `origin/main` (the lifecycle
+  pass was pushed), so branched from a synced `main`. **Next pass:** sponsored-data's success examples
+  are now fully pinned across both facets; the illustrative-value class is pinned on sponsored-data as
+  on device-authenticity / consent-info / device-swap / sim-swap / device-identifier / location-* /
+  quality-on-demand / geofencing. The remaining vwip APIs with unannotated frozen timestamps in success
+  examples (the same error-only-audit gap) are the natural continuation — each to be checked for
+  handler-stamped vs echoed/request before pinning. Other long-standing drift classes (truncated
+  identifier message, generic-catalog-code messages, minted-id placeholders, stale slice docs,
+  YAML-loadability) remain clean per the last several passes. Branch
+  `agent/sponsored-data/pin-campaign-timestamps`.
 - 2026-10-21 — **illustrative-timestamp class — sponsored-data vwip sponsorship-lifecycle 200/201
   examples froze a wall-clock `startTime`/`endTime` window the handler can never reproduce; found &
   fixed (lifecycle facet), plus the missing success-example pin.** The explicitly-named next candidate

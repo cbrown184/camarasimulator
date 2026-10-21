@@ -2239,6 +2239,100 @@ mod tests {
         );
     }
 
+    /// The `getCampaignStatus` 200 examples (`activePrepaid`, `completedExhausted`,
+    /// `pausedPostpaid`) and the `manageCampaign` 200 `paused` example display frozen
+    /// `startTime`/`endTime` instants, but both handlers derive the window from the
+    /// wall clock — `campaign_status_body` stamps `startTime = now − 24 h` and
+    /// `endTime = now + 24 h` (ongoing) or `now − 1 h` (completed), and
+    /// `manage_campaign_body` stamps `startTime = now` — so the frozen literals shown
+    /// in the spec (`2024-05-31…`/`2024-06-02…` for status, `2024-06-01…` for manage)
+    /// can never reproduce through the real router. Each example is therefore marked
+    /// **illustrative** in `specs/sponsored-data/vwip/openapi.yaml`; this drives all
+    /// four through the router, pins the reproducible scalars, and asserts the window
+    /// shape/ordering while asserting the illustrative literals are not returned (the
+    /// campaign counterpart of `vendored_lifecycle_example_timestamps_are_illustrative`).
+    #[tokio::test]
+    async fn vendored_campaign_example_timestamps_are_illustrative() {
+        // The frozen instants the spec examples display.
+        const EXAMPLE_START: &str = "2024-05-31T00:00:00Z"; // all three status examples
+        const EXAMPLE_ONGOING_END: &str = "2024-06-02T00:00:00Z"; // active/paused examples
+        const EXAMPLE_COMPLETED_END: &str = "2024-05-31T23:00:00Z"; // completed example
+        const EXAMPLE_MANAGE_START: &str = "2024-06-01T00:00:00Z"; // manageCampaign `paused`
+
+        // An RFC-3339 UTC instant of the fixed `YYYY-MM-DDTHH:MM:SSZ` width the
+        // handler emits (so string ordering is chronological ordering).
+        fn assert_rfc3339_utc(v: &Value) -> String {
+            let s = v.as_str().expect("timestamp is a string");
+            assert_eq!(s.len(), 20, "{s} is not fixed-width RFC-3339 UTC");
+            assert!(s.ends_with('Z'), "{s} is not UTC (`Z`)");
+            assert_eq!(&s[10..11], "T", "{s} missing date/time `T`");
+            s.to_string()
+        }
+
+        let read_tok = mint_token(CAMPAIGN_READ_SCOPE).await;
+
+        // --- getCampaignStatus `activePrepaid` (…000, ongoing) --------------
+        let (status, _, body) =
+            get_status(Some(&read_tok), &campaign_status_url(SPONSOR, CAMPAIGN), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "active");
+        assert_eq!(body["campaignType"], "prepaid");
+        assert_eq!(body["contractedDataVolume"], 1000);
+        assert_eq!(body["usedDataVolume"], 0);
+        assert_eq!(body["remainingDataVolume"], 1000);
+        assert_eq!(body["completionReason"], "not_available");
+        let start = assert_rfc3339_utc(&body["startTime"]);
+        let end = assert_rfc3339_utc(&body["endTime"]);
+        assert!(start < end, "ongoing campaign: start must precede end ({start} !< {end})");
+        assert_ne!(start, EXAMPLE_START, "frozen example startTime reproduced");
+        assert_ne!(end, EXAMPLE_ONGOING_END, "frozen example endTime reproduced");
+
+        // --- getCampaignStatus `completedExhausted` (…010, completed) -------
+        let (status, _, body) =
+            get_status(Some(&read_tok), &campaign_status_url(SPONSOR, &campaign_tail("010")), None)
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "completed");
+        assert_eq!(body["campaignType"], "prepaid");
+        assert_eq!(body["completionReason"], "data_exhausted");
+        assert_eq!(body["usedDataVolume"], 1000);
+        assert_eq!(body["remainingDataVolume"], 0);
+        // Even a completed campaign's window is start (now − 24 h) < end (now − 1 h).
+        let start = assert_rfc3339_utc(&body["startTime"]);
+        let end = assert_rfc3339_utc(&body["endTime"]);
+        assert!(start < end, "completed campaign: start must precede end ({start} !< {end})");
+        assert_ne!(start, EXAMPLE_START, "frozen example startTime reproduced");
+        assert_ne!(end, EXAMPLE_COMPLETED_END, "frozen example endTime reproduced");
+
+        // --- getCampaignStatus `pausedPostpaid` (…003, ongoing) -------------
+        let (status, _, body) =
+            get_status(Some(&read_tok), &campaign_status_url(SPONSOR, &campaign_tail("003")), None)
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "paused");
+        assert_eq!(body["campaignType"], "postpaid");
+        assert_eq!(body["usedDataVolume"], 3);
+        assert_eq!(body["completionReason"], "not_available");
+        assert!(body.get("contractedDataVolume").is_none(), "postpaid has no contracted ceiling");
+        assert!(body.get("remainingDataVolume").is_none(), "postpaid has no remaining balance");
+        let start = assert_rfc3339_utc(&body["startTime"]);
+        let end = assert_rfc3339_utc(&body["endTime"]);
+        assert!(start < end, "ongoing campaign: start must precede end ({start} !< {end})");
+        assert_ne!(start, EXAMPLE_START, "frozen example startTime reproduced");
+        assert_ne!(end, EXAMPLE_ONGOING_END, "frozen example endTime reproduced");
+
+        // --- manageCampaign `paused` (startTime = now) ----------------------
+        let manage_tok = mint_token(CAMPAIGN_MANAGE_SCOPE).await;
+        let (status, _, body) =
+            post_url(Some(&manage_tok), MANAGE_URL, &manage_body(SPONSOR, CAMPAIGN, "pause"), None)
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "paused");
+        assert_eq!(body["requestResult"], "CAMPAIGN PAUSED SUCCESSFULLY");
+        let manage_start = assert_rfc3339_utc(&body["startTime"]);
+        assert_ne!(manage_start, EXAMPLE_MANAGE_START, "frozen example startTime reproduced");
+    }
+
     // --- getActiveSponsorships --------------------------------------------
 
     /// Build the `active-sponsorships` URL, percent-encoding the `@` in the
