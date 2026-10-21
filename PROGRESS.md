@@ -526,6 +526,21 @@ Verified sub-items:
   exactly). No drift found. Added one test pinning the vendored 400
   `invalidArgument` example message bytes (the one spec example no test guarded)
   so it can't drift from the handler.
+  - ✅ illustrative-timestamp follow-up 2026-10-21. The 2026-10-12 audit above
+    predated the vwip illustrative-timestamp sweep and only checked the `score`
+    mapping + error examples; it overlooked that the two data-bearing 200 examples
+    (`excellent`, `coreModule`) froze `scoringTime: "2025-12-01T12:00:00Z"` as a
+    plain response value while the handler stamps `now` (`vwip.rs:110`,
+    `rfc3339_utc(now_unix_secs())`), so that instant can never reproduce through
+    the router — the same illustrative-value drift pinned on device-authenticity /
+    consent-info / sponsored-data / device-data-volume. Marked the two examples
+    (summaries), the 200 `description`, and the `scoringTime` schema-property
+    description illustrative, and added `vendored_success_examples_match_the_handler`
+    pinning all three documented 200 bodies through the real router (the two
+    data-bearing bodies minus the illustrative `scoringTime`, asserted fresh UTC ≠
+    the frozen literal; the `noData` body whole). Spec text + `#[cfg(test)]` only —
+    no behaviour/response change (the handler was already correct), no new
+    dependency.
 - 🔧 network-traffic-analysis — verified 2026-10-12: the one modelled operation
   (`getTrafficAnalysis`, `GET /network-traffic-analysis/vwip/traffic-analysis`) is
   implemented and well-tested. **Spec↔code drift found and fixed:** the vendored
@@ -1827,6 +1842,40 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-21 — **illustrative-timestamp class — network-health-assessment vwip `getHealthScores`
+  200 froze `scoringTime: "2025-12-01T12:00:00Z"` in both data-bearing examples while the handler
+  stamps `now`; found & fixed, plus the missing success-example pin.** A natural continuation of the
+  vwip illustrative-timestamp sweep (device-authenticity / consent-info / sponsored-data /
+  device-data-volume): the remaining vwip APIs with unannotated frozen timestamps in success examples.
+  This API's own 2026-10-12 entry pre-dated the sweep and checked only the `score` mapping + error
+  examples. The handler (`src/apis/network_health_assessment/vwip.rs:104-112`) returns
+  `scoringTime = rfc3339_utc(now_unix_secs())` for a data-bearing score (`Value::Null` for the `…000`
+  no-data case), but the two 200 examples (`excellent` …950/NET→95.0, `coreModule` …950/NET_CORE→92.0)
+  showed `scoringTime: "2025-12-01T12:00:00Z"` as a plain response value — through the real router `now`
+  is wall-clock, so that frozen instant can never reproduce (genuine spec↔code drift, the
+  device-authenticity / sponsored-data class). Fix, **spec text + `#[cfg(test)]` only**: marked the
+  value illustrative — the 200 `description`, each of the two data-bearing example `summary`s, and the
+  `HealthInfo.scoringTime` schema-property `description` (presence + RFC-3339-UTC shape are the contract,
+  not the literal; the schema `example` kept as a format illustration). Added
+  `vendored_success_examples_match_the_handler`: drives all three documented 200 requests through the
+  real router, pinning the two data-bearing bodies as exact objects minus `scoringTime` (asserted
+  20-char UTC `…Z`, ≠ the frozen literal) and the `noData` body whole (`score`/`scoringTime` both null,
+  no timestamp to be illustrative). The existing control-plane tests already pin the exact `score`
+  derivations; this adds the through-router whole-object anti-drift guard (a renamed/stray field or a
+  "corrected" frozen value now fails). No behaviour/response change — the handler was already correct;
+  only the examples lacked their caveat and the success pin. Green: `cargo test` → **3149 passed, 0
+  failed** (+1 new test fn); `cargo build --release` ok; binary = **5,491,864 bytes** (+4,096 over the
+  prior tip `49c8c98`'s 5,487,768 — one 4 KiB section-padding step from the added embedded-spec
+  description text; the new test is `#[cfg(test)]`, compiled out); no new dependency. **Env note:** on
+  arrival HEAD was detached at `49c8c98` and a stale local `origin/main` read `4337e0b`; a `git fetch`
+  showed `origin/main` had already advanced to `49c8c98` (the sponsored-data campaign pass was pushed),
+  so branched from a synced `main`. **Next pass:** other vwip APIs still carry unannotated frozen
+  timestamps in success examples — capabilities-and-restrictions (`createdAt`/`lastModifiedAt`),
+  predictive-connectivity-data / population-density-data (`startTime`/`endTime` prediction windows),
+  network-traffic-analysis (`startDate`/`endDate`) — each to be checked for handler-stamped vs
+  echoed/request before pinning (device-visit-location's two are schema format examples only, likely no
+  drift). Other long-standing drift classes remain clean per the last several passes. Branch
+  `agent/network-health-assessment/pin-scoringtime`.
 - 2026-10-21 — **illustrative-value class — sponsored-data vwip campaign facet: `getCampaignStatus`
   200 (3 examples, 6 timestamps) + `manageCampaign` 200 (1 timestamp) froze wall-clock windows the
   handlers can never reproduce; found & fixed, completing the sponsored-data success-example audit.**

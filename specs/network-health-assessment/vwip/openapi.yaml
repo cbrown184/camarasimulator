@@ -110,6 +110,12 @@ paths:
           description: |
             The latest health score of the selected network module. `score` and
             `scoringTime` are `null` when no data is available (`…000` tail).
+
+            `scoringTime` on a data-bearing response is **illustrative**: the
+            handler stamps the current instant (`now`, UTC `Z` offset), so the
+            frozen value shown in the examples below can never reproduce through
+            the running server. Its presence and RFC-3339-UTC shape are the
+            contract, not the literal.
           headers:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
@@ -119,14 +125,18 @@ paths:
                 $ref: "#/components/schemas/HealthInfo"
               examples:
                 excellent:
-                  summary: Whole-network composite, excellent band (`…950` tail)
+                  summary: >-
+                    Whole-network composite, excellent band (`…950` tail).
+                    `scoringTime` is illustrative (handler-stamped `now`).
                   value:
                     networkId: "00000000-0000-0000-0000-000000000950"
                     netType: NET
                     score: 95.0
                     scoringTime: "2025-12-01T12:00:00Z"
                 coreModule:
-                  summary: Core module reads a little lower (`…950` tail, NET_CORE)
+                  summary: >-
+                    Core module reads a little lower (`…950` tail, NET_CORE).
+                    `scoringTime` is illustrative (handler-stamped `now`).
                   value:
                     networkId: "00000000-0000-0000-0000-000000000950"
                     netType: NET_CORE
@@ -264,7 +274,10 @@ components:
           nullable: true
           description: >-
             RFC 3339 instant the score was last calculated (UTC, `Z` offset).
-            `null` when no health data is available.
+            `null` when no health data is available. **Illustrative:** the handler
+            stamps the current instant, so the example value is a shape
+            illustration — presence and RFC-3339-UTC form are the contract, not
+            the literal.
           example: "2025-12-01T12:00:00Z"
 
     NetworkHealthError:

@@ -405,6 +405,75 @@ mod tests {
         assert_eq!(body["netType"], "NET");
     }
 
+    /// The vendored 200 examples (specs/network-health-assessment/vwip/
+    /// openapi.yaml) driven through the real router and pinned as **exact
+    /// objects**, so a renamed/stray field or a corrected-but-wrong scalar can't
+    /// slip past the field-by-field assertions above. `scoringTime` on a
+    /// data-bearing response is **illustrative**: the handler stamps `now`
+    /// (`rfc3339_utc(now_unix_secs())`, `vwip.rs:110`), so the frozen spec literal
+    /// `2025-12-01T12:00:00Z` can never reproduce — this asserts the annotation is
+    /// honest (fresh UTC, not the frozen literal), the illustrative-timestamp pin
+    /// device-authenticity / sponsored-data / device-data-volume carry. The
+    /// `noData` body carries no timestamp, so it is pinned whole.
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        const FROZEN: &str = "2025-12-01T12:00:00Z";
+
+        /// Remove `scoringTime` from a data-bearing 200 body, asserting it is a
+        /// fresh RFC-3339 UTC instant and never the frozen example literal;
+        /// return the rest for an exact-object comparison.
+        fn split_off_scoring_time(mut body: Value) -> Value {
+            let st = body
+                .as_object_mut()
+                .expect("200 body is an object")
+                .remove("scoringTime")
+                .expect("scoringTime present");
+            let st = st.as_str().expect("scoringTime is a string");
+            assert!(st.ends_with('Z'), "scoringTime is UTC: {st}");
+            assert_eq!(
+                st.len(),
+                20,
+                "scoringTime is RFC-3339 `YYYY-MM-DDThh:mm:ssZ`: {st}"
+            );
+            assert_ne!(
+                st, FROZEN,
+                "scoringTime must be the fresh wall-clock instant, not the frozen example literal"
+            );
+            body
+        }
+
+        // `excellent`: …950 / NET → 95.0.
+        let (status, _, body) = scores_ok(&format!("networkId={}&netType=NET", nid("950"))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            split_off_scoring_time(body),
+            json!({ "networkId": nid("950"), "netType": "NET", "score": 95.0 })
+        );
+
+        // `coreModule`: …950 / NET_CORE → 92.0.
+        let (status, _, body) =
+            scores_ok(&format!("networkId={}&netType=NET_CORE", nid("950"))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            split_off_scoring_time(body),
+            json!({ "networkId": nid("950"), "netType": "NET_CORE", "score": 92.0 })
+        );
+
+        // `noData`: …000 / NET → score and scoringTime both null (no illustrative
+        // timestamp; the whole body is reproducible and pinned as-is).
+        let (status, _, body) = scores_ok(&format!("networkId={}&netType=NET", nid("000"))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({
+                "networkId": nid("000"),
+                "netType": "NET",
+                "score": Value::Null,
+                "scoringTime": Value::Null,
+            })
+        );
+    }
+
     // --- Reserved-error convention -----------------------------------------
 
     #[tokio::test]
