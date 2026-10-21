@@ -398,6 +398,87 @@ mod tests {
         );
     }
 
+    /// The vendored spec's two 200 examples (`allowed` `…000`, `stolen` `…002`)
+    /// freeze `lastChecked`/`reportedDate` as literals
+    /// (`2026-08-05T10:41:38Z` / `2026-08-05T08:41:38Z`), but the handler stamps
+    /// both from the wall clock (`lastChecked` = now; `reportedDate` = now − d·1h),
+    /// so those literals can never reproduce — they are illustrative. Prior tests
+    /// only checked the status *mapping* field-by-field and that the timestamps end
+    /// in `Z`, so a stray/renamed field or a "corrected" frozen literal could slip
+    /// past. Drive both documented requests through the real router and pin each
+    /// body as an **exact object**: the reproducible scalars (`imei`,
+    /// `operationalStatus`) exactly, the exact key set, and the illustrative
+    /// timestamps asserted present/RFC-3339-UTC, ≠ the frozen spec literals, and
+    /// (for `stolen`) `reportedDate` strictly before `lastChecked` per the
+    /// `now − 2h` derivation.
+    #[tokio::test]
+    async fn vendored_success_examples_match_the_handler() {
+        // The frozen literals the spec shows purely to convey the shape.
+        const FROZEN_LAST_CHECKED: &str = "2026-08-05T10:41:38Z";
+        const FROZEN_REPORTED_DATE: &str = "2026-08-05T08:41:38Z";
+
+        // `allowed` example — `…000` tail, no reportedDate.
+        let (status, _, body) = check_ok("490154203237000").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["imei"], "490154203237000");
+        assert_eq!(body["operationalStatus"], "allowed");
+        let last_checked = body["lastChecked"].as_str().unwrap();
+        assert!(is_rfc3339_utc(last_checked), "lastChecked not RFC-3339 UTC: {last_checked}");
+        assert_ne!(last_checked, FROZEN_LAST_CHECKED, "frozen literal must not reproduce");
+        // Exact object: imei + operationalStatus + lastChecked, nothing else.
+        let keys: std::collections::BTreeSet<&str> =
+            body.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["imei", "lastChecked", "operationalStatus"].into_iter().collect(),
+            "allowed example has an unexpected field set"
+        );
+
+        // `stolen` example — `…002` tail, carries reportedDate = now − 2h.
+        let (status, _, body) = check_ok("490154203237002").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["imei"], "490154203237002");
+        assert_eq!(body["operationalStatus"], "stolen");
+        let last_checked = body["lastChecked"].as_str().unwrap();
+        let reported_date = body["reportedDate"].as_str().unwrap();
+        assert!(is_rfc3339_utc(last_checked), "lastChecked not RFC-3339 UTC: {last_checked}");
+        assert!(is_rfc3339_utc(reported_date), "reportedDate not RFC-3339 UTC: {reported_date}");
+        assert_ne!(last_checked, FROZEN_LAST_CHECKED, "frozen lastChecked must not reproduce");
+        assert_ne!(reported_date, FROZEN_REPORTED_DATE, "frozen reportedDate must not reproduce");
+        // reportedDate = now − 2h, so it is strictly before lastChecked. The fixed
+        // "YYYY-MM-DDTHH:MM:SSZ" shape sorts chronologically as a string.
+        assert!(
+            reported_date < last_checked,
+            "reportedDate {reported_date} must precede lastChecked {last_checked} (now − 2h)"
+        );
+        let keys: std::collections::BTreeSet<&str> =
+            body.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["imei", "lastChecked", "operationalStatus", "reportedDate"]
+                .into_iter()
+                .collect(),
+            "stolen example has an unexpected field set"
+        );
+    }
+
+    /// A string is RFC-3339 UTC in the handler's fixed `YYYY-MM-DDTHH:MM:SSZ`
+    /// second-precision shape: 20 bytes, trailing `Z`, digits and separators where
+    /// the format requires them.
+    fn is_rfc3339_utc(s: &str) -> bool {
+        let b = s.as_bytes();
+        b.len() == 20
+            && b[4] == b'-'
+            && b[7] == b'-'
+            && b[10] == b'T'
+            && b[13] == b':'
+            && b[16] == b':'
+            && b[19] == b'Z'
+            && [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18]
+                .iter()
+                .all(|&i| b[i].is_ascii_digit())
+    }
+
     // --- Validation & auth -------------------------------------------------
 
     #[tokio::test]

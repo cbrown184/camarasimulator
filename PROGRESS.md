@@ -647,6 +647,20 @@ Verified sub-items:
   added `vendored_error_example_messages_match_the_handler` pinning the exact
   `status`/`code`/`message` bytes through the router so they can't silently drift
   (same drift class the media-streaming-rate / subscription-status passes closed).
+  **Success-example follow-up 2026-10-21 — illustrative-timestamp drift found &
+  fixed** (the device-swap v1 precedent: an error-only audit that claimed "no
+  drift" but left the *success* examples unchecked): the two 200 examples
+  (`allowed` `…000`, `stolen` `…002`) and the `lastChecked`/`reportedDate` schema
+  examples froze `2026-08-05T10:41:38Z` / `…08:41:38Z` as plain response values,
+  but the handler stamps `lastChecked` = now and `reportedDate` = `now − d h`
+  (both wall-clock), so those literals can never reproduce. Marked all four
+  **illustrative** with a derivation note (their presence + RFC-3339-UTC shape are
+  the contract; the `stolen` pair is shown exactly 2h apart to reflect the `…002`
+  derivation) and added `vendored_success_examples_match_the_handler` driving both
+  documented requests through the router — pins `imei`/`operationalStatus` and the
+  exact key set, asserts the timestamps are RFC-3339 UTC, ≠ the frozen literals,
+  and (stolen) `reportedDate` strictly precedes `lastChecked`. Spec +
+  `#[cfg(test)]` change only, no behaviour change, no new dependency.
 - 🔧 session-insights — verified 2026-10-13: all five modelled operations
   (`createSession`, `getSession`, `deleteSession`, `retrieveSessionsByDevice`,
   `sendSessionMetrics`) are implemented (`src/apis/session_insights/vwip.rs` +
@@ -1780,6 +1794,42 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-21 — **illustrative-timestamp class — device-authenticity vwip `allowed`/`stolen` 200 examples
+  (and the `lastChecked`/`reportedDate` schema examples) froze two wall-clock timestamps the handler can
+  never return; found & fixed, plus the missing success-example pin.** Follow-up to this morning's
+  device-swap v1 pass, same drift class and same precedent: an *error-only* audit (device-authenticity's
+  own 2026-10-13 pass added `vendored_error_example_messages_match_the_handler` and recorded "No spec↔code
+  drift found", explicitly noting the 200 mapping was "already pinned by existing status tests") left the
+  *success* example **timestamp values** unchecked. The two 200 examples (`specs/device-authenticity/vwip/openapi.yaml`:
+  `allowed` `…000`, `stolen` `…002`) and the `ImeiStatusResponse` `lastChecked`/`reportedDate` schema
+  examples showed `2026-08-05T10:41:38Z` / `2026-08-05T08:41:38Z` as plain response values, but the handler
+  (`src/apis/device_authenticity/vwip.rs:148,152`) stamps `lastChecked = rfc3339_utc(now)` and, for a
+  non-`allowed` status, `reportedDate = rfc3339_utc(now − d·3600)` (`d` = IMEI trailing three digits) — both
+  wall-clock dependent, so those frozen epochs can never reproduce (genuine spec↔code drift; the `stolen`
+  pair being exactly 2h apart just happens to match the `…002` → now−2h derivation). Fix, **spec text +
+  `#[cfg(test)]` only**: marked all four example values **illustrative** with a derivation note (the 200
+  response `description`, each example `summary`, and the two schema-property `description`s — their presence
+  and RFC-3339-UTC shape are the contract, not the value), mirroring the device-swap / device-identifier /
+  connected-network-type wording, and added `vendored_success_examples_match_the_handler` — drives `…000`
+  (allowed, no reportedDate) and `…002` (stolen, with reportedDate) through the real router, pins
+  `imei`/`operationalStatus` and the exact key set as an object, and asserts both timestamps are RFC-3339
+  UTC, ≠ the frozen spec literals, and (stolen) `reportedDate` strictly precedes `lastChecked` (the now−2h
+  derivation; the fixed `YYYY-MM-DDTHH:MM:SSZ` shape sorts chronologically as a string, so the check is
+  robust to a ±1s clock tick between the two `now` reads). No behaviour/response change — the handler was
+  already correct; only the four illustrative examples lacked their caveat and the success pin. Green:
+  `cargo test` → **3145 passed, 0 failed** (+1 new test fn); `cargo build --release` ok; binary =
+  **5,483,672 bytes** (identical to the prior tip — the added embedded-spec description text is below the
+  4 KiB section-padding granularity; the new test is `#[cfg(test)]`, compiled out of the release binary);
+  no new dependency. **Env note:** on arrival the local `origin/main` ref was stale at `4337e0b`; a fetch
+  fast-forwarded it to `fad99e7` (the device-swap pass was pushed), so branched from a synced `main`.
+  **Next pass:** the illustrative-timestamp class is now pinned on device-authenticity as it is on
+  device-swap / sim-swap / device-identifier / connected-network-type / quality-on-demand / location-* /
+  geofencing. The remaining vwip APIs with unannotated frozen timestamps in *success* examples (the
+  same error-only-audit gap) are the natural continuation — e.g. consent-info (`expirationDate`),
+  sponsored-data (17 timestamps) — each to be checked for handler-stamped vs echoed/request before
+  pinning. The other long-standing drift classes (truncated identifier message, generic-catalog-code
+  messages, `overpassed` 429, minted-id placeholders, stale slice docs, YAML-loadability) remain clean
+  per the last several passes. Branch `agent/device-authenticity/pin-success-examples`.
 - 2026-10-21 — **illustrative-timestamp class — device-swap v1 `/retrieve-date` `recentSwap` 200 example
   presented a frozen `latestDeviceChange` literal the wall-clock handler can never return; found & fixed,
   plus the missing success-example pin.** Per-API audit of device-swap v1 (backlog item 2, the fourth

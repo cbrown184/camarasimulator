@@ -92,7 +92,14 @@ paths:
               $ref: "#/components/schemas/RequestBody"
       responses:
         "200":
-          description: The register / operational status of the queried IMEI.
+          description: >-
+            The register / operational status of the queried IMEI. The `imei` and
+            `operationalStatus` are reproducible from the request, but
+            `lastChecked` and `reportedDate` are **illustrative**: the handler
+            stamps `lastChecked` as the moment of the call and `reportedDate` as
+            `now − d hours` (`d` = the IMEI's trailing three digits), both
+            wall-clock dependent, so the frozen literals below can never reproduce
+            — their presence and RFC-3339 UTC shape are the contract, not the value.
           headers:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
@@ -102,13 +109,19 @@ paths:
                 $ref: "#/components/schemas/ImeiStatusResponse"
               examples:
                 allowed:
-                  summary: Device in good standing (happy-path default, `…000` tail)
+                  summary: >-
+                    Device in good standing (happy-path default, `…000` tail). The
+                    `lastChecked` value is illustrative (stamped at call time).
                   value:
                     imei: "490154203237000"
                     operationalStatus: allowed
                     lastChecked: "2026-08-05T10:41:38Z"
                 stolen:
-                  summary: Reported stolen (`…002` tail) — carries a reportedDate
+                  summary: >-
+                    Reported stolen (`…002` tail) — carries a reportedDate. Both
+                    `lastChecked` (= call time) and `reportedDate` (= `now − 2h`,
+                    matching the `…002` tail) are illustrative; here they are shown
+                    exactly 2h apart to reflect the derivation.
                   value:
                     imei: "490154203237002"
                     operationalStatus: stolen
@@ -252,14 +265,18 @@ components:
           description: >-
             Date and time the information was last confirmed correct by the fraud
             check service (RFC 3339 with time zone). Always the moment of the call
-            in the simulator.
+            in the simulator — so the example value is **illustrative** (wall-clock
+            dependent; it cannot reproduce), only its presence and shape are fixed.
           example: "2026-08-05T10:41:38Z"
         reportedDate:
           type: string
           format: date-time
           description: >-
             Date/time the IMEI was reported with its current adverse status
-            (RFC 3339 with time zone). Present only for a non-`allowed` status.
+            (RFC 3339 with time zone). Present only for a non-`allowed` status. The
+            simulator derives it as `now − d hours` (`d` = the IMEI's trailing three
+            digits), so the example value is **illustrative** (wall-clock dependent;
+            it cannot reproduce), only its presence and shape are fixed.
           example: "2026-08-05T08:41:38Z"
 
     DeviceAuthenticityError:
