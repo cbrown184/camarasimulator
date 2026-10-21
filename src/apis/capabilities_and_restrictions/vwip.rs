@@ -711,6 +711,19 @@ mod tests {
         assert_eq!(d["name"], json!("camarasim-capability-set"));
         assert_eq!(d["version"], json!("1.0.0"));
         assert_eq!(d["mappingVersion"], json!("1.0.0"));
+        // `createdAt`/`lastModifiedAt` are illustrative: the handler stamps both
+        // with the current instant (`now`, wall-clock, equal), so the frozen
+        // literal in the vendored example can never reproduce. Pin the contract
+        // (present, equal, 20-char RFC-3339 UTC `…Z`) and assert they are NOT the
+        // frozen literal, so a "corrected"-back-to-a-literal edit now fails.
+        const FROZEN: &str = "2025-05-09T14:25:38Z";
+        for key in ["createdAt", "lastModifiedAt"] {
+            let ts = d[key].as_str().unwrap_or_else(|| panic!("{key} present"));
+            assert_eq!(ts.len(), 20, "{key} is a 20-char instant");
+            assert!(ts.ends_with('Z'), "{key} is UTC");
+            assert_ne!(ts, FROZEN, "{key} is the live instant, not the frozen example literal");
+        }
+        assert_eq!(d["createdAt"], d["lastModifiedAt"], "both stamped with the same `now`");
         // The documented, deterministic active bitmap.
         assert_eq!(d["camaraCapabilitiesBitmap"], json!(4));
         // Echoed context.

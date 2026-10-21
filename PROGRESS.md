@@ -1055,6 +1055,12 @@ Verified sub-items:
   (dedicated-network-profiles). Spec + `#[cfg(test)]` change (no
   behaviour/response change — the handler was already correct; only the one
   success-example bitmap was wrong); no new dependency.
+  **Follow-up 2026-10-21 (illustrative-timestamp sweep):** the 2026-10-13 audit
+  pre-dated the timestamp sweep and left the 201 `info` example's frozen
+  `createdAt`/`lastModifiedAt` (`2025-05-09T14:25:38Z`) unannotated though the
+  handler stamps both with `now` (wall-clock); marked illustrative + extended the
+  existing success pin to assert they are live, equal, 20-char UTC `…Z` and ≠ the
+  frozen literal. See the scan journal.
 - 🔧 dedicated-network-profiles — verified 2026-10-13: both modelled operations
   (`readNetworkProfiles`, `GET /profiles`; `readNetworkProfile`,
   `GET /profiles/{profileId}`) are implemented
@@ -1842,6 +1848,37 @@ Respect phase order. Preferred next work:
 
 ## Scan journal
 
+- 2026-10-21 — **illustrative-timestamp class — capabilities-and-restrictions vwip
+  `postServiceCapability` 201 `info` example froze `createdAt`/`lastModifiedAt`
+  (`2025-05-09T14:25:38Z`) while the handler stamps both with `now`; found & fixed,
+  plus the success-example pin extended.** The explicitly-named first candidate from this
+  morning's network-health-assessment "Next pass" note (vwip APIs still carrying
+  unannotated frozen timestamps in success examples). This API's own 2026-10-13 entry
+  pre-dated the timestamp sweep and checked only the `camaraCapabilitiesBitmap` derivation
+  + the two inline 400 error examples. `capability_detail`
+  (`src/apis/capabilities_and_restrictions/vwip.rs:247,251-252`) sets `createdAt` and
+  `lastModifiedAt` to the same `now = rfc3339_utc(now_unix_secs())` on every detail, but the
+  201 `info` example showed both as the plain literal `2025-05-09T14:25:38Z` — through the
+  real router `now` is wall-clock, so that frozen instant can never reproduce (genuine
+  spec↔code drift, the network-health-assessment / device-authenticity / sponsored-data
+  class). Fix, **spec text + `#[cfg(test)]` only**: marked the values illustrative — the 201
+  `description`, the `info` example `summary`, an inline comment on the two example lines, and
+  the `CapabilitySetBitmap.createdAt`/`.lastModifiedAt` schema-property `description`s
+  (presence + equal RFC-3339-UTC shape are the contract, not the literal). Extended the
+  existing `vendored_success_example_matches_the_handler` (did not add a new fn): it now
+  asserts both timestamps are present, 20-char UTC `…Z`, equal to each other, and ≠ the frozen
+  example literal, so a "corrected"-back-to-a-literal edit now fails. No behaviour/response
+  change — the handler was already correct; only the examples/schema lacked the caveat. Green:
+  `cargo test` → **3149 passed, 0 failed** (no new test fn; an existing pin extended);
+  `cargo build --release` ok; binary = **5,491,864 bytes** (unchanged from the prior tip
+  `e516c89` — the added spec description text stayed within the existing section padding; the
+  test change is `#[cfg(test)]`, compiled out); no new dependency. Branch
+  `agent/capabilities-and-restrictions/pin-timestamps`. **Next pass:** the remaining
+  explicitly-named vwip timestamp candidates — predictive-connectivity-data /
+  population-density-data (`startTime`/`endTime` prediction windows) and
+  network-traffic-analysis (`startDate`/`endDate`) — each to be checked for handler-stamped vs
+  echoed/request before pinning (device-visit-location's two are schema format examples only,
+  likely no drift). Other long-standing drift classes remain clean per the last several passes.
 - 2026-10-21 — **illustrative-timestamp class — network-health-assessment vwip `getHealthScores`
   200 froze `scoringTime: "2025-12-01T12:00:00Z"` in both data-bearing examples while the handler
   stamps `now`; found & fixed, plus the missing success-example pin.** A natural continuation of the

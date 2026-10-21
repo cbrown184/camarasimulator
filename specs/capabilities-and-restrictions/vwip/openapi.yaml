@@ -105,7 +105,14 @@ paths:
                         - "https://github.com/camaraproject/QualityOnDemand/blob/r2.2/code/API_definitions/quality-on-demand.yaml"
       responses:
         "201":
-          description: Tailored capability info with the current restriction mapping.
+          description: |
+            Tailored capability info with the current restriction mapping.
+
+            Each detail's `createdAt`/`lastModifiedAt` are **illustrative**:
+            CamaraSim stamps both with the current instant (`now`, wall-clock),
+            so the frozen literal in the example below can never reproduce
+            through the router. Their presence as equal RFC-3339 UTC instants is
+            the contract, not the specific value.
           headers:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
@@ -115,11 +122,16 @@ paths:
                 $ref: "#/components/schemas/CapabilityInfo"
               examples:
                 info:
-                  summary: One capability detail per query
+                  summary: >-
+                    One capability detail per query (createdAt/lastModifiedAt
+                    illustrative — the handler stamps the current instant)
                   value:
                     details:
                       - name: camarasim-capability-set
                         version: "1.0.0"
+                        # Illustrative: handler stamps both with `now` (wall-clock,
+                        # equal), so this frozen literal never reproduces; presence +
+                        # RFC-3339-UTC shape are the contract, not the value.
                         createdAt: "2025-05-09T14:25:38Z"
                         lastModifiedAt: "2025-05-09T14:25:38Z"
                         mappingVersion: "1.0.0"
@@ -379,9 +391,19 @@ components:
             createdAt:
               type: string
               format: date-time
+              description: >-
+                When the capability set was created. Illustrative in CamaraSim:
+                stamped with the current instant (`now`, wall-clock) on every
+                response — presence + RFC-3339-UTC shape are the contract, not
+                the value.
             lastModifiedAt:
               type: string
               format: date-time
+              description: >-
+                When the capability set was last modified. Illustrative in
+                CamaraSim: stamped with the current instant (`now`), equal to
+                `createdAt` — presence + RFC-3339-UTC shape are the contract,
+                not the value.
             bitmapCapabilities:
               type: object
               description: Map of stringified bit position (`^[0-9]+$`) → restriction set.
